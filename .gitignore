@@ -1,0 +1,50 @@
+build/
+out/
+.vs/
+CMakeFiles/
+Testing/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.exe
+*.obj
+*.pdb
+*.dll
+*.ilk
+*.lib
+*.exp
+*.log
+*.ninja
+*.user
+__tmp_*
+tests/__tmp_*.cpp
+
+# .NET / WinForms
+**/bin/
+**/obj/
+
+# IDE
+.vscode/
+.idea/
+
+# Release packages
+dist/
+publish/
+*.zip
+*.rar
+*.7z
+
+# Local settings and temporary files
+settings.json
+*.tmp
+*.temp
+*.bak
+
+# Generated output directories
+rtl_test_outputs*/
+*_outputs/
+
+
+
+
+
