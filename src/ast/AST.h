@@ -184,6 +184,7 @@ struct Stmt {
     std::string decl_name;
     std::optional<ExprPtr> decl_init;
     std::vector<ExprPtr> decl_init_args; // constructor/aggregate init args, in source order
+    bool decl_default_constructed = false; // true when Clang saw an implicit C++ default construction
 
     // If
     ExprPtr if_cond;

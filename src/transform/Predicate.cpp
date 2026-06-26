@@ -256,7 +256,7 @@ static std::vector<ExprPtr> computeBlockGuards(const SSAProgram& ssa) {
 // For N operands: nested ite chain.
 static ExprPtr phiToIte(const PhiNode& phi,
                         const std::vector<ExprPtr>& block_guards) {
-    if (phi.operands.empty()) return make_literal("0");
+    if (phi.operands.empty()) return nullptr;
     if (phi.operands.size() == 1) {
         return make_var(phi.operands[0].second.str(), phi.type);
     }
@@ -274,6 +274,22 @@ static ExprPtr phiToIte(const PhiNode& phi,
     return result;
 }
 
+static ExprPtr phiIncomingGuard(const PhiNode& phi,
+                                const std::vector<ExprPtr>& block_guards) {
+    ExprPtr guard;
+    for (const auto& [pred_block, value] : phi.operands) {
+        (void)value;
+        if (pred_block < 0 ||
+            pred_block >= static_cast<BlockId>(block_guards.size())) {
+            continue;
+        }
+        guard = guard
+            ? make_or_guard(std::move(guard), block_guards[pred_block])
+            : block_guards[pred_block];
+    }
+    return guard;
+}
+
 PredicateProgram predicate(const SSAProgram& ssa) {
     PredicateProgram prog;
     prog.symbols = ssa.var_types;
@@ -288,10 +304,13 @@ PredicateProgram predicate(const SSAProgram& ssa) {
 
         // Convert phi nodes to assignments with ite
         for (auto& phi : block.phis) {
+            auto value = phiToIte(phi, guards);
+            if (!value) continue;
             GuardedAssign ga;
-            ga.guard = block_guard;
+            ga.guard = phiIncomingGuard(phi, guards);
+            if (!ga.guard) ga.guard = block_guard;
             ga.target = make_var(phi.result.str(), phi.type);
-            ga.value = phiToIte(phi, guards);
+            ga.value = std::move(value);
             ga.type = phi.type;
             prog.assignments.push_back(ga);
         }

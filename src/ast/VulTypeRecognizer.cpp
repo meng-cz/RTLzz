@@ -31,18 +31,23 @@ std::string stripSpaces(std::string s) {
 
 std::optional<int> parseTemplateWidth(const std::string& text, const std::string& token) {
     std::string compact = stripSpaces(text);
-    auto pos = compact.find(token + "<");
-    if (pos == std::string::npos) return std::nullopt;
-    auto begin = pos + token.size() + 1;
-    auto end = compact.find('>', begin);
-    if (end == std::string::npos || end <= begin) return std::nullopt;
-    std::string value = compact.substr(begin, end - begin);
-    if (value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char c) {
-            return std::isdigit(c);
-        })) {
-        return std::nullopt;
+    const std::string prefix = token + "<";
+    size_t search_from = 0;
+    while (search_from < compact.size()) {
+        auto pos = compact.find(prefix, search_from);
+        if (pos == std::string::npos) break;
+        auto begin = pos + prefix.size();
+        auto end = compact.find('>', begin);
+        if (end == std::string::npos) break;
+        std::string value = compact.substr(begin, end - begin);
+        if (!value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                return std::isdigit(c);
+            })) {
+            return std::stoi(value);
+        }
+        search_from = end + 1;
     }
-    return std::stoi(value);
+    return std::nullopt;
 }
 
 std::optional<int> parseArrayDimAfterComma(const std::string& text) {
@@ -87,6 +92,12 @@ std::string parseStdArrayElementText(const std::string& text) {
 
 std::optional<TypeInfo> recognizeBuiltinName(const std::string& spelling) {
     std::string n = stripSpaces(spelling);
+    auto strip_prefix = [&](const std::string& prefix) {
+        while (n.rfind(prefix, 0) == 0) n.erase(0, prefix.size());
+    };
+    strip_prefix("const");
+    strip_prefix("volatile");
+    strip_prefix("const");
     TypeInfo t;
     auto builtin = [&](std::string name, int width, bool sign) {
         t.name = std::move(name);
@@ -108,6 +119,11 @@ std::optional<TypeInfo> recognizeBuiltinName(const std::string& spelling) {
     if (n == "int64_t" || n == "std::int64_t") return builtin("int64_t", 64, true);
     if (n == "unsignedint") return builtin("unsigned int", 32, false);
     if (n == "int") return builtin("int", 32, true);
+    if (n == "unsignedshort" || n == "unsignedshortint") return builtin("unsigned short", 16, false);
+    if (n == "short" || n == "shortint" || n == "signedshort" ||
+        n == "signedshortint") return builtin("short", 16, true);
+    if (n == "unsignedlong") return builtin("unsigned long", static_cast<int>(sizeof(unsigned long) * 8), false);
+    if (n == "long" || n == "signedlong") return builtin("long", static_cast<int>(sizeof(long) * 8), true);
     if (n == "unsignedlonglong") return builtin("unsigned long long", 64, false);
     if (n == "longlong") return builtin("long long", 64, true);
     return std::nullopt;
@@ -186,7 +202,10 @@ std::optional<TypeInfo> recognizeBuiltinFixedWidth(CXType type) {
     if (auto exact = recognizeBuiltinName(canonical)) return exact;
 
     TypeInfo t;
-    switch (type.kind) {
+    CXType canonical_type = clang_getCanonicalType(type);
+    CXTypeKind kind = canonical_type.kind;
+    int canonical_width = static_cast<int>(clang_Type_getSizeOf(canonical_type)) * 8;
+    switch (kind) {
     case CXType_Bool:
         return make_hw_type("bool", 1, false);
     case CXType_UChar:
@@ -197,11 +216,29 @@ std::optional<TypeInfo> recognizeBuiltinFixedWidth(CXType type) {
     case CXType_Char_S:
         t = TypeInfo{"signed char", 8, true, true, "builtin"};
         return t;
+    case CXType_UShort:
+        t = TypeInfo{"unsigned short", canonical_width > 0 ? canonical_width : 16,
+                     false, true, "builtin"};
+        return t;
+    case CXType_Short:
+        t = TypeInfo{"short", canonical_width > 0 ? canonical_width : 16,
+                     true, true, "builtin"};
+        return t;
     case CXType_UInt:
-        t = TypeInfo{"unsigned int", 32, false, true, "builtin"};
+        t = TypeInfo{"unsigned int", canonical_width > 0 ? canonical_width : 32,
+                     false, true, "builtin"};
         return t;
     case CXType_Int:
-        t = TypeInfo{"int", 32, true, true, "builtin"};
+        t = TypeInfo{"int", canonical_width > 0 ? canonical_width : 32,
+                     true, true, "builtin"};
+        return t;
+    case CXType_ULong:
+        t = TypeInfo{"unsigned long", canonical_width > 0 ? canonical_width : 32,
+                     false, true, "builtin"};
+        return t;
+    case CXType_Long:
+        t = TypeInfo{"long", canonical_width > 0 ? canonical_width : 32,
+                     true, true, "builtin"};
         return t;
     case CXType_ULongLong:
         t = TypeInfo{"unsigned long long", 64, false, true, "builtin"};

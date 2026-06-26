@@ -3,6 +3,7 @@
 #include <functional>
 #include <queue>
 #include <set>
+#include <sstream>
 #include <stack>
 
 namespace pred {
@@ -112,8 +113,10 @@ static void collectDefs(const CFG& cfg, VarDefs& defs) {
         for (auto& s : bb->stmts) {
             if (!s) continue;
             if (s->kind == StmtKind::Decl) {
-                defs.def_blocks[s->decl_name].insert(bb->id);
-                defs.types[s->decl_name] = s->decl_type;
+                if (s->decl_init.has_value()) {
+                    defs.def_blocks[s->decl_name].insert(bb->id);
+                    defs.types[s->decl_name] = s->decl_type;
+                }
             } else if (s->kind == StmtKind::Assign) {
                 if (s->assign_target && s->assign_target->kind == ExprKind::VarRef) {
                     defs.def_blocks[s->assign_target->var_name].insert(bb->id);
@@ -161,6 +164,8 @@ struct RenameState {
     std::unordered_map<std::string, int> counter;
     std::set<std::string> allowed_symbols;
     std::string error;
+    std::string context;
+    std::vector<std::string> expr_stack;
 
     int newVersion(const std::string& var) {
         int v = counter[var]++;
@@ -178,18 +183,57 @@ struct RenameState {
     }
 };
 
+static std::string exprLabel(const ExprPtr& e) {
+    if (!e) return "null";
+    switch (e->kind) {
+    case ExprKind::VarRef: return "VarRef(" + e->var_name + ")";
+    case ExprKind::BinaryOp: return "BinaryOp(" + e->op + ")";
+    case ExprKind::UnaryOp: return "UnaryOp(" + e->op + ")";
+    case ExprKind::FieldAccess: return "FieldAccess(" + e->field_name + ")";
+    case ExprKind::Call: return "Call(" + e->callee + ")";
+    case ExprKind::ArrayAccess: return "ArrayAccess";
+    case ExprKind::Cast: return "Cast";
+    case ExprKind::Ternary: return "Ternary";
+    case ExprKind::Slice: return "Slice";
+    case ExprKind::BitSelect: return "BitSelect";
+    case ExprKind::WriteSlice: return "WriteSlice";
+    case ExprKind::WriteBit: return "WriteBit";
+    case ExprKind::Concat: return "Concat";
+    case ExprKind::Repeat: return "Repeat";
+    case ExprKind::ReduceOr: return "ReduceOr";
+    case ExprKind::ReduceAnd: return "ReduceAnd";
+    case ExprKind::ReduceXor: return "ReduceXor";
+    default: return "Expr";
+    }
+}
+
+static std::string exprStackString(const RenameState& state) {
+    std::ostringstream os;
+    for (size_t i = 0; i < state.expr_stack.size(); ++i) {
+        if (i) os << " -> ";
+        os << state.expr_stack[i];
+    }
+    return os.str();
+}
+
 static ExprPtr renameExprUses(const ExprPtr& e, RenameState& state) {
     if (!e) return nullptr;
     if (!state.error.empty()) return nullptr;
+    state.expr_stack.push_back(exprLabel(e));
 
     if (e->kind == ExprKind::VarRef) {
         auto result = std::make_shared<Expr>(*e);
         int ver = state.currentVersion(e->var_name);
         if (ver < 0) {
             state.error = "SSA read before definition for variable '" + e->var_name + "'";
+            if (!state.context.empty()) state.error += " while renaming " + state.context;
+            auto stack = exprStackString(state);
+            if (!stack.empty()) state.error += " in " + stack;
+            state.expr_stack.pop_back();
             return result;
         }
         result->var_name = e->var_name + "_" + std::to_string(ver);
+        state.expr_stack.pop_back();
         return result;
     }
 
@@ -212,6 +256,7 @@ static ExprPtr renameExprUses(const ExprPtr& e, RenameState& state) {
     for (auto& part : result->parts) {
         part = renameExprUses(part, state);
     }
+    state.expr_stack.pop_back();
     return result;
 }
 
@@ -266,21 +311,28 @@ struct RenameContext {
             auto renamed = std::make_shared<Stmt>(*s);
 
             if (s->kind == StmtKind::Assign) {
+                state.context = "assignment value";
                 renamed->assign_value = renameExprUses(s->assign_value, state);
+                state.context = "assignment target";
                 renamed->assign_target = renameExprDef(s->assign_target, state);
+                state.context.clear();
                 if (s->assign_target && s->assign_target->kind == ExprKind::VarRef) {
                     pushed.push_back({s->assign_target->var_name, 1});
                 }
             } else if (s->kind == StmtKind::Decl) {
                 if (s->decl_init.has_value()) {
+                    state.context = "declaration initializer for '" + s->decl_name + "'";
                     renamed->decl_init = renameExprUses(s->decl_init.value(), state);
+                    state.context.clear();
+                    state.newVersion(s->decl_name);
+                    pushed.push_back({s->decl_name, 1});
+                    renamed->decl_name = s->decl_name + "_" + std::to_string(
+                        state.currentVersion(s->decl_name));
                 }
-                state.newVersion(s->decl_name);
-                pushed.push_back({s->decl_name, 1});
-                renamed->decl_name = s->decl_name + "_" + std::to_string(
-                    state.currentVersion(s->decl_name));
             } else if (s->kind == StmtKind::ExprStmt) {
+                state.context = "expression statement";
                 renamed->expr_stmt = renameExprUses(s->expr_stmt, state);
+                state.context.clear();
             }
 
             ssab.stmts.push_back(renamed);
@@ -348,6 +400,7 @@ SSAProgram buildSSA(const CFG& cfg,
             phi.result.base_name = var;
             phi.result.version = 0;
             if (defs.types.count(var)) phi.type = defs.types[var];
+            phi.expected_predecessors = cfg.blocks[block]->predecessors.size();
             program.blocks[block].phis.push_back(phi);
         }
     }

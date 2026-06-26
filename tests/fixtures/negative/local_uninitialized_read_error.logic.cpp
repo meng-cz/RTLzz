@@ -1,9 +1,9 @@
-#include <uint.hpp>
+#include <cstdint>
 
-void hls_main(bool sel, Int<8>& out) {
-    Int<8> tmp;
+void hls_main(bool sel, uint8_t& out) {
+    uint8_t tmp;
     if (sel) {
-        tmp = Int<8>(1);
+        tmp = 1;
     }
     out = tmp;
 }

@@ -36,6 +36,11 @@ static bool parseVulWidthName(const std::string& name,
     text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) {
         return std::isspace(c);
     }), text.end());
+    while (!text.empty() &&
+           (text.back() == 'u' || text.back() == 'U' ||
+            text.back() == 'l' || text.back() == 'L')) {
+        text.pop_back();
+    }
     if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char c) {
             return std::isdigit(c);
         })) {
@@ -43,6 +48,99 @@ static bool parseVulWidthName(const std::string& name,
     }
     width = std::stoi(text);
     return true;
+}
+
+static void markSignedViewIfCursorType(ExprPtr& expr, CXCursor cursor) {
+    if (!expr) return;
+    std::string spelling = cxToStr(clang_getTypeSpelling(clang_getCursorType(cursor)));
+    if (spelling.find("IntSignedView") == std::string::npos) return;
+    int width = expr->type.width;
+    int parsed_width = 0;
+    if (parseVulWidthName(spelling, "IntSignedView", parsed_width) && parsed_width > 0) {
+        width = parsed_width;
+    }
+    expr->type.is_signed = true;
+    expr->type.is_hw_int = true;
+    expr->type.hw_kind = "signed_view";
+    if (width > 0) {
+        expr->type.width = width;
+        expr->type.name = "IntSignedView<" + std::to_string(width) + ">";
+    }
+}
+
+static bool cursorTypeMentions(CXCursor cursor, const std::string& token) {
+    std::string spelling = cxToStr(clang_getTypeSpelling(clang_getCursorType(cursor)));
+    if (spelling.find(token) != std::string::npos) return true;
+    CXCursor referenced = clang_getCursorReferenced(cursor);
+    if (!clang_Cursor_isNull(referenced)) {
+        spelling = cxToStr(clang_getTypeSpelling(clang_getCursorType(referenced)));
+        if (spelling.find(token) != std::string::npos) return true;
+    }
+    return false;
+}
+
+static bool cursorMentionsToken(CXCursor cursor, const std::string& token, int depth = 0) {
+    if (depth > 6) return false;
+    if (cursorTypeMentions(cursor, token)) return true;
+    if (cxToStr(clang_getCursorSpelling(cursor)).find(token) != std::string::npos) return true;
+    if (cxToStr(clang_getCursorDisplayName(cursor)).find(token) != std::string::npos) return true;
+    bool found = false;
+    struct State {
+        const std::string* token;
+        int depth;
+        bool* found;
+    } state{&token, depth, &found};
+    clang_visitChildren(cursor, [](CXCursor c, CXCursor, CXClientData data) {
+        auto* state = static_cast<State*>(data);
+        if (cursorMentionsToken(c, *state->token, state->depth + 1)) {
+            *state->found = true;
+            return CXChildVisit_Break;
+        }
+        return CXChildVisit_Continue;
+    }, &state);
+    return found;
+}
+
+static void forceSignedView(ExprPtr& expr) {
+    if (!expr) return;
+    int width = expr->type.width;
+    if (width <= 0 && expr->kind == ExprKind::Cast) width = expr->cast_type.width;
+    if (width <= 0) return;
+    TypeInfo signed_type = expr->type;
+    signed_type.width = width;
+    signed_type.is_signed = true;
+    signed_type.is_hw_int = true;
+    signed_type.hw_kind = "signed_view";
+    signed_type.name = "IntSignedView<" + std::to_string(width) + ">";
+    expr->type = signed_type;
+    if (expr->kind == ExprKind::Cast) {
+        expr->cast_type = signed_type;
+    } else if (expr->kind == ExprKind::Trunc ||
+               expr->kind == ExprKind::ZExt ||
+               expr->kind == ExprKind::SExt) {
+        expr->type = signed_type;
+    }
+}
+
+static bool isSignedViewMemberName(const std::string& name) {
+    return name == "sint" || name == "_sint";
+}
+
+static ExprPtr unwrapSignedViewMemberAccess(ExprPtr expr) {
+    while (expr && expr->kind == ExprKind::FieldAccess &&
+           isSignedViewMemberName(expr->field_name) && expr->struct_base) {
+        expr = expr->struct_base;
+    }
+    return expr;
+}
+
+static void markSignedViewIfCursorMentions(ExprPtr& expr, CXCursor cursor) {
+    expr = unwrapSignedViewMemberAccess(expr);
+    markSignedViewIfCursorType(expr, cursor);
+    if (cursorMentionsToken(cursor, "IntSignedView") ||
+        cursorMentionsToken(cursor, "sint")) {
+        forceSignedView(expr);
+    }
 }
 
 static TypeInfo convertType(CXType t) {
@@ -92,6 +190,53 @@ static TypeInfo convertType(CXType t) {
                     t.kind == CXType_SChar || t.kind == CXType_Char_S);
 
     return ti;
+}
+
+static bool isBuiltinIntegerType(const TypeInfo& type) {
+    if (type.is_array || type.is_pointer || type.is_reference ||
+        !type.struct_name.empty()) {
+        return false;
+    }
+    return type.hw_kind == "builtin" ||
+           type.hw_kind == "bool" ||
+           type.name == "bool";
+}
+
+static bool sameIntegerType(const TypeInfo& lhs, const TypeInfo& rhs) {
+    return lhs.width == rhs.width &&
+           lhs.is_signed == rhs.is_signed &&
+           lhs.hw_kind == rhs.hw_kind &&
+           lhs.name == rhs.name;
+}
+
+static ExprPtr makeImplicitBuiltinCast(ExprPtr value, const TypeInfo& target) {
+    if (!value || !isBuiltinIntegerType(value->type) ||
+        !isBuiltinIntegerType(target) || target.width <= 0 ||
+        sameIntegerType(value->type, target)) {
+        return value;
+    }
+    auto cast = std::make_shared<Expr>();
+    cast->kind = ExprKind::Cast;
+    cast->cast_type = target;
+    cast->type = target;
+    cast->cast_expr = std::move(value);
+    return cast;
+}
+
+static TypeInfo builtinIntegerPromotion(const TypeInfo& type) {
+    if (!isBuiltinIntegerType(type) || (type.name == "bool" && type.width == 1)) {
+        if (type.name == "bool") {
+            TypeInfo promoted{"int", 32, true, true, "builtin"};
+            return promoted;
+        }
+        return type;
+    }
+    if (type.width < 32) {
+        // The supported Windows/Linux targets use a 32-bit int, which can
+        // represent every value of the fixed-width 8/16-bit builtin types.
+        return TypeInfo{"int", 32, true, true, "builtin"};
+    }
+    return type;
 }
 
 static ParamPassingKind classifyParamPassing(CXType type) {
@@ -177,6 +322,9 @@ static unsigned sourceRangeLineSpan(CXSourceRange range) {
 }
 
 static constexpr bool allowUnsafeTextFallback = false;
+static std::unordered_map<std::string, std::string> lambda_operator_usr_to_name;
+static std::unordered_map<std::string, std::string> lambda_operator_location_to_name;
+static std::unordered_map<std::string, std::string> lambda_operator_signature_to_name;
 
 static std::string cursorText(CXCursor cursor, bool allow_large = false) { // UNSAFE_TEXT_FALLBACK_ALLOW: disabled helper only, guarded by allowUnsafeTextFallback=false
     CXSourceRange range = clang_getCursorExtent(cursor);
@@ -242,6 +390,10 @@ static std::string cursorLocation(CXCursor cursor) {
     return file_name + ":" + std::to_string(line) + ":" + std::to_string(column);
 }
 
+static std::string cursorUsr(CXCursor cursor) {
+    return cxToStr(clang_getCursorUSR(cursor));
+}
+
 static std::vector<std::string> integerTokensInBraces(const std::string& text) {
     std::vector<std::string> values;
     auto l = text.find('{');
@@ -293,6 +445,57 @@ static std::string astBaseName(const ExprPtr& e) {
     if (e->kind == ExprKind::FieldAccess) return astBaseName(e->struct_base);
     if (e->kind == ExprKind::ArrayAccess) return astBaseName(e->array_base);
     return "";
+}
+
+static bool isOperatorOnlyExpr(const ExprPtr& e) {
+    if (!e) return false;
+    if (e->kind == ExprKind::VarRef) return e->var_name.rfind("operator", 0) == 0;
+    if (e->kind == ExprKind::FieldAccess) return e->field_name.rfind("operator", 0) == 0 && !e->struct_base;
+    if (e->kind == ExprKind::Cast) return isOperatorOnlyExpr(e->cast_expr);
+    return false;
+}
+
+static bool isUnsupportedOperatorReceiverCall(const ExprPtr& e) {
+    return e && e->kind == ExprKind::Call &&
+        e->callee.rfind("__unsupported_operator_call_receiver", 0) == 0;
+}
+
+static bool containsUnsupportedOperatorReceiverCall(const ExprPtr& e) {
+    if (!e) return false;
+    if (isUnsupportedOperatorReceiverCall(e)) return true;
+    if (e->kind == ExprKind::Cast) return containsUnsupportedOperatorReceiverCall(e->cast_expr);
+    if (e->kind == ExprKind::UnaryOp) return containsUnsupportedOperatorReceiverCall(e->operand);
+    return false;
+}
+
+static std::string noArgCallNameFromText(std::string text) { // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    text.erase(std::remove(text.begin(), text.end(), '\n'), text.end());
+    auto eq = text.find('=');
+    if (eq != std::string::npos) text = text.substr(eq + 1);
+    auto semi = text.find(';');
+    if (semi != std::string::npos) text = text.substr(0, semi);
+    text.erase(0, text.find_first_not_of(" \t"));
+    auto end_trim = text.find_last_not_of(" \t");
+    if (end_trim == std::string::npos) return "";
+    text.erase(end_trim + 1);
+    auto l = text.find('(');
+    auto r = text.find(')', l == std::string::npos ? 0 : l);
+    if (l == std::string::npos || r == std::string::npos || r <= l) return "";
+    std::string args = text.substr(l + 1, r - l - 1);
+    if (args.find_first_not_of(" \t") != std::string::npos) return "";
+    std::string name = text.substr(0, l);
+    name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) {
+        return std::isspace(c);
+    }), name.end());
+    if (name.empty() || name.rfind("operator", 0) == 0) return "";
+    if (!(std::isalpha(static_cast<unsigned char>(name.front())) || name.front() == '_')) return "";
+    if (!std::all_of(name.begin(), name.end(), [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        })) {
+        return "";
+    }
+    return name;
 }
 
 static ExprPtr parseTextArrayAccess(const std::string& text, TypeInfo type = {}); // UNSAFE_TEXT_FALLBACK_ALLOW: disabled helper only, guarded by allowUnsafeTextFallback=false
@@ -352,6 +555,26 @@ static std::string simpleMemberGetReceiver(CXCursor cursor) {
         if (ident && t1 == "." && t2 == "get" && t3 == "(") receiver = t0;
     }
     clang_disposeTokens(tu, tokens, numTokens);
+    if (receiver.empty()) {
+        std::string text = cursorText(cursor, true); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+        auto dot = text.find('.');
+        auto arrow = text.find("->");
+        size_t pos = dot != std::string::npos ? dot : arrow;
+        if (pos != std::string::npos) {
+            std::string prefix = text.substr(0, pos);
+            prefix.erase(std::remove_if(prefix.begin(), prefix.end(), [](unsigned char c) {
+                return std::isspace(c);
+            }), prefix.end());
+            auto scope = prefix.find_last_of("({[;,");
+            if (scope != std::string::npos) prefix = prefix.substr(scope + 1);
+            bool ident = !prefix.empty() &&
+                (std::isalpha(static_cast<unsigned char>(prefix.front())) || prefix.front() == '_') &&
+                std::all_of(prefix.begin(), prefix.end(), [](unsigned char c) {
+                    return std::isalnum(c) || c == '_';
+                });
+            if (ident) receiver = prefix;
+        }
+    }
     return receiver;
 }
 
@@ -383,6 +606,168 @@ static std::string leadingIdentifierFromTokens(CXCursor cursor) { // UNSAFE_TEXT
     }
     clang_disposeTokens(tu, tokens, numTokens);
     return name;
+}
+
+static std::string memberReceiverFromTokens(CXCursor cursor) { // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+    CXTranslationUnit tu = clang_Cursor_getTranslationUnit(cursor);
+    CXToken* tokens = nullptr;
+    unsigned numTokens = 0;
+    clang_tokenize(tu, clang_getCursorExtent(cursor), &tokens, &numTokens);
+    auto is_ident = [](const std::string& t) {
+        return !t.empty() &&
+            (std::isalpha(static_cast<unsigned char>(t.front())) || t.front() == '_') &&
+            std::all_of(t.begin(), t.end(), [](unsigned char c) {
+                return std::isalnum(c) || c == '_';
+            });
+    };
+    std::string receiver;
+    for (unsigned i = 1; i < numTokens; ++i) {
+        std::string tok = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
+        if (tok != "." && tok != "->") continue;
+        std::string prev = cxToStr(clang_getTokenSpelling(tu, tokens[i - 1]));
+        if (is_ident(prev)) {
+            receiver = prev;
+            break;
+        }
+    }
+    clang_disposeTokens(tu, tokens, numTokens);
+    return receiver;
+}
+
+static std::string noArgCallReceiverFromSource(CXCursor cursor) { // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+    std::string text = cursorSourceSlice(cursor, 1, 256); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+    if (text.empty()) text = cursorText(cursor, true); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+    auto paren = text.find('(');
+    if (paren == std::string::npos) return "";
+    size_t end = paren;
+    while (end > 0 && std::isspace(static_cast<unsigned char>(text[end - 1]))) --end;
+    size_t begin = end;
+    while (begin > 0) {
+        char c = text[begin - 1];
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) break;
+        --begin;
+    }
+    if (begin >= end) return "";
+    std::string name = text.substr(begin, end - begin);
+    if (name.rfind("operator", 0) == 0) return "";
+    return name;
+}
+
+static std::string operatorSignature(CXCursor method) {
+    CXType result_type = clang_getCursorResultType(method);
+    std::string signature = cxToStr(clang_getTypeSpelling(result_type));
+    signature += "(";
+    int arg_count = clang_Cursor_getNumArguments(method);
+    for (int i = 0; i < arg_count; ++i) {
+        if (i > 0) signature += ",";
+        signature += cxToStr(clang_getTypeSpelling(clang_getArgType(clang_getCursorType(method), i)));
+    }
+    signature += ")";
+    return signature;
+}
+
+static std::string normalizeOperatorFunctionType(std::string type) {
+    type.erase(std::remove(type.begin(), type.end(), '\r'), type.end());
+    type.erase(std::remove(type.begin(), type.end(), '\n'), type.end());
+    auto arrow = type.find("->");
+    if (arrow != std::string::npos) {
+        std::string ret = type.substr(arrow + 2);
+        auto comment = ret.find("//");
+        if (comment != std::string::npos) ret = ret.substr(0, comment);
+        ret.erase(0, ret.find_first_not_of(" \t"));
+        auto end = ret.find_last_not_of(" \t");
+        if (end == std::string::npos) return "";
+        ret.erase(end + 1);
+        return ret + "()";
+    }
+    return "";
+}
+
+static void registerLambdaOperatorName(CXCursor lambda_cursor, const std::string& name) {
+    if (name.empty()) return;
+    clang_visitChildren(lambda_cursor, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
+        auto* name = static_cast<const std::string*>(data);
+        if (clang_getCursorKind(c) == CXCursor_CXXMethod &&
+            cxToStr(clang_getCursorSpelling(c)) == "operator()") {
+            std::string usr = cursorUsr(c);
+            if (!usr.empty()) lambda_operator_usr_to_name[usr] = *name;
+            std::string location = cursorLocation(c);
+            if (!location.empty()) lambda_operator_location_to_name[location] = *name;
+            std::string sig = operatorSignature(c);
+            if (!sig.empty()) {
+                auto it = lambda_operator_signature_to_name.find(sig);
+                if (it == lambda_operator_signature_to_name.end()) {
+                    lambda_operator_signature_to_name.emplace(sig, *name);
+                } else if (it->second != *name) {
+                    it->second.clear();
+                }
+            }
+            std::string function_sig = normalizeOperatorFunctionType(
+                cxToStr(clang_getTypeSpelling(clang_getCursorType(c))));
+            if (!function_sig.empty()) {
+                auto it = lambda_operator_signature_to_name.find(function_sig);
+                if (it == lambda_operator_signature_to_name.end()) {
+                    lambda_operator_signature_to_name.emplace(function_sig, *name);
+                } else if (it->second != *name) {
+                    it->second.clear();
+                }
+            }
+            return CXChildVisit_Break;
+        }
+        return CXChildVisit_Recurse;
+    }, const_cast<std::string*>(&name));
+}
+
+static CXCursor findLambdaExpr(CXCursor cursor) {
+    if (clang_getCursorKind(cursor) == CXCursor_LambdaExpr) return cursor;
+    for (auto& child : getChildren(cursor)) {
+        CXCursor found = findLambdaExpr(child);
+        if (!clang_equalCursors(found, clang_getNullCursor())) return found;
+    }
+    return clang_getNullCursor();
+}
+
+static void collectLambdaOperatorNames(CXCursor cursor) {
+    if (clang_getCursorKind(cursor) == CXCursor_VarDecl) {
+        std::string name = cxToStr(clang_getCursorSpelling(cursor));
+        CXCursor lambda = findLambdaExpr(cursor);
+        if (!clang_equalCursors(lambda, clang_getNullCursor())) {
+            registerLambdaOperatorName(lambda, name);
+        }
+    }
+    for (auto& child : getChildren(cursor)) {
+        collectLambdaOperatorNames(child);
+    }
+}
+
+static std::string lambdaNameForOperatorCursor(CXCursor cursor) {
+    CXCursor referenced = clang_getCursorReferenced(cursor);
+    if (!clang_equalCursors(referenced, clang_getNullCursor()) &&
+        cxToStr(clang_getCursorSpelling(referenced)) == "operator()") {
+        std::string usr = cursorUsr(referenced);
+        auto it = lambda_operator_usr_to_name.find(usr);
+        if (it != lambda_operator_usr_to_name.end() && !it->second.empty()) return it->second;
+        std::string location = cursorLocation(referenced);
+        auto loc_it = lambda_operator_location_to_name.find(location);
+        if (loc_it != lambda_operator_location_to_name.end() && !loc_it->second.empty()) return loc_it->second;
+        std::string sig = operatorSignature(referenced);
+        auto sig_it = lambda_operator_signature_to_name.find(sig);
+        if (sig_it != lambda_operator_signature_to_name.end() && !sig_it->second.empty()) return sig_it->second;
+    }
+    for (auto& child : getChildren(cursor)) {
+        std::string name = lambdaNameForOperatorCursor(child);
+        if (!name.empty()) return name;
+    }
+    return "";
+}
+
+static std::string lambdaNameForOperatorCallType(CXCursor cursor) {
+    std::string type = cxToStr(clang_getTypeSpelling(clang_getCursorType(cursor)));
+    std::string sig = normalizeOperatorFunctionType(type);
+    if (sig.empty()) return "";
+    auto it = lambda_operator_signature_to_name.find(sig);
+    if (it != lambda_operator_signature_to_name.end() && !it->second.empty()) return it->second;
+    return "";
 }
 
 static std::string leadingArrayIdentifierFromTokens(CXCursor cursor) {
@@ -453,14 +838,29 @@ static ExprPtr arrayAccessFromBracketTokens(CXCursor cursor, TypeInfo type = {})
         toks.push_back(cxToStr(clang_getTokenSpelling(tu, tokens[i])));
     }
     clang_disposeTokens(tu, tokens, numTokens);
-    if (toks.size() < 4 || toks[1] != "[") return nullptr;
-    const std::string& base_name = toks[0];
+    if (toks.size() < 4) return nullptr;
+    auto is_ident = [](const std::string& tok) {
+        return !tok.empty() &&
+            (std::isalpha(static_cast<unsigned char>(tok.front())) || tok.front() == '_') &&
+            std::all_of(tok.begin(), tok.end(), [](unsigned char c) {
+                return std::isalnum(c) || c == '_';
+            });
+    };
+    size_t base_pos = std::string::npos;
+    for (size_t i = 0; i + 1 < toks.size(); ++i) {
+        if (is_ident(toks[i]) && toks[i + 1] == "[") {
+            base_pos = i;
+            break;
+        }
+    }
+    if (base_pos == std::string::npos) return nullptr;
+    const std::string& base_name = toks[base_pos];
     if (base_name.empty() ||
         (!std::isalpha(static_cast<unsigned char>(base_name.front())) && base_name.front() != '_')) {
         return nullptr;
     }
     ExprPtr out = make_var(base_name);
-    size_t pos = 1;
+    size_t pos = base_pos + 1;
     while (pos < toks.size() && toks[pos] == "[") {
         size_t start = pos + 1;
         int depth = 1;
@@ -620,6 +1020,35 @@ static int typeWidthFromText(const std::string& text,
                              const std::string& token) {
     int width = 0;
     return parseVulWidthName(text, token, width) ? width : 0;
+}
+
+static std::vector<int> staticRangeArgsFromType(CXType type) {
+    std::string spelling = cxToStr(clang_getTypeSpelling(type));
+    if (spelling.find("StaticRangeProxy") == std::string::npos &&
+        spelling.find("VULStaticSliceRef") == std::string::npos) {
+        return {};
+    }
+    auto lt = spelling.find('<');
+    auto gt = spelling.rfind('>');
+    if (lt == std::string::npos || gt == std::string::npos || lt >= gt) return {};
+    std::vector<int> values;
+    std::stringstream ss(spelling.substr(lt + 1, gt - lt - 1));
+    std::string part;
+    while (std::getline(ss, part, ',')) {
+        part.erase(std::remove_if(part.begin(), part.end(), [](unsigned char c) {
+            return std::isspace(c);
+        }), part.end());
+        try {
+            size_t used = 0;
+            int value = std::stoi(part, &used, 0);
+            if (used == 0) return {};
+            values.push_back(value);
+        } catch (...) {
+            return {};
+        }
+    }
+    if (values.size() != 3) return {};
+    return {values[1], values[2]};
 }
 
 static ExprPtr makeVulConcatCall(const std::vector<ExprPtr>& args) {
@@ -1058,11 +1487,6 @@ static std::string checkSubset(CXCursor function_cursor, const std::string& curr
             }
         }
         if ((kind == CXCursor_BinaryOperator || kind == CXCursor_CompoundAssignOperator) &&
-            containsAny(text, {"/", "%"})) {
-            unsupported("division/remainder");
-            return CXChildVisit_Break;
-        }
-        if ((kind == CXCursor_BinaryOperator || kind == CXCursor_CompoundAssignOperator) &&
             containsAny(type, {"*", "[]"})) {
             std::string no_space = text;
             no_space.erase(std::remove_if(no_space.begin(), no_space.end(), [](unsigned char ch) {
@@ -1073,7 +1497,8 @@ static std::string checkSubset(CXCursor function_cursor, const std::string& curr
                 return CXChildVisit_Break;
             }
         }
-        if (kind == CXCursor_VarDecl && type.find("&") != std::string::npos) {
+        if (kind == CXCursor_VarDecl && type.find("&") != std::string::npos &&
+            type.find("const") == std::string::npos) {
             unsupported("complex reference alias");
             return CXChildVisit_Break;
         }
@@ -1189,6 +1614,28 @@ static ExprPtr convertExpr(CXCursor cursor) {
     CXType type = clang_getCursorType(cursor);
     auto children = getChildren(cursor);
 
+    std::string cursor_type_spelling = cxToStr(clang_getTypeSpelling(type));
+    if (cursor_type_spelling.find("IntSignedView") != std::string::npos && !children.empty()) {
+        ExprPtr candidate;
+        for (auto& child : children) {
+            candidate = convertExpr(child);
+            candidate = unwrapSignedViewMemberAccess(candidate);
+            if (candidate && !isOperatorOnlyExpr(candidate)) break;
+        }
+        if (candidate) {
+            int width = candidate->type.width;
+            int parsed_width = 0;
+            if (parseVulWidthName(cursor_type_spelling, "IntSignedView", parsed_width) && parsed_width > 0) {
+                width = parsed_width;
+            }
+            if (width > 0) {
+                candidate->type.width = width;
+                forceSignedView(candidate);
+                return candidate;
+            }
+        }
+    }
+
     switch (kind) {
     case CXCursor_IntegerLiteral: {
         // Get the literal value from tokens
@@ -1239,7 +1686,18 @@ static ExprPtr convertExpr(CXCursor cursor) {
             auto base = convertExpr(children[0]);
             std::string field = cxToStr(clang_getCursorSpelling(cursor));
             TypeInfo field_type;
-            if (field != "setnext" && field != "call" && field != "cat" &&
+            CXCursor referenced = clang_getCursorReferenced(cursor);
+            CXCursorKind referenced_kind = clang_Cursor_isNull(referenced)
+                ? CXCursor_InvalidFile
+                : clang_getCursorKind(referenced);
+            const bool callable_member =
+                referenced_kind == CXCursor_CXXMethod ||
+                referenced_kind == CXCursor_FunctionDecl ||
+                referenced_kind == CXCursor_FunctionTemplate ||
+                referenced_kind == CXCursor_Constructor ||
+                referenced_kind == CXCursor_ConversionFunction;
+            if (!callable_member &&
+                field != "setnext" && field != "call" && field != "cat" &&
                 field != "repeat" && field != "reduce_or" && field != "reduce_and" &&
                 field != "reduce_xor" && field != "range_at" && field != "bit_at" &&
                 field != "sint" &&
@@ -1271,6 +1729,12 @@ static ExprPtr convertExpr(CXCursor cursor) {
         if (children.size() >= 2) {
             auto base = convertExpr(children[0]);
             auto idx = convertExpr(children[1]);
+            TypeInfo elem_type = convertType(type);
+            if (containsUnsupportedOperatorReceiverCall(base)) {
+                if (auto parsed = arrayAccessFromBracketTokens(cursor, elem_type)) { // UNSAFE_TEXT_FALLBACK_ALLOW: libclang operator[] bracket recovery, not source lowering
+                    return parsed;
+                }
+            }
             std::string text = allowUnsafeTextFallback ? cursorText(cursor) : ""; // UNSAFE_TEXT_FALLBACK_ALLOW: disabled by allowUnsafeTextFallback.
             auto bracket = text.find('[');
             if (bracket != std::string::npos) {
@@ -1288,7 +1752,6 @@ static ExprPtr convertExpr(CXCursor cursor) {
                     }
                 }
             }
-            TypeInfo elem_type = convertType(type);
             if (base && base->type.is_array && !base->type.array_dims.empty()) {
                 elem_type = base->type;
                 elem_type.array_dims.erase(elem_type.array_dims.begin());
@@ -1333,6 +1796,13 @@ static ExprPtr convertExpr(CXCursor cursor) {
 
             auto lhs = convertExpr(children[0]);
             auto rhs = convertExpr(children[1]);
+            markSignedViewIfCursorMentions(lhs, children[0]);
+            markSignedViewIfCursorMentions(rhs, children[1]);
+            if (cursorMentionsToken(cursor, "IntSignedView") ||
+                cursorMentionsToken(cursor, "sint")) {
+                forceSignedView(lhs);
+                forceSignedView(rhs);
+            }
             return make_binary(op, lhs, rhs, convertType(type));
         }
         break;
@@ -1395,10 +1865,42 @@ static ExprPtr convertExpr(CXCursor cursor) {
         };
         if (spelling.rfind("operator", 0) == 0 && spelling != "operator()" &&
             children.size() == 1 && first_child_spelling == spelling) {
-            return get_first_call_child();
+            auto converted = get_first_call_child();
+            TypeInfo target_type = convertType(type);
+            if (converted && converted->kind == ExprKind::FieldAccess &&
+                converted->field_name == spelling && converted->struct_base) {
+                converted = converted->struct_base;
+            }
+            if (converted &&
+                converted->intrinsic == IntrinsicKind::DynamicRangeAt &&
+                converted->type.width <= 0 &&
+                target_type.width > 0) {
+                converted->type = target_type;
+            }
+            return converted;
         }
         if (spelling == "operator()" && children.size() == 1 && first_child_spelling == spelling) {
-            return get_first_call_child();
+            std::string token_callee = leadingIdentifierFromTokens(cursor); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+            if (token_callee.empty()) token_callee = lambdaNameForOperatorCursor(children.front());
+            if (token_callee.empty()) token_callee = lambdaNameForOperatorCursor(cursor);
+            if (token_callee.empty()) token_callee = lambdaNameForOperatorCallType(cursor);
+            if (token_callee.empty()) token_callee = noArgCallReceiverFromSource(cursor); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+            if (!token_callee.empty() && token_callee != "operator()") {
+                auto result = std::make_shared<Expr>();
+                result->kind = ExprKind::Call;
+                result->callee = token_callee;
+                result->type = convertType(type);
+                int arg_count = clang_Cursor_getNumArguments(cursor);
+                for (int i = 0; i < arg_count; ++i) {
+                    result->args.push_back(convertExpr(clang_Cursor_getArgument(cursor, static_cast<unsigned>(i))));
+                }
+                return result;
+            }
+            auto result = std::make_shared<Expr>();
+            result->kind = ExprKind::Call;
+            result->callee = "__unsupported_operator_call_receiver";
+            result->type = convertType(type);
+            return result;
         }
         if (spelling.rfind("operator", 0) == 0 && spelling != "operator()") {
             std::string op = spelling.substr(std::string("operator").size());
@@ -1410,27 +1912,68 @@ static ExprPtr convertExpr(CXCursor cursor) {
             for (int i = 0; i < arg_count; ++i) {
                 call_args.push_back(clang_Cursor_getArgument(cursor, static_cast<unsigned>(i)));
             }
+            bool operator_uses_signed_view =
+                cursorMentionsToken(cursor, "IntSignedView") ||
+                cursorMentionsToken(cursor, "sint");
             if ((op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" ||
                  op == "<<" || op == ">>" || op == "==" || op == "!=" || op == "<" ||
                  op == "<=" || op == ">" || op == ">=")) {
                 if (call_args.size() >= 2) {
-                    return make_binary(op, convertExpr(call_args[0]), convertExpr(call_args[1]), convertType(type));
+                    auto lhs = convertExpr(call_args[0]);
+                    auto rhs = convertExpr(call_args[1]);
+                    markSignedViewIfCursorMentions(lhs, call_args[0]);
+                    markSignedViewIfCursorMentions(rhs, call_args[1]);
+                    if (operator_uses_signed_view) {
+                        forceSignedView(lhs);
+                        forceSignedView(rhs);
+                    }
+                    return make_binary(op, lhs, rhs, convertType(type));
                 }
                 auto first = get_first_call_child();
                 if (first && first->kind == ExprKind::FieldAccess &&
-                    first->field_name == spelling && first->struct_base &&
-                    children.size() >= 2) {
-                    return make_binary(op, first->struct_base, convertExpr(children.back()), convertType(type));
+                first->field_name == spelling && first->struct_base &&
+                children.size() >= 2) {
+                auto rhs = convertExpr(children.back());
+                markSignedViewIfCursorMentions(rhs, children.back());
+                if (operator_uses_signed_view) {
+                    first->struct_base = unwrapSignedViewMemberAccess(first->struct_base);
+                    forceSignedView(first->struct_base);
+                    forceSignedView(rhs);
                 }
-                if (children.size() >= 3) {
-                    return make_binary(op, convertExpr(children[1]), convertExpr(children[2]), convertType(type));
+                return make_binary(op, first->struct_base, rhs, convertType(type));
+            }
+            if (children.size() >= 3) {
+                std::vector<std::pair<ExprPtr, CXCursor>> operands;
+                for (auto& child : children) {
+                    auto operand = unwrapSignedViewMemberAccess(convertExpr(child));
+                    if (operand && !isOperatorOnlyExpr(operand)) {
+                        operands.emplace_back(operand, child);
+                    }
+                    if (operands.size() >= 2) break;
                 }
-                if (children.size() >= 2 && first_child_spelling.rfind("operator", 0) != 0 &&
-                    first_child_spelling != spelling) {
-                    return make_binary(op,
-                                       convertExpr(children[children.size() - 2]),
-                                       convertExpr(children[children.size() - 1]),
-                                       convertType(type));
+                if (operands.size() >= 2) {
+                    auto lhs = operands[0].first;
+                    auto rhs = operands[1].first;
+                    markSignedViewIfCursorMentions(lhs, operands[0].second);
+                    markSignedViewIfCursorMentions(rhs, operands[1].second);
+                    if (operator_uses_signed_view) {
+                        forceSignedView(lhs);
+                        forceSignedView(rhs);
+                    }
+                    return make_binary(op, lhs, rhs, convertType(type));
+                }
+            }
+            if (children.size() >= 2 && first_child_spelling.rfind("operator", 0) != 0 &&
+                first_child_spelling != spelling) {
+                auto lhs = convertExpr(children[children.size() - 2]);
+                auto rhs = convertExpr(children[children.size() - 1]);
+                    markSignedViewIfCursorMentions(lhs, children[children.size() - 2]);
+                    markSignedViewIfCursorMentions(rhs, children[children.size() - 1]);
+                    if (operator_uses_signed_view) {
+                        forceSignedView(lhs);
+                        forceSignedView(rhs);
+                    }
+                    return make_binary(op, lhs, rhs, convertType(type));
                 }
             }
             if (op == "!" || op == "~" || op == "-" || op == "*") {
@@ -1525,8 +2068,10 @@ static ExprPtr convertExpr(CXCursor cursor) {
                 return result;
             }
         }
-        if (auto get_receiver = simpleMemberGetReceiver(cursor); !get_receiver.empty()) {
-            return make_var(get_receiver, convertType(type));
+        if (vul_call.kind == VulCallKind::RegProxyGet || spelling == "get") {
+            if (auto get_receiver = simpleMemberGetReceiver(cursor); !get_receiver.empty()) {
+                return make_var(get_receiver, convertType(type));
+            }
         }
         if (vul_call.kind == VulCallKind::SetNext) {
             auto result = std::make_shared<Expr>();
@@ -1540,7 +2085,9 @@ static ExprPtr convertExpr(CXCursor cursor) {
                 port = templateArgIntFromTokens(cursor, "setnext", -1);
             }
             result->args.push_back(make_literal(std::to_string(port), TypeInfo{"int", 32, true}));
-            if (children.size() >= 2) result->args.push_back(convertExpr(children.back()));
+            for (size_t i = 1; i < children.size(); ++i) {
+                result->args.push_back(convertExpr(children[i]));
+            }
             return result;
         }
         if (spelling == "array" && children.size() == 1) {
@@ -1556,15 +2103,62 @@ static ExprPtr convertExpr(CXCursor cursor) {
             }
         }
         if (vul_call.kind == VulCallKind::SignedView && !children.empty()) {
-            auto receiver = convertExpr(children.front());
-            if (receiver && receiver->kind == ExprKind::FieldAccess &&
-                receiver->field_name == "sint" && receiver->struct_base) {
-                auto out = receiver->struct_base;
-                out->type.is_signed = true;
-                if (!out->type.is_hw_int && out->type.width > 0) out->type.is_hw_int = true;
-                out->type.hw_kind = "signed_view";
-                return out;
+            ExprPtr receiver;
+            if (vul_call.has_receiver) {
+                receiver = convertExpr(vul_call.receiver_cursor);
+            } else {
+                receiver = convertExpr(children.front());
             }
+            receiver = unwrapSignedViewMemberAccess(receiver);
+            if (receiver) {
+                receiver->type.is_signed = true;
+                if (!receiver->type.is_hw_int && receiver->type.width > 0) receiver->type.is_hw_int = true;
+                receiver->type.hw_kind = "signed_view";
+                receiver->type.name = "IntSignedView<" + std::to_string(receiver->type.width) + ">";
+                return receiver;
+            }
+        }
+        if (vul_call.kind == VulCallKind::At) {
+            auto result = std::make_shared<Expr>();
+            result->kind = ExprKind::Call;
+            result->callee = "__slice";
+            std::vector<int> range_args = vul_call.template_values;
+            if (range_args.size() != 2) {
+                range_args = staticRangeArgsFromType(type);
+            }
+            if (range_args.size() != 2) {
+                result->callee = "__unsupported_at";
+                result->type = convertType(type);
+                return result;
+            }
+            int hi = range_args[0];
+            int lo = range_args[1];
+            ExprPtr receiver;
+            if (vul_call.has_receiver) {
+                receiver = convertExpr(vul_call.receiver_cursor);
+            } else if (!children.empty()) {
+                receiver = convertExpr(children.front());
+                if (receiver && receiver->kind == ExprKind::FieldAccess &&
+                    receiver->field_name == "at" && receiver->struct_base) {
+                    receiver = receiver->struct_base;
+                } else if (receiver && receiver->kind == ExprKind::FieldAccess &&
+                           receiver->field_name == "at" && !receiver->struct_base) {
+                    std::string receiver_name = memberReceiverFromTokens(cursor); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+                    if (!receiver_name.empty()) receiver = make_var(receiver_name);
+                }
+            }
+            if (!receiver) {
+                result->callee = "__unsupported_at_receiver";
+                result->type = convertType(type);
+                return result;
+            }
+            result->type = make_hw_type(receiver->type.is_signed ? "Int" : "UInt",
+                                        hi >= lo ? hi - lo + 1 : 0,
+                                        receiver->type.is_signed);
+            result->args.push_back(receiver);
+            result->args.push_back(make_literal(std::to_string(hi), TypeInfo{"int", 32, true}));
+            result->args.push_back(make_literal(std::to_string(lo), TypeInfo{"int", 32, true}));
+            return result;
         }
         if (vul_call.kind == VulCallKind::Output || vul_call.kind == VulCallKind::ReqHelperCall) {
             bool is_req_output = vul_call.kind == VulCallKind::Output;
@@ -1588,7 +2182,15 @@ static ExprPtr convertExpr(CXCursor cursor) {
                     receiver->struct_base && receiver->struct_base->kind == ExprKind::VarRef) {
                     result->args.push_back(receiver->struct_base);
                 }
-                if (children.size() >= 2) result->args.push_back(convertExpr(children.back()));
+                if (!vul_call.normal_arg_cursors.empty()) {
+                    for (auto arg_cursor : vul_call.normal_arg_cursors) {
+                        result->args.push_back(convertExpr(arg_cursor));
+                    }
+                } else {
+                    for (size_t i = 1; i < children.size(); ++i) {
+                        result->args.push_back(convertExpr(children[i]));
+                    }
+                }
                 return result;
             }
         }
@@ -1636,9 +2238,19 @@ static ExprPtr convertExpr(CXCursor cursor) {
             }
         }
         if (spelling == "operator[]" && children.size() >= 2) {
-            auto base = convertExpr(children[children.size() - 2]);
-            auto idx = convertExpr(children[children.size() - 1]);
-            if (base && base->kind == ExprKind::VarRef && base->var_name == "operator[]") {
+            ExprPtr base;
+            ExprPtr idx;
+            int arg_count = clang_Cursor_getNumArguments(cursor);
+            if (arg_count >= 2) {
+                base = convertExpr(clang_Cursor_getArgument(cursor, 0));
+                idx = convertExpr(clang_Cursor_getArgument(cursor, 1));
+            } else {
+                base = convertExpr(children[children.size() - 2]);
+                idx = convertExpr(children[children.size() - 1]);
+            }
+            if ((base && base->kind == ExprKind::VarRef && base->var_name == "operator[]") ||
+                containsUnsupportedOperatorReceiverCall(base) ||
+                (base && astBaseName(base).empty())) {
                 if (auto parsed = arrayAccessFromBracketTokens(cursor, convertType(type))) { // UNSAFE_TEXT_FALLBACK_ALLOW: libclang operator[] bracket recovery, not source lowering
                     return parsed;
                 }
@@ -1883,12 +2495,73 @@ static ExprPtr convertExpr(CXCursor cursor) {
         result->callee = spelling;
         result->type = convertType(type);
         size_t arg_start = 1;
-        if (!children.empty() && clang_getCursorKind(children.front()) == CXCursor_MemberRefExpr) {
-            result->args.push_back(convertExpr(children.front()));
+        if (spelling == "operator()") {
+            result->callee.clear();
+            for (size_t i = 0; i < children.size(); ++i) {
+                if (firstSpellingDeep(children[i]) == "operator()") continue;
+                auto candidate = convertExpr(children[i]);
+                std::string name = astBaseName(candidate);
+                if (!name.empty() && name != "operator()") {
+                    result->callee = name;
+                    arg_start = i + 1;
+                    break;
+                }
+            }
+            if (result->callee.empty()) {
+                result->callee = "__unsupported_operator_call_receiver";
+            }
         }
-        // First child is usually the callee ref, rest are args.
-        for (size_t i = arg_start; i < children.size(); ++i) {
-            result->args.push_back(convertExpr(children[i]));
+        if (!children.empty() && clang_getCursorKind(children.front()) == CXCursor_MemberRefExpr) {
+            if (firstSpellingDeep(children.front()) != "operator()") {
+                result->args.push_back(convertExpr(children.front()));
+            }
+        }
+        if (!result->args.empty() && result->args.front() &&
+            result->args.front()->kind == ExprKind::FieldAccess &&
+            !result->args.front()->struct_base) {
+            std::string receiver_name = memberReceiverFromTokens(cursor); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+            if (!receiver_name.empty() && receiver_name != result->args.front()->field_name) {
+                result->args.front()->struct_base = make_var(receiver_name);
+            }
+        }
+        if (result->args.empty() &&
+            (spelling == "readdata" || spelling == "readreq" || spelling == "write" ||
+             spelling == "front" || spelling == "enqready" || spelling == "deqvalid" ||
+             spelling == "deqnext" || spelling == "clrnext" || spelling == "enqnext")) {
+            std::string receiver_name = memberReceiverFromTokens(cursor); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+            if (!receiver_name.empty() && receiver_name != spelling) {
+                result->args.push_back(make_field_access(make_var(receiver_name), spelling));
+            }
+        }
+        // Use libclang's explicit argument API. Child[0] is not uniformly a
+        // callee: for CXXConstructExpr it can be the first constructor
+        // argument, and skipping it loses copy initialization such as
+        // `TagEntry x = proxy.readdata<0>()`.
+        int explicit_arg_count = clang_Cursor_getNumArguments(cursor);
+        if (explicit_arg_count >= 0) {
+            for (int i = 0; i < explicit_arg_count; ++i) {
+                result->args.push_back(convertExpr(
+                    clang_Cursor_getArgument(cursor, static_cast<unsigned>(i))));
+            }
+            CXCursor referenced = clang_getCursorReferenced(cursor);
+            const bool constructor_call =
+                !clang_Cursor_isNull(referenced) &&
+                clang_getCursorKind(referenced) == CXCursor_Constructor;
+            if (constructor_call && explicit_arg_count == 0) {
+                for (const auto& child : children) {
+                    CXCursorKind child_kind = clang_getCursorKind(child);
+                    if (!clang_isExpression(child_kind)) continue;
+                    auto argument = convertExpr(child);
+                    if (argument && !isOperatorOnlyExpr(argument)) {
+                        result->args.push_back(std::move(argument));
+                    }
+                }
+            }
+        } else {
+            for (size_t i = arg_start; i < children.size(); ++i) {
+                if (firstSpellingDeep(children[i]) == "operator()") continue;
+                result->args.push_back(convertExpr(children[i]));
+            }
         }
         return result;
     }
@@ -1913,7 +2586,45 @@ static ExprPtr convertExpr(CXCursor cursor) {
 
     default: {
         // Try to recurse into first child for implicit casts
-        if (!children.empty()) return convertExpr(children[0]);
+        if (!children.empty()) {
+            if (children.size() > 1 && firstSpellingDeep(children.front()).rfind("operator", 0) == 0) {
+                for (size_t i = 1; i < children.size(); ++i) {
+                    auto candidate = convertExpr(children[i]);
+                    if (!isOperatorOnlyExpr(candidate)) return candidate;
+                }
+            }
+            auto candidate = convertExpr(children[0]);
+            if (!isOperatorOnlyExpr(candidate)) {
+                if (kind == CXCursor_UnexposedExpr) {
+                    TypeInfo target_type = convertType(type);
+                    if (candidate &&
+                        candidate->intrinsic == IntrinsicKind::DynamicRangeAt &&
+                        candidate->type.width <= 0 &&
+                        target_type.width > 0) {
+                        candidate->type = target_type;
+                        return candidate;
+                    }
+                    return makeImplicitBuiltinCast(candidate, target_type);
+                }
+                return candidate;
+            }
+            std::string callee = lambdaNameForOperatorCursor(children[0]);
+            if (callee.empty()) callee = lambdaNameForOperatorCursor(cursor);
+            if (callee.empty()) callee = lambdaNameForOperatorCallType(cursor);
+            if (callee.empty()) callee = noArgCallReceiverFromSource(cursor); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+            if (!callee.empty()) {
+                auto recovered = std::make_shared<Expr>();
+                recovered->kind = ExprKind::Call;
+                recovered->callee = callee;
+                recovered->type = convertType(type);
+                return recovered;
+            }
+            auto unsupported = std::make_shared<Expr>();
+            unsupported->kind = ExprKind::Call;
+            unsupported->callee = "__unsupported_operator_call_receiver";
+            unsupported->type = convertType(type);
+            return unsupported;
+        }
         break;
     }
     }
@@ -1949,12 +2660,35 @@ static bool isAliasCarrierType(const TypeInfo& type) {
            type.name.find("__ReqHelper") != std::string::npos;
 }
 
+static bool isVulFixedIntType(const TypeInfo& type) {
+    return type.width > 0 &&
+           (type.hw_kind == "Int" || type.hw_kind == "UInt" ||
+            type.hw_kind == "signed_view" || type.name.rfind("Int<", 0) == 0 ||
+            type.name.rfind("UInt<", 0) == 0);
+}
+
 static void collectInitArgExprs(CXCursor cursor, std::vector<ExprPtr>& out, int depth = 0) {
     if (depth > 3) return;
     auto children = getChildren(cursor);
     if (children.empty()) {
         if (clang_isExpression(clang_getCursorKind(cursor))) {
             out.push_back(convertExpr(cursor));
+        }
+        return;
+    }
+
+    auto cursor_kind = clang_getCursorKind(cursor);
+    if (cursor_kind == CXCursor_CallExpr || cursor_kind == CXCursor_InitListExpr) {
+        for (auto& child : children) {
+            auto kind = clang_getCursorKind(child);
+            if (kind == CXCursor_TypeRef || kind == CXCursor_TemplateRef ||
+                kind == CXCursor_Constructor || kind == CXCursor_CXXMethod ||
+                kind == CXCursor_FunctionDecl) {
+                continue;
+            }
+            if (clang_isExpression(kind)) {
+                out.push_back(convertExpr(child));
+            }
         }
         return;
     }
@@ -2012,6 +2746,8 @@ static StmtPtr convertStmt(CXCursor cursor) {
                 std::string decl_text = cursorText(child, true); // UNSAFE_TEXT_FALLBACK_ALLOW: declaration initializer presence check.
                 bool has_decl_initializer = decl_text.find('=') != std::string::npos ||
                                             decl_text.find('{') != std::string::npos;
+                stmt->decl_default_constructed =
+                    !has_decl_initializer && isVulFixedIntType(stmt->decl_type);
                 CXCursor init_expr = clang_getNullCursor();
                 for (auto& vc : var_children) {
                     if (clang_getCursorKind(vc) == CXCursor_LambdaExpr) continue;
@@ -2021,6 +2757,17 @@ static StmtPtr convertStmt(CXCursor cursor) {
                 }
                 if (!clang_Cursor_isNull(init_expr)) {
                     stmt->decl_init = convertExpr(init_expr);
+                    if (stmt->decl_init.has_value() &&
+                        containsUnsupportedOperatorReceiverCall(stmt->decl_init.value())) {
+                        std::string recovered = noArgCallNameFromText(decl_text); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+                        if (!recovered.empty()) {
+                            auto call = std::make_shared<Expr>();
+                            call->kind = ExprKind::Call;
+                            call->callee = recovered;
+                            call->type = stmt->decl_type;
+                            stmt->decl_init = call;
+                        }
+                    }
                     if (isAliasCarrierType(stmt->decl_type)) {
                         collectInitArgExprs(init_expr, stmt->decl_init_args);
                     }
@@ -2033,6 +2780,40 @@ static StmtPtr convertStmt(CXCursor cursor) {
             }
         }
         return nullptr;
+    }
+
+    case CXCursor_UnaryOperator: {
+        auto unary = convertExpr(cursor);
+        if (unary && (unary->op == "++" || unary->op == "--") &&
+            !children.empty()) {
+            auto target = convertExpr(children[0]);
+            TypeInfo promoted = builtinIntegerPromotion(target ? target->type : TypeInfo{});
+            ExprPtr lhs = target;
+            ExprPtr one;
+            TypeInfo result_type;
+            if (target && isBuiltinIntegerType(target->type)) {
+                lhs = makeImplicitBuiltinCast(target, promoted);
+                one = make_literal("1", promoted);
+                result_type = promoted;
+            } else {
+                lhs = target;
+                TypeInfo one_type = target ? target->type : TypeInfo{"int", 32, true, true, "builtin"};
+                one = make_literal("1", one_type);
+                result_type = target ? target->type : one_type;
+            }
+            auto stmt = std::make_shared<Stmt>();
+            stmt->kind = StmtKind::Assign;
+            stmt->assign_target = target;
+            stmt->assign_value = make_binary(unary->op == "++" ? "+" : "-",
+                                             lhs,
+                                             one,
+                                             result_type);
+            return stmt;
+        }
+        auto stmt = std::make_shared<Stmt>();
+        stmt->kind = StmtKind::ExprStmt;
+        stmt->expr_stmt = unary;
+        return stmt;
     }
 
     case CXCursor_BinaryOperator:
@@ -2088,6 +2869,16 @@ static StmtPtr convertStmt(CXCursor cursor) {
         auto stmt = std::make_shared<Stmt>();
         stmt->kind = StmtKind::ExprStmt;
         stmt->expr_stmt = convertExpr(cursor);
+        if (containsUnsupportedOperatorReceiverCall(stmt->expr_stmt)) {
+            std::string recovered = noArgCallNameFromText(cursorText(cursor, true)); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+            if (!recovered.empty()) {
+                auto call = std::make_shared<Expr>();
+                call->kind = ExprKind::Call;
+                call->callee = recovered;
+                call->type = TypeInfo{"void", 0, false};
+                stmt->expr_stmt = call;
+            }
+        }
         return stmt;
     }
 
@@ -2139,6 +2930,16 @@ static StmtPtr convertStmt(CXCursor cursor) {
         auto stmt = std::make_shared<Stmt>();
         stmt->kind = StmtKind::ExprStmt;
         stmt->expr_stmt = convertExpr(cursor);
+        if (containsUnsupportedOperatorReceiverCall(stmt->expr_stmt)) {
+            std::string recovered = noArgCallNameFromText(cursorText(cursor, true)); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+            if (!recovered.empty()) {
+                auto call = std::make_shared<Expr>();
+                call->kind = ExprKind::Call;
+                call->callee = recovered;
+                call->type = TypeInfo{"void", 0, false};
+                stmt->expr_stmt = call;
+            }
+        }
         return stmt;
     }
 
@@ -2255,6 +3056,20 @@ static StmtPtr convertStmt(CXCursor cursor) {
         stmt->kind = StmtKind::Return;
         if (!children.empty()) {
             stmt->return_value = convertExpr(children[0]);
+            if (stmt->return_value.has_value() &&
+                containsUnsupportedOperatorReceiverCall(stmt->return_value.value())) {
+                std::string text = cursorText(cursor, true); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+                auto ret = text.find("return");
+                if (ret != std::string::npos) text = text.substr(ret + std::string("return").size());
+                std::string recovered = noArgCallNameFromText(text); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+                if (!recovered.empty()) {
+                    auto call = std::make_shared<Expr>();
+                    call->kind = ExprKind::Call;
+                    call->callee = recovered;
+                    call->type = stmt->return_value.value()->type;
+                    stmt->return_value = call;
+                }
+            }
         }
         return stmt;
     }
@@ -2282,6 +3097,16 @@ static StmtPtr convertStmt(CXCursor cursor) {
             auto stmt = std::make_shared<Stmt>();
             stmt->kind = StmtKind::ExprStmt;
             stmt->expr_stmt = convertExpr(cursor);
+            if (containsUnsupportedOperatorReceiverCall(stmt->expr_stmt)) {
+                std::string recovered = noArgCallNameFromText(cursorText(cursor, true)); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
+                if (!recovered.empty()) {
+                    auto call = std::make_shared<Expr>();
+                    call->kind = ExprKind::Call;
+                    call->callee = recovered;
+                    call->type = TypeInfo{"void", 0, false};
+                    stmt->expr_stmt = call;
+                }
+            }
             return stmt;
         }
         // Recurse into children for unknown statement kinds
@@ -2350,6 +3175,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
                                                       const std::string& name) {
     auto fn = std::make_shared<FunctionAST>();
     fn->name = name;
+    registerLambdaOperatorName(lambda_cursor, name);
     fn->return_type = TypeInfo{"auto", 0, false};
     auto collect_nested_lambdas = [&](CXCursor compound) {
         for (auto& stmt_child : getChildren(compound)) {
@@ -2381,6 +3207,10 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         }
     }
     auto collect_lambda_method = [&](CXCursor method) {
+        TypeInfo method_return = convertType(clang_getCursorResultType(method));
+        if (!method_return.name.empty() || method_return.width > 0) {
+            fn->return_type = method_return;
+        }
         struct LambdaMethodCtx {
             FunctionAST* fn;
         } ctx{fn.get()};
@@ -2513,6 +3343,32 @@ static StmtPtr convertStaticArrayVarDecl(CXCursor c) {
     return stmt;
 }
 
+static StmtPtr convertGlobalConstScalarDecl(CXCursor c) {
+    if (clang_getCursorKind(c) != CXCursor_VarDecl) return nullptr;
+    CXType cursor_type = clang_getCursorType(c);
+    TypeInfo type = convertType(cursor_type);
+    if (type.is_array || !clang_isConstQualifiedType(cursor_type)) return nullptr;
+    CXEvalResult eval = clang_Cursor_Evaluate(c);
+    if (!eval) return nullptr;
+    CXEvalResultKind kind = clang_EvalResult_getKind(eval);
+    if (kind != CXEval_Int) {
+        clang_EvalResult_dispose(eval);
+        return nullptr;
+    }
+    std::string value = type.is_signed
+        ? std::to_string(clang_EvalResult_getAsLongLong(eval))
+        : std::to_string(clang_EvalResult_getAsUnsigned(eval));
+    clang_EvalResult_dispose(eval);
+
+    auto stmt = std::make_shared<Stmt>();
+    stmt->kind = StmtKind::Decl;
+    stmt->decl_name = cxToStr(clang_getCursorSpelling(c));
+    stmt->decl_type = type;
+    stmt->decl_type.is_static = true;
+    stmt->decl_init = make_literal(value, type);
+    return stmt;
+}
+
 static std::string firstDeclRefName(CXCursor cursor) {
     if (clang_getCursorKind(cursor) == CXCursor_DeclRefExpr) {
         return cxToStr(clang_getCursorSpelling(cursor));
@@ -2538,17 +3394,29 @@ static std::string firstDeclRefName(CXCursor cursor) {
 static StructConstructorInfo collectStructConstructorInfo(CXCursor ctor) {
     StructConstructorInfo info;
     auto children = getChildren(ctor);
+    std::unordered_set<std::string> params;
     for (auto child : children) {
         if (clang_getCursorKind(child) == CXCursor_ParmDecl) {
-            info.param_names.push_back(cxToStr(clang_getCursorSpelling(child)));
+            std::string name = cxToStr(clang_getCursorSpelling(child));
+            info.param_names.push_back(name);
+            if (!name.empty()) params.insert(std::move(name));
         }
     }
-    for (size_t i = 0; i + 1 < children.size(); ++i) {
-        if (clang_getCursorKind(children[i]) != CXCursor_MemberRef) continue;
+    for (size_t i = 0; i < children.size(); ++i) {
+        auto kind = clang_getCursorKind(children[i]);
+        if (kind != CXCursor_MemberRef && kind != CXCursor_MemberRefExpr) continue;
         std::string field = cxToStr(clang_getCursorSpelling(children[i]));
         if (field.empty()) continue;
-        std::string param = firstDeclRefName(children[i + 1]);
-        if (!param.empty()) info.field_to_param[field] = param;
+        std::string param = firstDeclRefName(children[i]);
+        if (param.empty() || !params.count(param)) {
+            for (size_t j = i + 1; j < children.size(); ++j) {
+                auto next_kind = clang_getCursorKind(children[j]);
+                if (next_kind == CXCursor_MemberRef || next_kind == CXCursor_MemberRefExpr) break;
+                param = firstDeclRefName(children[j]);
+                if (!param.empty() && params.count(param)) break;
+            }
+        }
+        if (!param.empty() && params.count(param)) info.field_to_param[field] = param;
     }
     return info;
 }
@@ -2620,6 +3488,9 @@ BuildResult buildASTFromSource(const std::string& source_file,
                                const std::string& top_function,
                                const std::vector<std::string>& extra_args) {
     BuildResult result;
+    lambda_operator_usr_to_name.clear();
+    lambda_operator_location_to_name.clear();
+    lambda_operator_signature_to_name.clear();
 
     CXIndex index = clang_createIndex(0, 0);
 
@@ -2698,6 +3569,7 @@ BuildResult buildASTFromSource(const std::string& source_file,
     if (!saw_top) {
         source_functions.push_back({top_function, ctx.found});
     }
+    collectLambdaOperatorNames(root);
 
     for (const auto& fn : source_functions) {
         std::string subset_error = checkSubset(fn.cursor, fn.name);
@@ -2736,6 +3608,7 @@ BuildResult buildASTFromSource(const std::string& source_file,
     clang_visitChildren(root, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
         auto* decls = static_cast<std::vector<StmtPtr>*>(data);
         auto stmt = convertStaticArrayVarDecl(c);
+        if (!stmt) stmt = convertGlobalConstScalarDecl(c);
         if (stmt) decls->push_back(stmt);
         return CXChildVisit_Continue;
     }, &global_static_decls);
@@ -2767,4 +3640,3 @@ BuildResult buildASTFromSource(const std::string& source_file,
 }
 
 } // namespace pred
-

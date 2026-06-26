@@ -19,7 +19,21 @@ struct VULSliceRef {
     template<int M>
     VULSliceRef& operator=(Int<M>);
     VULSliceRef& operator=(VULSliceRef<N>);
+    template<int K>
+    Int<N * K> repeat() const;
+    template<int M>
+    Int<N + M> cat(Int<M>) const;
+    template<int M>
+    UInt<N + M> cat(UInt<M>) const;
+    template<int M>
+    Int<N + M> cat(VULSliceRef<M>) const;
+    bool reduce_or() const;
+    bool reduce_and() const;
+    bool reduce_xor() const;
 };
+
+template<int N, int Hi, int Lo>
+struct VULStaticSliceRef : VULSliceRef<N> {};
 
 template<int N>
 struct UInt {
@@ -49,6 +63,8 @@ struct UInt {
 
     VULSliceRef<N> operator()(int, int);
     UInt<N> operator()(int, int) const;
+    template <int Hi, int Lo> VULStaticSliceRef<N, Hi, Lo> at();
+    template <int Hi, int Lo> VULStaticSliceRef<N, Hi, Lo> at() const;
 
     template<int K>
     UInt<N * K> repeat() const;
@@ -87,6 +103,8 @@ struct Int {
 
     VULSliceRef<N> operator()(int, int);
     Int<N> operator()(int, int) const;
+    template <int Hi, int Lo> VULStaticSliceRef<N, Hi, Lo> at();
+    template <int Hi, int Lo> VULStaticSliceRef<N, Hi, Lo> at() const;
 
     template<int K>
     Int<N * K> repeat() const;

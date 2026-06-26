@@ -54,6 +54,21 @@ bool vectorContains(const std::vector<std::string>& values, const std::string& n
     return std::find(values.begin(), values.end(), name) != values.end();
 }
 
+bool isBuiltinDivRemType(const TypeInfo& type) {
+    if (type.width <= 0 || type.name == "bool" || type.hw_kind == "bool") return false;
+    if (type.hw_kind == "builtin") return true;
+    return type.name == "char" || type.name == "signed char" ||
+           type.name == "unsigned char" || type.name == "short" ||
+           type.name == "unsigned short" || type.name == "int" ||
+           type.name == "unsigned int" || type.name == "long" ||
+           type.name == "unsigned long" || type.name == "long long" ||
+           type.name == "unsigned long long" || type.name == "uint8_t" ||
+           type.name == "uint16_t" || type.name == "uint32_t" ||
+           type.name == "uint64_t" || type.name == "int8_t" ||
+           type.name == "int16_t" || type.name == "int32_t" ||
+           type.name == "int64_t";
+}
+
 bool exprContainsVar(const ExprPtr& e, const std::string& name) {
     if (!e) return false;
     if (e->kind == ExprKind::VarRef) return e->var_name == name;
@@ -220,7 +235,14 @@ PredicateVerifyResult verifyExpr(const ExprPtr& e, VerifyState& state) {
         if (auto r = verify_child(e->left); !r.ok) return finish(r);
         if (auto r = verify_child(e->right); !r.ok) return finish(r);
         if ((e->op == "/" || e->op == "%")) {
-            return finish(fail("PredicateVerifier: division/modulo must not appear in Predicate IR"));
+            if (!e->left || !e->right ||
+                !isBuiltinDivRemType(e->left->type) ||
+                !isBuiltinDivRemType(e->right->type) ||
+                e->left->type.is_signed != e->right->type.is_signed ||
+                e->left->type.width != e->right->type.width ||
+                e->type.width != e->left->type.width) {
+                return finish(fail("PredicateVerifier: only canonical builtin division/modulo may appear in Predicate IR"));
+            }
         }
         return finish();
     case ExprKind::UnaryOp:
@@ -427,9 +449,13 @@ PredicateVerifyResult verifyPredicateProgram(const PredicateProgram& program) {
             return fail("PredicateVerifier: unknown output width for '" + out.name + "'");
         }
         if (!out.paired_control.empty()) {
-            if (!vectorContains(program.outputs, out.paired_control)) {
+            const bool known_control =
+                vectorContains(program.outputs, out.paired_control) ||
+                vectorContains(program.inputs, out.paired_control) ||
+                program.param_directions.find(out.paired_control) != program.param_directions.end();
+            if (!known_control) {
                 return fail("PredicateVerifier: paired control '" + out.paired_control +
-                            "' for output '" + out.name + "' is not an output");
+                            "' for output '" + out.name + "' is not a known port");
             }
             auto control_type = program.symbols.find(out.paired_control);
             if (control_type != program.symbols.end() &&

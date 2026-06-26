@@ -22,6 +22,7 @@ enum class VulCallKind {
     RegProxyGet,
     SignedView,
     OperatorCall,
+    At,
     RangeAt,
     BitAt,
 };
@@ -37,6 +38,7 @@ struct VulCallInfo {
     std::vector<CXCursor> normal_arg_cursors;
     CXCursorKind source_cursor_kind = CXCursor_UnexposedExpr;
     std::optional<int> template_value;
+    std::vector<int> template_values;
 };
 
 std::optional<int> recognizeTemplateInt(CXCursor cursor, int index = 0);

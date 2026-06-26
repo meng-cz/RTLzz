@@ -113,15 +113,39 @@ TypeInfo constantContextType(TypeInfo target_type) {
 }
 
 ExprPtr castIfWidthChanges(ExprPtr value, const TypeInfo& target_type) {
-    if (!value || target_type.width <= 0 || value->type.width <= 0 ||
-        target_type.width == value->type.width) {
+    if (!value || target_type.width <= 0 || value->type.width <= 0) {
+        return value;
+    }
+    if (target_type.width == value->type.width) {
+        const bool has_target_type =
+            !target_type.name.empty() || !target_type.hw_kind.empty() || target_type.is_hw_int;
+        const bool metadata_differs =
+            value->type.name != target_type.name ||
+            value->type.hw_kind != target_type.hw_kind ||
+            value->type.is_signed != target_type.is_signed ||
+            value->type.is_hw_int != target_type.is_hw_int;
+        if (has_target_type && metadata_differs) {
+            // A same-width signed/unsigned conversion is still semantic. Keep
+            // it as an explicit node so SSA symbol typing cannot erase the
+            // signed view and make div/rem/compare silently unsigned.
+            auto out = std::make_shared<Expr>();
+            out->kind = ExprKind::Cast;
+            out->cast_expr = std::move(value);
+            out->cast_type = target_type;
+            out->type = target_type;
+            return out;
+        }
         return value;
     }
     if (target_type.width > value->type.width) {
+        ExprPtr widened;
         if (value->type.hw_kind == "signed_view" || value->type.is_signed) {
-            return make_sext(value, target_type.width);
+            widened = make_sext(value, target_type.width);
+        } else {
+            widened = make_zext(value, target_type.width);
         }
-        return make_zext(value, target_type.width);
+        widened->type = target_type;
+        return widened;
     }
     if (value->type.hw_kind == "signed_view" && target_type.width > 0 && value->type.width > target_type.width) {
         auto narrowed = make_trunc(value, target_type.width, target_type.is_signed);
@@ -129,7 +153,9 @@ ExprPtr castIfWidthChanges(ExprPtr value, const TypeInfo& target_type) {
         auto sign = make_bit_select(cloneExpr(value), value->type.width - 1);
         return make_write_bit(narrowed, target_type.width - 1, sign, target_type);
     }
-    return make_trunc(value, target_type.width, target_type.is_signed);
+    auto narrowed = make_trunc(value, target_type.width, target_type.is_signed);
+    narrowed->type = target_type;
+    return narrowed;
 }
 
 ExprPtr castConstantToContext(ExprPtr value, TypeInfo target_type) {

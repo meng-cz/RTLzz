@@ -2,13 +2,14 @@
 #include "predicate/DefaultTotalizationPass.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace pred {
 namespace {
 
-constexpr int kMaxOutputSubstitutionDepth = 64;
+constexpr int kMaxOutputSubstitutionDepth = 4096;
 
 bool isTrueGuard(const ExprPtr& e) {
     return !e || (e->kind == ExprKind::Literal &&
@@ -83,7 +84,11 @@ ExprPtr cloneSubstituteImpl(const ExprPtr& e,
                             std::unordered_map<std::string, ExprPtr>& memo,
                             int depth) {
     if (!e) return nullptr;
-    if (depth > kMaxOutputSubstitutionDepth) return cloneExprShallow(e);
+    if (depth > kMaxOutputSubstitutionDepth) {
+        throw std::runtime_error(
+            "OutputExpressionMap: expression substitution depth exceeds " +
+            std::to_string(kMaxOutputSubstitutionDepth));
+    }
     if (e->kind == ExprKind::VarRef) {
         auto it = env.find(e->var_name);
         if (it != env.end()) {
@@ -224,18 +229,98 @@ bool exprContainsAnyVar(const ExprPtr& e, const std::unordered_set<std::string>&
     return false;
 }
 
+bool exprContainsVarPrefix(const ExprPtr& e, const std::string& prefix) {
+    if (!e) return false;
+    if (e->kind == ExprKind::VarRef) {
+        return e->var_name.rfind(prefix, 0) == 0;
+    }
+    if (exprContainsVarPrefix(e->left, prefix) ||
+        exprContainsVarPrefix(e->right, prefix) ||
+        exprContainsVarPrefix(e->operand, prefix) ||
+        exprContainsVarPrefix(e->array_base, prefix) ||
+        exprContainsVarPrefix(e->index, prefix) ||
+        exprContainsVarPrefix(e->struct_base, prefix) ||
+        exprContainsVarPrefix(e->cast_expr, prefix) ||
+        exprContainsVarPrefix(e->cond, prefix) ||
+        exprContainsVarPrefix(e->then_expr, prefix) ||
+        exprContainsVarPrefix(e->else_expr, prefix) ||
+        exprContainsVarPrefix(e->base, prefix) ||
+        exprContainsVarPrefix(e->value, prefix)) {
+        return true;
+    }
+    for (const auto& arg : e->args) {
+        if (exprContainsVarPrefix(arg, prefix)) return true;
+    }
+    for (const auto& part : e->parts) {
+        if (exprContainsVarPrefix(part, prefix)) return true;
+    }
+    return false;
+}
+
+bool exprContainsVar(const ExprPtr& e, const std::string& name) {
+    if (!e) return false;
+    if (e->kind == ExprKind::VarRef) return e->var_name == name;
+    if (exprContainsVar(e->left, name) ||
+        exprContainsVar(e->right, name) ||
+        exprContainsVar(e->operand, name) ||
+        exprContainsVar(e->array_base, name) ||
+        exprContainsVar(e->index, name) ||
+        exprContainsVar(e->struct_base, name) ||
+        exprContainsVar(e->cast_expr, name) ||
+        exprContainsVar(e->cond, name) ||
+        exprContainsVar(e->then_expr, name) ||
+        exprContainsVar(e->else_expr, name) ||
+        exprContainsVar(e->base, name) ||
+        exprContainsVar(e->value, name)) {
+        return true;
+    }
+    for (const auto& arg : e->args) {
+        if (exprContainsVar(arg, name)) return true;
+    }
+    for (const auto& part : e->parts) {
+        if (exprContainsVar(part, name)) return true;
+    }
+    return false;
+}
+
 std::string baseNameOfSsa(const std::string& name) {
     return stripSsaSuffix(name);
 }
 
 std::string semanticReasonFor(const PredicateProgram& program, const std::string& name) {
     auto it = program.output_default_reasons.find(name);
-    return it == program.output_default_reasons.end() ? "" : it->second;
+    if (it != program.output_default_reasons.end()) return it->second;
+    std::size_t best = 0;
+    std::string reason;
+    for (const auto& item : program.output_default_reasons) {
+        const std::string prefix = item.first + "_";
+        if (name.rfind(prefix, 0) == 0 && item.first.size() > best &&
+            numericUnderscoreSuffix(name.substr(prefix.size()))) {
+            best = item.first.size();
+            reason = item.second;
+        }
+    }
+    return reason;
 }
 
 std::string pairedControlFor(const PredicateProgram& program, const std::string& name) {
     auto it = program.output_paired_controls.find(name);
-    return it == program.output_paired_controls.end() ? "" : it->second;
+    if (it != program.output_paired_controls.end()) return it->second;
+    std::size_t best = 0;
+    std::string control;
+    for (const auto& item : program.output_paired_controls) {
+        const std::string prefix = item.first + "_";
+        if (name.rfind(prefix, 0) == 0 && item.first.size() > best &&
+            numericUnderscoreSuffix(name.substr(prefix.size()))) {
+            best = item.first.size();
+            const std::string suffix = name.substr(item.first.size());
+            auto control_type = program.symbols.find(item.second);
+            control = control_type != program.symbols.end() && control_type->second.is_array
+                ? item.second + suffix
+                : item.second;
+        }
+    }
+    return control;
 }
 
 ExprPtr defaultValueFor(const std::string& name, const TypeInfo& type) {
@@ -278,6 +363,43 @@ struct GuardedDefinition {
 
 using GuardedDefinitions = std::unordered_map<std::string, std::vector<GuardedDefinition>>;
 
+ExprPtr simplifyOutputExpr(const ExprPtr& e, const GuardedDefinitions& defs);
+
+ExprPtr controlExprForOutput(const PredicateProgram& program,
+                             const std::unordered_map<std::string, ExprPtr>& env,
+                             const std::unordered_map<std::string, std::string>& latest_for_output,
+                             const std::unordered_map<std::string, ExprPtr>& final_substitutions,
+                             const GuardedDefinitions& guarded_definitions,
+                             const std::string& control_name) {
+    if (control_name.empty()) return nullptr;
+    auto direct = env.find(control_name);
+    if (direct != env.end()) {
+        return simplifyOutputExpr(cloneSubstitute(direct->second, final_substitutions),
+                                  guarded_definitions);
+    }
+    auto latest = latest_for_output.find(control_name);
+    if (latest != latest_for_output.end()) {
+        auto latest_env = env.find(latest->second);
+        if (latest_env != env.end()) {
+            return simplifyOutputExpr(cloneSubstitute(latest_env->second, final_substitutions),
+                                      guarded_definitions);
+        }
+    }
+
+    TypeInfo control_type = make_bool_type();
+    auto symbol_it = program.symbols.find(control_name);
+    if (symbol_it != program.symbols.end() && symbol_it->second.width > 0) {
+        control_type = symbol_it->second;
+    }
+
+    auto dir_it = program.param_directions.find(control_name);
+    if (dir_it != program.param_directions.end() &&
+        (dir_it->second == "Input" || dir_it->second == "InOut")) {
+        return make_var(control_name + "_0", control_type);
+    }
+    return make_var(control_name, control_type);
+}
+
 bool isLiteral(const ExprPtr& e) {
     return e && e->kind == ExprKind::Literal;
 }
@@ -295,7 +417,16 @@ ExprPtr literalForGuardedDefinition(const std::string& name,
     return nullptr;
 }
 
-ExprPtr simplifyOutputExpr(const ExprPtr& e, const GuardedDefinitions& defs);
+ExprPtr unconditionalDefinition(const ExprPtr& e,
+                                const GuardedDefinitions& defs) {
+    if (!e || e->kind != ExprKind::VarRef) return e;
+    auto it = defs.find(e->var_name);
+    if (it == defs.end()) return e;
+    for (const auto& def : it->second) {
+        if (isTrueGuard(def.guard)) return def.value;
+    }
+    return e;
+}
 
 ExprPtr simplifyUnary(const ExprPtr& e) {
     if (!e || e->kind != ExprKind::UnaryOp) return e;
@@ -390,6 +521,11 @@ ExprPtr simplifySlice(const ExprPtr& e) {
     return make_slice(cloneExprDeep(inner->base), new_hi, new_lo, out_type);
 }
 
+bool isLogicalNegation(const ExprPtr& candidate, const ExprPtr& value) {
+    return candidate && candidate->kind == ExprKind::UnaryOp &&
+           candidate->op == "!" && exprEqual(candidate->operand, value);
+}
+
 ExprPtr simplifyTernary(const ExprPtr& e, const GuardedDefinitions& defs) {
     if (!e || e->kind != ExprKind::Ternary) return e;
     if (isTrueGuard(e->cond)) return e->then_expr;
@@ -409,6 +545,29 @@ ExprPtr simplifyTernary(const ExprPtr& e, const GuardedDefinitions& defs) {
     if (isTrueGuard(e->then_expr) && isFalseGuard(e->else_expr)) return e->cond;
     if (isFalseGuard(e->then_expr) && isTrueGuard(e->else_expr)) {
         return make_unary("!", e->cond, TypeInfo{"bool", 1, false});
+    }
+    ExprPtr resolved_else = unconditionalDefinition(e->else_expr, defs);
+    if (resolved_else && resolved_else->kind == ExprKind::Ternary &&
+        isLogicalNegation(resolved_else->cond, e->cond)) {
+        return make_ternary(cloneExprDeep(e->cond),
+                            cloneExprDeep(e->then_expr),
+                            cloneExprDeep(resolved_else->then_expr),
+                            e->type);
+    }
+    if (resolved_else && resolved_else->kind == ExprKind::Ternary &&
+        exprEqual(resolved_else->cond, e->cond)) {
+        return make_ternary(cloneExprDeep(e->cond),
+                            cloneExprDeep(e->then_expr),
+                            cloneExprDeep(resolved_else->else_expr),
+                            e->type);
+    }
+    ExprPtr resolved_then = unconditionalDefinition(e->then_expr, defs);
+    if (resolved_then && resolved_then->kind == ExprKind::Ternary &&
+        exprEqual(resolved_then->cond, e->cond)) {
+        return make_ternary(cloneExprDeep(e->cond),
+                            cloneExprDeep(resolved_then->then_expr),
+                            cloneExprDeep(e->else_expr),
+                            e->type);
     }
     return e;
 }
@@ -498,14 +657,24 @@ void buildOutputExpressionMap(PredicateProgram& program) {
     std::vector<std::string> order;
     std::unordered_set<std::string> seeded_default_names;
 
-    for (const auto& output_name : program.outputs) {
-        TypeInfo type = program.symbols.count(output_name) ? program.symbols[output_name] : TypeInfo{};
+    auto seed_output = [&](const std::string& output_name) {
+        TypeInfo type = program.symbols.count(output_name) ? program.symbols.at(output_name) : TypeInfo{};
         std::string initial_name = output_name + "_0";
         env[initial_name] = defaultValueFor(output_name, type);
         seeded_default_values[initial_name] = env[initial_name];
         types[initial_name] = type;
         has_default[initial_name] = true;
         seeded_default_names.insert(initial_name);
+    };
+    for (const auto& output_name : program.outputs) {
+        if (!semanticReasonFor(program, output_name).empty()) {
+            seed_output(output_name);
+        }
+        for (const auto& flattened_name : flattenedSymbols(program.symbols, output_name)) {
+            if (!semanticReasonFor(program, flattened_name).empty()) {
+                seed_output(flattened_name);
+            }
+        }
     }
 
     for (auto& assign : program.assignments) {
@@ -525,6 +694,10 @@ void buildOutputExpressionMap(PredicateProgram& program) {
         ExprPtr raw_rhs = cloneExprDeep(assign.value);
         bool raw_rhs_depends_on_seeded_default = exprContainsAnyVar(raw_rhs, seeded_default_names);
         ExprPtr rhs = cloneSubstitute(raw_rhs, seeded_default_values);
+        // Output initial SSA versions are policy seeds, not free variables.
+        // Persist their explicit values into the assignment graph as well as
+        // the final output map so every downstream consumer sees a closed IR.
+        assign.value = simplifyOutputExpr(cloneExprDeep(rhs), guarded_definitions);
         auto update_binding = [&](const std::string& binding_name,
                                   const ExprPtr& binding_rhs,
                                   bool rhs_depends_on_seeded_default) {
@@ -649,10 +822,49 @@ void buildOutputExpressionMap(PredicateProgram& program) {
         ExprPtr expr = it != env.end()
             ? simplifyOutputExpr(cloneSubstitute(it->second, final_substitutions), guarded_definitions)
             : defaultValueFor(output_name, type);
+        std::string semantic_reason = semanticReasonFor(program, output_name);
+        std::string paired_control = pairedControlFor(program, output_name);
+        bool disabled_data_totalized = false;
+        if (!paired_control.empty() && paired_control != output_name) {
+            auto control_expr = controlExprForOutput(program,
+                                                     env,
+                                                     latest_for_output,
+                                                     final_substitutions,
+                                                     guarded_definitions,
+                                                     paired_control);
+            if (control_expr) {
+                expr = simplifyOutputExpr(
+                    make_ternary(control_expr,
+                                 cloneExprDeep(expr),
+                                 defaultValueFor(output_name, type),
+                                 type.width > 0 ? type : (expr ? expr->type : TypeInfo{})),
+                    guarded_definitions);
+                disabled_data_totalized = true;
+            }
+        }
+        const bool preserves_incoming_value =
+            exprContainsVar(expr, output_name + "_0");
+        auto direction_it = program.param_directions.find(output_name);
+        if (preserves_incoming_value &&
+            direction_it != program.param_directions.end() &&
+            direction_it->second == "Output" &&
+            semanticReasonFor(program, output_name).empty()) {
+            direction_it->second = "InOut";
+            program.diagnostics.push_back(
+                "partial_mutable_reference_promoted_to_inout: " + output_name);
+        }
+        bool has_undefined_phi =
+            exprContainsVarPrefix(expr, "__undefined_phi_");
         bool fully_covered = guard_coverage.count(source_name) && isTrueGuard(guard_coverage[source_name]);
-        bool defaulted = it == env.end() || (!fully_covered &&
+        bool defaulted = disabled_data_totalized || it == env.end() || (!fully_covered &&
                          (uses_seeded_default || has_default[source_name]));
-        if (defaulted) {
+        if (has_undefined_phi) {
+            defaulted = true;
+            program.diagnostics.push_back(
+                "missing_assignment_for_non_defaultable_output: " + output_name +
+                " source=" + source_name +
+                " covered=false seeded=false");
+        } else if (defaulted) {
             auto decision = classifyDefaultForProgram(program, output_name, type);
             if (decision.allowed) {
                 program.diagnostics.push_back(defaultDiagnostic(
@@ -665,8 +877,6 @@ void buildOutputExpressionMap(PredicateProgram& program) {
             }
         }
         auto default_decision = classifyDefaultForProgram(program, output_name, type);
-        std::string semantic_reason = semanticReasonFor(program, output_name);
-        std::string paired_control = pairedControlFor(program, output_name);
         std::string output_default_reason = defaulted ? default_decision.reason : semantic_reason;
         std::string output_default_guard_relation =
             output_default_reason.empty() ? "" : defaultGuardRelation(default_decision);
@@ -707,8 +917,9 @@ void buildOutputExpressionMap(PredicateProgram& program) {
     if (program.inputs.empty()) {
         if (!program.param_directions.empty()) {
             for (const auto& item : program.param_directions) {
-                if ((item.second == "Input" || item.second == "InOut") &&
-                    !containsName(program.outputs, item.first)) {
+                if (item.second == "InOut" ||
+                    (item.second == "Input" &&
+                     !containsName(program.outputs, item.first))) {
                     program.inputs.push_back(item.first);
                 }
             }

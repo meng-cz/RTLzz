@@ -22,6 +22,7 @@ struct PhiNode {
     SSAVar result;                          // x_3 = phi(...)
     std::vector<std::pair<BlockId, SSAVar>> operands; // [(pred_block, x_version), ...]
     TypeInfo type;
+    std::size_t expected_predecessors = 0;
 };
 
 // SSA-form basic block: original stmts with variables renamed + phi nodes

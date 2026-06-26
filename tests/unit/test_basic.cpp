@@ -683,8 +683,19 @@ void test_uninitialized_and_partial_output_errors() {
     ifs->if_cond = make_var("sel", boolean());
     ifs->if_then.push_back(assign("out", make_var("a", u(8)), u(8)));
     auto partial = runPipeline(fn({ifs}));
-    CHECK(!partial.error.empty());
-    checkContains(partial.error, "missing_assignment_for_non_defaultable_output");
+    CHECK(partial.error.empty());
+    CHECK(partial.prog.param_directions.at("out") == "InOut");
+    CHECK(std::find(partial.prog.inputs.begin(), partial.prog.inputs.end(), "out") !=
+          partial.prog.inputs.end());
+    checkContains(emitText(partial.prog), "out_0");
+    bool has_inout_diagnostic = false;
+    for (const auto& diagnostic : partial.prog.diagnostics) {
+        if (diagnostic.find("partial_mutable_reference_promoted_to_inout") !=
+            std::string::npos) {
+            has_inout_diagnostic = true;
+        }
+    }
+    CHECK(has_inout_diagnostic);
 
     FunctionAST vld_fn;
     vld_fn.name = "default_vld";
@@ -873,6 +884,45 @@ void test_int_semantics_core_widths() {
     CHECK(signed_add.type.is_signed);
 
     std::cout << "  PASS: test_int_semantics_core_widths\n";
+}
+
+void test_power_of_two_div_rem_lowering() {
+    auto rem = runPipeline(fn({
+        assign("out",
+               make_binary("%",
+                           make_var("a", u(8)),
+                           make_literal("2", TypeInfo{"int", 32, true}),
+                           u(8)),
+               u(8))
+    }));
+    CHECK(rem.error.empty());
+    checkContains(rem.text, "&");
+    CHECK(rem.text.find("%") == std::string::npos);
+
+    auto div = runPipeline(fn({
+        assign("out",
+               make_binary("/",
+                           make_var("a", u(8)),
+                           make_literal("4", TypeInfo{"int", 32, true}),
+                           u(8)),
+               u(8))
+    }));
+    CHECK(div.error.empty());
+    checkContains(div.text, ">>");
+    CHECK(div.text.find("/") == std::string::npos);
+
+    auto unsupported = runPipeline(fn({
+        assign("out",
+               make_binary("%",
+                           make_var("a", u(8)),
+                           make_literal("3", TypeInfo{"int", 32, true}),
+                           u(8)),
+               u(8))
+    }));
+    CHECK(!unsupported.error.empty());
+    checkContains(unsupported.error, "Unsupported division/modulo");
+
+    std::cout << "  PASS: test_power_of_two_div_rem_lowering\n";
 }
 
 void test_canonical_int_ir_semantics() {
@@ -1445,6 +1495,62 @@ void test_smt_type_and_operation_semantics() {
     }
 
     {
+        TypeInfo u64{"uint64_t", 64, false, true, "builtin"};
+        TypeInfo i64{"int64_t", 64, true, true, "builtin"};
+        FunctionAST f;
+        f.name = "smt_builtin_div_rem";
+        f.return_type = TypeInfo{"void", 0, false};
+        f.params.push_back(param(u64, "ua"));
+        f.params.push_back(param(u64, "ub"));
+        f.params.push_back(param(i64, "sa"));
+        f.params.push_back(param(i64, "sb"));
+        f.params.push_back(param(u64, "uq", ParamDirection::Output));
+        f.params.push_back(param(u64, "ur", ParamDirection::Output));
+        f.params.push_back(param(i64, "sq", ParamDirection::Output));
+        f.params.push_back(param(i64, "sr", ParamDirection::Output));
+        f.body.push_back(assign("uq", make_binary("/", make_var("ua", u64), make_var("ub", u64), u64), u64));
+        f.body.push_back(assign("ur", make_binary("%", make_var("ua", u64), make_var("ub", u64), u64), u64));
+        f.body.push_back(assign("sq", make_binary("/", make_var("sa", i64), make_var("sb", i64), i64), i64));
+        f.body.push_back(assign("sr", make_binary("%", make_var("sa", i64), make_var("sb", i64), i64), i64));
+        auto r = runPipeline(std::move(f));
+        CHECK(r.error.empty());
+        checkContains(r.smt, "(bvudiv ua_0 ub_0)");
+        checkContains(r.smt, "(bvurem ua_0 ub_0)");
+        checkContains(r.smt, "(bvsdiv sa_0 sb_0)");
+        checkContains(r.smt, "(bvsrem sa_0 sb_0)");
+    }
+
+    {
+        TypeInfo u64{"uint64_t", 64, false, true, "builtin"};
+        TypeInfo i64{"int64_t", 64, true, true, "builtin"};
+        FunctionAST f;
+        f.name = "smt_signed_cast_div_rem";
+        f.return_type = TypeInfo{"void", 0, false};
+        f.params.push_back(param(u64, "lhs"));
+        f.params.push_back(param(u64, "rhs"));
+        f.params.push_back(param(u64, "quot", ParamDirection::Output));
+        f.params.push_back(param(u64, "rem", ParamDirection::Output));
+
+        auto signed_lhs = castIfWidthChanges(make_var("lhs", u64), i64);
+        auto signed_rhs = castIfWidthChanges(make_var("rhs", u64), i64);
+        auto div = make_binary(
+            "/", cloneExpr(signed_lhs), cloneExpr(signed_rhs), i64);
+        auto mod = make_binary(
+            "%", cloneExpr(signed_lhs), cloneExpr(signed_rhs), i64);
+        f.body.push_back(assign(
+            "quot", castIfWidthChanges(std::move(div), u64), u64));
+        f.body.push_back(assign(
+            "rem", castIfWidthChanges(std::move(mod), u64), u64));
+
+        auto r = runPipeline(std::move(f));
+        CHECK(r.error.empty());
+        checkContains(r.smt, "(bvsdiv lhs_0 rhs_0)");
+        checkContains(r.smt, "(bvsrem lhs_0 rhs_0)");
+        CHECK(r.smt.find("(bvudiv lhs_0 rhs_0)") == std::string::npos);
+        CHECK(r.smt.find("(bvurem lhs_0 rhs_0)") == std::string::npos);
+    }
+
+    {
         FunctionAST f;
         f.name = "smt_negative_literals";
         f.return_type = TypeInfo{"void", 0, false};
@@ -1546,6 +1652,65 @@ void test_smt_type_and_operation_semantics() {
 
     {
         PredicateProgram prog;
+        prog.function_name = "smt_bitvec1_slice_as_bool";
+        prog.inputs = {"word"};
+        prog.symbols["word"] = u(8);
+        prog.param_directions["word"] = "Input";
+        prog.param_directions["out"] = "Output";
+        prog.output_expressions.push_back({
+            "out",
+            make_slice(make_var("word", u(8)), 0, 0, u(1)),
+            boolean()
+        });
+        auto smt = emitSmt(prog);
+        checkContains(smt, "(assert (= out (= ((_ extract 0 0) word) #b1)))");
+        CHECK(smt.find("(assert (= out ((_ extract 0 0) word)))") == std::string::npos);
+    }
+
+    {
+        PredicateProgram prog;
+        prog.function_name = "smt_bool_bitvec_alias_use";
+        prog.inputs = {"flag"};
+        prog.symbols["flag"] = boolean();
+        prog.symbols["tmp"] = boolean();
+        prog.symbols["out"] = u(1);
+        prog.param_directions["flag"] = "Input";
+        prog.param_directions["out"] = "Output";
+        prog.assignments.push_back({
+            make_literal("true", boolean()),
+            make_var("tmp", boolean()),
+            make_var("flag", boolean()),
+            boolean()
+        });
+        prog.output_expressions.push_back({"out", make_var("tmp", u(1)), u(1)});
+        auto smt = emitSmt(prog);
+        checkContains(smt, "(declare-const tmp Bool)");
+        checkContains(smt, "(assert (= out (ite tmp #b1 #b0)))");
+    }
+
+    {
+        PredicateProgram prog;
+        prog.function_name = "smt_shift_amount_resize";
+        auto u64 = TypeInfo{"uint64_t", 64, false, true, "builtin"};
+        auto u8 = TypeInfo{"uint8_t", 8, false, true, "builtin"};
+        prog.inputs = {"word", "sh"};
+        prog.symbols["word"] = u64;
+        prog.symbols["sh"] = u8;
+        prog.symbols["out"] = u64;
+        prog.param_directions["word"] = "Input";
+        prog.param_directions["sh"] = "Input";
+        prog.param_directions["out"] = "Output";
+        prog.output_expressions.push_back({
+            "out",
+            make_binary("<<", make_var("word", u64), make_var("sh", u8), u64),
+            u64
+        });
+        auto smt = emitSmt(prog);
+        checkContains(smt, "(bvshl word ((_ zero_extend 56) sh))");
+    }
+
+    {
+        PredicateProgram prog;
         prog.function_name = "smt_lookup_total";
         prog.lookup_tables["T"] = {"0", "1", "2", "3"};
         prog.inputs = {"idx"};
@@ -1580,18 +1745,13 @@ void test_smt_type_and_operation_semantics() {
         lookup->args = {table_name, make_var("idx", u(8))};
         lookup->type = u(8);
         prog.output_expressions.push_back({"out", lookup, u(8)});
-        bool rejected = false;
-        try {
-            (void)emitSmt(prog);
-        } catch (const std::exception& ex) {
-            rejected = std::string(ex.what()).find("not total") != std::string::npos;
-        }
-        CHECK(rejected);
+        auto smt = emitSmt(prog);
+        checkContains(smt, "(assert (bvult idx (_ bv10 8)))");
     }
 
     {
         PredicateProgram prog;
-        prog.function_name = "smt_dynamic_reject";
+        prog.function_name = "smt_dynamic_select";
         prog.inputs = {"word", "idx"};
         prog.symbols["word"] = u(8);
         prog.symbols["idx"] = u(3);
@@ -1606,13 +1766,9 @@ void test_smt_type_and_operation_semantics() {
         dyn->args = {make_var("word", u(8)), make_var("idx", u(3))};
         dyn->type = u(2);
         prog.output_expressions.push_back({"out", dyn, u(2)});
-        bool rejected = false;
-        try {
-            (void)emitSmt(prog);
-        } catch (const std::exception& ex) {
-            rejected = std::string(ex.what()).find("dynamic range") != std::string::npos;
-        }
-        CHECK(rejected);
+        auto smt = emitSmt(prog);
+        checkContains(smt, "(assert (bvule idx (_ bv6 3)))");
+        checkContains(smt, "((_ extract 1 0) (bvlshr word");
     }
 
     {
@@ -1717,6 +1873,31 @@ void test_smt_reverse_pruning_and_closure() {
     CHECK(rejected);
 
     std::cout << "  PASS: test_smt_reverse_pruning_and_closure\n";
+}
+
+void test_smt_guarded_ssa_is_totalized() {
+    PredicateProgram prog;
+    prog.function_name = "smt_guarded_ssa";
+    prog.inputs = {"state_0", "guard_0"};
+    prog.symbols["state"] = u(8);
+    prog.symbols["guard"] = boolean();
+    prog.symbols["out"] = u(8);
+    prog.param_directions["state"] = "Input";
+    prog.param_directions["guard"] = "Input";
+    prog.param_directions["out"] = "Output";
+    prog.assignments.push_back({
+        make_var("guard_0", boolean()),
+        make_var("state_1", u(8)),
+        make_literal("7", u(8)),
+        u(8)
+    });
+    prog.output_expressions.push_back({"out", make_var("state_1", u(8)), u(8)});
+
+    auto smt = emitSmt(prog);
+    checkContains(smt,
+        "(assert (= state_1 (ite guard_0 (_ bv7 8) state_0)))");
+    CHECK(smt.find("(assert (=> guard_0 (= state_1") == std::string::npos);
+    std::cout << "  PASS: test_smt_guarded_ssa_is_totalized\n";
 }
 
 void test_alias_graph_reference_paths() {
@@ -2093,6 +2274,7 @@ int main() {
     runTest("test_struct_flatten", test_struct_flatten);
     runTest("test_uint_width_and_illegal_call", test_uint_width_and_illegal_call);
     runTest("test_int_semantics_core_widths", test_int_semantics_core_widths);
+    runTest("test_power_of_two_div_rem_lowering", test_power_of_two_div_rem_lowering);
     runTest("test_canonical_int_ir_semantics", test_canonical_int_ir_semantics);
     runTest("test_int_uint_semantics_corner_cases", test_int_uint_semantics_corner_cases);
     runTest("test_int_uint_semantics_corner_differential", test_int_uint_semantics_corner_differential);
@@ -2105,6 +2287,7 @@ int main() {
     runTest("test_smt_smoke", test_smt_smoke);
     runTest("test_smt_type_and_operation_semantics", test_smt_type_and_operation_semantics);
     runTest("test_smt_reverse_pruning_and_closure", test_smt_reverse_pruning_and_closure);
+    runTest("test_smt_guarded_ssa_is_totalized", test_smt_guarded_ssa_is_totalized);
     runTest("test_alias_graph_reference_paths", test_alias_graph_reference_paths);
     runTest("test_typed_dag_stable_json", test_typed_dag_stable_json);
     runTest("test_predicate_evaluator_wide_bits", test_predicate_evaluator_wide_bits);

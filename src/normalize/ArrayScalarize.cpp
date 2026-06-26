@@ -9,18 +9,32 @@ namespace pred {
 
 bool collectArrayAccess(const ExprPtr& e, ExprPtr& base, std::vector<ExprPtr>& indices) {
     if (!e) return false;
+    if (e->kind == ExprKind::Cast) return collectArrayAccess(e->cast_expr, base, indices);
+    if (e->kind == ExprKind::UnaryOp && e->op == "*") return collectArrayAccess(e->operand, base, indices);
     if (e->kind == ExprKind::Call && e->callee == "operator[]" && e->args.size() >= 2) {
         auto receiver = e->args.front();
-        if (!receiver || receiver->kind != ExprKind::FieldAccess ||
-            receiver->field_name != "operator[]" || !receiver->struct_base) {
+        ExprPtr receiver_base;
+        if (receiver && receiver->kind == ExprKind::FieldAccess &&
+            receiver->field_name == "operator[]" && receiver->struct_base) {
+            receiver_base = receiver->struct_base;
+        } else if (receiver && (!baseName(receiver).empty() ||
+                               receiver->kind == ExprKind::ArrayAccess ||
+                               receiver->kind == ExprKind::Cast ||
+                               receiver->kind == ExprKind::UnaryOp)) {
+            receiver_base = receiver;
+        }
+        if (!receiver_base) {
             return false;
         }
-        auto array_access = make_array_access(receiver->struct_base, e->args[1], e->type);
+        auto array_access = make_array_access(receiver_base, e->args[1], e->type);
         return collectArrayAccess(array_access, base, indices);
     }
     if (e->kind != ExprKind::ArrayAccess) return false;
-    if (e->array_base && e->array_base->kind == ExprKind::ArrayAccess) {
-        if (!collectArrayAccess(e->array_base, base, indices)) return false;
+    ExprPtr nested_base;
+    std::vector<ExprPtr> nested_indices;
+    if (collectArrayAccess(e->array_base, nested_base, nested_indices)) {
+        base = nested_base;
+        indices.insert(indices.end(), nested_indices.begin(), nested_indices.end());
     } else {
         base = e->array_base;
     }
@@ -71,6 +85,8 @@ int flatElementCount(const TypeInfo& type) {
 
 std::string targetName(const ExprPtr& e) {
     if (!e) return "";
+    if (e->kind == ExprKind::Cast) return targetName(e->cast_expr);
+    if (e->kind == ExprKind::UnaryOp && e->op == "*") return targetName(e->operand);
     if (e->kind == ExprKind::VarRef) return e->var_name;
     if (e->kind == ExprKind::FieldAccess) return baseName(e);
     if (e->kind == ExprKind::ArrayAccess) return baseName(e->array_base);
@@ -79,7 +95,15 @@ std::string targetName(const ExprPtr& e) {
 
 std::optional<int> literalIndex(const ExprPtr& e) {
     if (!e) return std::nullopt;
-    if (e->kind == ExprKind::Cast) return literalIndex(e->cast_expr);
+    if (e->kind == ExprKind::Cast || e->kind == ExprKind::ZExt ||
+        e->kind == ExprKind::SExt || e->kind == ExprKind::Trunc) {
+        return literalIndex(e->cast_expr);
+    }
+    if (e->kind == ExprKind::UnaryOp && e->op == "-") {
+        auto value = literalIndex(e->operand);
+        if (value) return -*value;
+        return std::nullopt;
+    }
     if (e->kind == ExprKind::Literal) {
         try {
             return static_cast<int>(std::stoll(e->literal_value, nullptr, 0));

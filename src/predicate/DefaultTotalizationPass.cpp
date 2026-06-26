@@ -8,13 +8,15 @@ DefaultTotalizationDecision classifyDefaultTotalization(const std::string& name,
     if (semantic_reason == "write_enable_default_false" ||
         semantic_reason == "valid_default_false" ||
         semantic_reason == "wdata_default_zero_when_wen_false" ||
-        semantic_reason == "payload_default_zero_when_valid_false") {
+        semantic_reason == "payload_default_zero_when_valid_false" ||
+        semantic_reason == "handshake_payload_default_zero_when_not_ready_valid") {
         DefaultTotalizationDecision d;
         d.allowed = true;
         d.reason = semantic_reason;
         d.guard_controlled = semantic_reason == "write_enable_default_false" ||
                              semantic_reason == "wdata_default_zero_when_wen_false" ||
-                             semantic_reason == "payload_default_zero_when_valid_false";
+                             semantic_reason == "payload_default_zero_when_valid_false" ||
+                             semantic_reason == "handshake_payload_default_zero_when_not_ready_valid";
         return d;
     }
     if (!semantic_reason.empty()) {

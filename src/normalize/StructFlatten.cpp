@@ -15,6 +15,10 @@ std::string canonicalStructName(std::string name) {
             s = s.substr(b, e - b + 1);
         }
     };
+    auto comment = name.find("//");
+    if (comment != std::string::npos) {
+        name = name.substr(0, comment);
+    }
     trim(name);
     bool changed = true;
     while (changed) {

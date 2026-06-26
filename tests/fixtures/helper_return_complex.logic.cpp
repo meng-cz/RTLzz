@@ -35,6 +35,8 @@ void hls_main(bool sel,
     Int<8> y = Int<8>(0);
     choose_pair(sel, x, y);
     nested_return(sel, inner, x);
+    arr[0] = Int<8>(0);
+    arr[1] = Int<8>(0);
 
     auto write_array = [&](bool skip, Int<8>& value) -> void {
         if (skip) {

@@ -44,6 +44,12 @@ class IntBitProxy;
 template <uint32_t BitWidth>
 class IntConstBitProxy;
 
+template <uint32_t BitWidth, uint32_t Hi, uint32_t Lo>
+class IntStaticRangeProxy;
+
+template <uint32_t BitWidth, uint32_t Hi, uint32_t Lo>
+class IntConstStaticRangeProxy;
+
 template <uint32_t BitWidth>
 class IntSignedView;
 
@@ -142,6 +148,12 @@ public:
     constexpr IntBitProxy<BitWidth> operator()(uint32_t bit);
 
     constexpr IntConstBitProxy<BitWidth> operator()(uint32_t bit) const;
+
+    template <uint32_t Hi, uint32_t Lo>
+    constexpr IntStaticRangeProxy<BitWidth, Hi, Lo> at();
+
+    template <uint32_t Hi, uint32_t Lo>
+    constexpr IntConstStaticRangeProxy<BitWidth, Hi, Lo> at() const;
 
     template <uint32_t DstBitWidth>
     constexpr IntRangeProxy<BitWidth> range_at(Int<IDX_WIDTH> idx);
@@ -532,6 +544,38 @@ public:
         return parent.template get_bits_as<T>(hi, lo);
     }
 
+    constexpr bool reduce_or() const {
+        return static_cast<Int<BitWidth>>(*this).reduce_or();
+    }
+
+    constexpr bool reduce_and() const {
+        return static_cast<Int<BitWidth>>(*this).reduce_and();
+    }
+
+    constexpr bool reduce_xor() const {
+        return static_cast<Int<BitWidth>>(*this).reduce_xor();
+    }
+
+    template <uint32_t K>
+    constexpr Int<BitWidth * K> repeat() const {
+        return static_cast<Int<BitWidth>>(*this).template repeat<K>();
+    }
+
+    template <uint32_t OtherBitWidth>
+    constexpr Int<BitWidth + OtherBitWidth> cat(const Int<OtherBitWidth>& other) const {
+        return static_cast<Int<BitWidth>>(*this).cat(other);
+    }
+
+    template <uint32_t OtherBitWidth>
+    constexpr Int<BitWidth + OtherBitWidth> cat(const IntRangeProxy<OtherBitWidth>& other) const {
+        return static_cast<Int<BitWidth>>(*this).cat(static_cast<Int<OtherBitWidth>>(other));
+    }
+
+    template <uint32_t OtherBitWidth>
+    constexpr Int<BitWidth + OtherBitWidth> cat(const IntConstRangeProxy<OtherBitWidth>& other) const {
+        return static_cast<Int<BitWidth>>(*this).cat(static_cast<Int<OtherBitWidth>>(other));
+    }
+
     template <uint32_t SrcBitWidth>
     IntRangeProxy& operator=(const Int<SrcBitWidth>& value) {
         parent.set_bits(hi, lo, value);
@@ -600,6 +644,53 @@ public:
     operator T() const {
         return parent.template get_bits_as<T>(hi, lo);
     }
+
+    constexpr bool reduce_or() const {
+        return static_cast<Int<BitWidth>>(*this).reduce_or();
+    }
+
+    constexpr bool reduce_and() const {
+        return static_cast<Int<BitWidth>>(*this).reduce_and();
+    }
+
+    constexpr bool reduce_xor() const {
+        return static_cast<Int<BitWidth>>(*this).reduce_xor();
+    }
+
+    template <uint32_t K>
+    constexpr Int<BitWidth * K> repeat() const {
+        return static_cast<Int<BitWidth>>(*this).template repeat<K>();
+    }
+
+    template <uint32_t OtherBitWidth>
+    constexpr Int<BitWidth + OtherBitWidth> cat(const Int<OtherBitWidth>& other) const {
+        return static_cast<Int<BitWidth>>(*this).cat(other);
+    }
+
+    template <uint32_t OtherBitWidth>
+    constexpr Int<BitWidth + OtherBitWidth> cat(const IntRangeProxy<OtherBitWidth>& other) const {
+        return static_cast<Int<BitWidth>>(*this).cat(static_cast<Int<OtherBitWidth>>(other));
+    }
+
+    template <uint32_t OtherBitWidth>
+    constexpr Int<BitWidth + OtherBitWidth> cat(const IntConstRangeProxy<OtherBitWidth>& other) const {
+        return static_cast<Int<BitWidth>>(*this).cat(static_cast<Int<OtherBitWidth>>(other));
+    }
+};
+
+template <uint32_t BitWidth, uint32_t Hi, uint32_t Lo>
+class IntStaticRangeProxy : public IntRangeProxy<BitWidth> {
+public:
+    explicit IntStaticRangeProxy(Int<BitWidth>& parent)
+        : IntRangeProxy<BitWidth>(parent, Hi, Lo) {}
+    using IntRangeProxy<BitWidth>::operator=;
+};
+
+template <uint32_t BitWidth, uint32_t Hi, uint32_t Lo>
+class IntConstStaticRangeProxy : public IntConstRangeProxy<BitWidth> {
+public:
+    explicit IntConstStaticRangeProxy(const Int<BitWidth>& parent)
+        : IntConstRangeProxy<BitWidth>(parent, Hi, Lo) {}
 };
 
 template <uint32_t BitWidth>
@@ -659,6 +750,22 @@ constexpr IntBitProxy<BitWidth> Int<BitWidth>::operator()(uint32_t bit) {
 template <uint32_t BitWidth>
 constexpr IntConstBitProxy<BitWidth> Int<BitWidth>::operator()(uint32_t bit) const {
     return IntConstBitProxy<BitWidth>(*this, bit);
+}
+
+template <uint32_t BitWidth>
+template <uint32_t Hi, uint32_t Lo>
+constexpr IntStaticRangeProxy<BitWidth, Hi, Lo> Int<BitWidth>::at() {
+    static_assert(Hi >= Lo, "slice high bit must be greater than or equal to low bit");
+    static_assert(Hi < BitWidth, "slice high bit is out of range");
+    return IntStaticRangeProxy<BitWidth, Hi, Lo>(*this);
+}
+
+template <uint32_t BitWidth>
+template <uint32_t Hi, uint32_t Lo>
+constexpr IntConstStaticRangeProxy<BitWidth, Hi, Lo> Int<BitWidth>::at() const {
+    static_assert(Hi >= Lo, "slice high bit must be greater than or equal to low bit");
+    static_assert(Hi < BitWidth, "slice high bit is out of range");
+    return IntConstStaticRangeProxy<BitWidth, Hi, Lo>(*this);
 }
 
 template <uint32_t BitWidth>

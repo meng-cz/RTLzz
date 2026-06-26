@@ -39,7 +39,8 @@ LocalReturnResult localizeReturnSeq(const std::vector<StmtPtr>& stmts,
     LocalReturnResult result;
     result.alive = make_literal("true", boolType());
 
-    for (const auto& stmt : stmts) {
+    for (std::size_t index = 0; index < stmts.size(); ++index) {
+        const auto& stmt = stmts[index];
         if (!stmt || !error.empty()) continue;
 
         if (stmt->kind == StmtKind::Return) {
@@ -51,7 +52,9 @@ LocalReturnResult localizeReturnSeq(const std::vector<StmtPtr>& stmts,
             continue;
         }
 
-        if (isFalseLiteral(result.alive)) {
+        const bool contains_return = containsReturnStmt({stmt});
+        if (!contains_return) {
+            result.stmts.push_back(cloneStmtNoSubstitution(stmt));
             continue;
         }
 
@@ -71,15 +74,25 @@ LocalReturnResult localizeReturnSeq(const std::vector<StmtPtr>& stmts,
                 auto rewritten = cloneStmtNoSubstitution(stmt);
                 rewritten->if_then = std::move(then_result.stmts);
                 rewritten->if_else = std::move(else_result.stmts);
-                auto guarded = guardStmt(cloneExpr(result.alive), std::move(rewritten));
-                if (guarded) result.stmts.push_back(std::move(guarded));
+                result.stmts.push_back(std::move(rewritten));
             }
 
             auto branch_alive = mergeAliveAfterIf(stmt->if_cond,
                                                   then_result.alive,
                                                   else_result.alive);
-            result.alive = andExpr(std::move(result.alive), std::move(branch_alive));
-            continue;
+            std::vector<StmtPtr> tail(stmts.begin() + static_cast<std::ptrdiff_t>(index + 1),
+                                      stmts.end());
+            auto tail_result = localizeReturnSeq(tail, callee, error);
+            if (!error.empty()) return {};
+            if (!tail_result.stmts.empty()) {
+                auto tail_block = std::make_shared<Stmt>();
+                tail_block->kind = StmtKind::Block;
+                tail_block->block_stmts = std::move(tail_result.stmts);
+                auto guarded_tail = guardStmt(cloneExpr(branch_alive), std::move(tail_block));
+                if (guarded_tail) result.stmts.push_back(std::move(guarded_tail));
+            }
+            result.alive = andExpr(std::move(branch_alive), std::move(tail_result.alive));
+            return result;
         }
 
         if (stmt->kind == StmtKind::Block) {
@@ -88,20 +101,25 @@ LocalReturnResult localizeReturnSeq(const std::vector<StmtPtr>& stmts,
             if (!block_result.stmts.empty()) {
                 auto rewritten = cloneStmtNoSubstitution(stmt);
                 rewritten->block_stmts = std::move(block_result.stmts);
-                auto guarded = guardStmt(cloneExpr(result.alive), std::move(rewritten));
-                if (guarded) result.stmts.push_back(std::move(guarded));
+                result.stmts.push_back(std::move(rewritten));
             }
-            result.alive = andExpr(std::move(result.alive), std::move(block_result.alive));
-            continue;
+            std::vector<StmtPtr> tail(stmts.begin() + static_cast<std::ptrdiff_t>(index + 1),
+                                      stmts.end());
+            auto tail_result = localizeReturnSeq(tail, callee, error);
+            if (!error.empty()) return {};
+            if (!tail_result.stmts.empty()) {
+                auto tail_block = std::make_shared<Stmt>();
+                tail_block->kind = StmtKind::Block;
+                tail_block->block_stmts = std::move(tail_result.stmts);
+                auto guarded_tail = guardStmt(cloneExpr(block_result.alive), std::move(tail_block));
+                if (guarded_tail) result.stmts.push_back(std::move(guarded_tail));
+            }
+            result.alive = andExpr(std::move(block_result.alive), std::move(tail_result.alive));
+            return result;
         }
 
-        if (containsReturnStmt({stmt})) {
-            error = "Unsupported nested return shape in procedural inline call '" + callee + "'";
-            return {};
-        }
-
-        auto guarded = guardStmt(cloneExpr(result.alive), cloneStmtNoSubstitution(stmt));
-        if (guarded) result.stmts.push_back(std::move(guarded));
+        error = "Unsupported nested return shape in procedural inline call '" + callee + "'";
+        return {};
     }
 
     return result;

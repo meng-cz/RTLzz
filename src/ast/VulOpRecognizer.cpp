@@ -14,6 +14,30 @@ std::optional<int> recognizeTemplateInt(CXCursor cursor, int index) {
     return static_cast<int>(clang_Cursor_getTemplateArgumentValue(cursor, index));
 }
 
+static void appendTemplateInts(CXCursor cursor, std::vector<int>& out) {
+    int count = clang_Cursor_getNumTemplateArguments(cursor);
+    for (int i = 0; i < count; ++i) {
+        if (clang_Cursor_getTemplateArgumentKind(cursor, i) == CXTemplateArgumentKind_Integral) {
+            out.push_back(static_cast<int>(clang_Cursor_getTemplateArgumentValue(cursor, i)));
+        }
+    }
+}
+
+static void appendTemplateIntsFromReferences(CXCursor cursor, std::vector<int>& out) {
+    appendTemplateInts(cursor, out);
+    if (!out.empty()) return;
+
+    CXCursor referenced = clang_getCursorReferenced(cursor);
+    if (!clang_equalCursors(referenced, clang_getNullCursor())) {
+        appendTemplateInts(referenced, out);
+        if (!out.empty()) return;
+        CXCursor specialized = clang_getSpecializedCursorTemplate(referenced);
+        if (!clang_equalCursors(specialized, clang_getNullCursor())) {
+            appendTemplateInts(specialized, out);
+        }
+    }
+}
+
 namespace {
 
 std::string cxToStrLocal(CXString s) {
@@ -136,9 +160,24 @@ VulCallInfo recognizeVulCall(CXCursor cursor,
     else if (isExactName(name, "get")) out.kind = VulCallKind::RegProxyGet;
     else if (isExactName(name, "sint")) out.kind = VulCallKind::SignedView;
     else if (isExactName(name, "operator()")) out.kind = VulCallKind::OperatorCall;
+    else if (isExactName(name, "at")) out.kind = VulCallKind::At;
     else if (isExactName(name, "range_at")) out.kind = VulCallKind::RangeAt;
     else if (isExactName(name, "bit_at")) out.kind = VulCallKind::BitAt;
-    out.template_value = recognizeTemplateInt(cursor, 0);
+    const bool needs_template_args =
+        out.kind == VulCallKind::SetNext ||
+        out.kind == VulCallKind::ReqHelperCall ||
+        out.kind == VulCallKind::Repeat ||
+        out.kind == VulCallKind::ZExt ||
+        out.kind == VulCallKind::Trunc ||
+        out.kind == VulCallKind::At ||
+        out.kind == VulCallKind::RangeAt;
+    if (needs_template_args) {
+        appendTemplateIntsFromReferences(cursor, out.template_values);
+        if (out.template_values.empty() && has_member_ref) {
+            appendTemplateIntsFromReferences(children.front(), out.template_values);
+        }
+    }
+    if (!out.template_values.empty()) out.template_value = out.template_values.front();
     return out;
 }
 

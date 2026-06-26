@@ -104,7 +104,11 @@ EvalBits PredicateEvaluator::eval(const ExprPtr& expr) const {
             out.limbs.resize(static_cast<size_t>(limbCount(out.width)), 0);
             out = mask(std::move(out));
         }
-        out.is_signed = out.is_signed || signedType(expr->type);
+        // A VarRef may be a same-width canonical reinterpretation inserted by
+        // C++ usual arithmetic conversions. The expression type, not the
+        // storage seed's original signedness, determines comparison/shift
+        // semantics at this use site.
+        out.is_signed = signedType(expr->type);
         return out;
     }
     case ExprKind::BinaryOp: {

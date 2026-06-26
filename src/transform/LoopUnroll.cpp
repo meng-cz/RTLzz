@@ -39,10 +39,18 @@ static std::optional<int64_t> evalConstInt(const ExprPtr& e) {
     if (!e) return std::nullopt;
     if (e->kind == ExprKind::Literal) {
         try {
-            return std::stoll(e->literal_value);
+            return std::stoll(e->literal_value, nullptr, 0);
         } catch (...) {
             return std::nullopt;
         }
+    }
+    if (e->kind == ExprKind::Cast || e->kind == ExprKind::ZExt ||
+        e->kind == ExprKind::SExt || e->kind == ExprKind::Trunc) {
+        return evalConstInt(e->cast_expr);
+    }
+    if (e->kind == ExprKind::UnaryOp && e->op == "-") {
+        auto value = evalConstInt(e->operand);
+        if (value) return -*value;
     }
     return std::nullopt;
 }

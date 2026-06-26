@@ -95,7 +95,29 @@ std::optional<AliasTarget> AliasGraph::resolveField(const std::string& object, c
 std::optional<AliasTarget> AliasGraph::resolvePath(const std::string& object,
                                                    const std::vector<std::string>& fields,
                                                    const std::vector<int>& indices) const {
-    return resolve(joinAliasPath(object, fields, indices));
+    auto direct = resolve(joinAliasPath(object, fields, indices));
+    if (direct) return direct;
+
+    auto base = resolve(object);
+    if (!base) return std::nullopt;
+    AliasTarget out = *base;
+    std::vector<std::string> combined = out.field_path;
+    combined.insert(combined.end(), fields.begin(), fields.end());
+    std::vector<int> combined_indices = out.index_path;
+    combined_indices.insert(combined_indices.end(), indices.begin(), indices.end());
+    out.field_path = combined;
+    out.index_path = combined_indices;
+    out.canonical_name = out.base_object;
+    for (const auto& field : combined) {
+        if (!out.canonical_name.empty()) out.canonical_name += "_";
+        out.canonical_name += field;
+    }
+    for (int index : combined_indices) {
+        out.canonical_name += "_";
+        out.canonical_name += std::to_string(index);
+    }
+    out.name = out.canonical_name;
+    return out;
 }
 
 bool AliasGraph::has(const std::string& alias) const {

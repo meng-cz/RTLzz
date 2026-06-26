@@ -1,6 +1,7 @@
 #include "emitter/SmtEmitter.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <sstream>
 #include <set>
 #include <stdexcept>
@@ -15,10 +16,14 @@ namespace {
 struct SmtPrintState {
     static thread_local int depth;
     static thread_local int nodes;
+    static thread_local std::vector<std::string>* assumptions;
+    static thread_local const std::unordered_map<std::string, TypeInfo>* var_types;
 };
 
 thread_local int SmtPrintState::depth = 0;
 thread_local int SmtPrintState::nodes = 0;
+thread_local std::vector<std::string>* SmtPrintState::assumptions = nullptr;
+thread_local const std::unordered_map<std::string, TypeInfo>* SmtPrintState::var_types = nullptr;
 
 struct SmtPrintFrame {
     bool root = false;
@@ -33,6 +38,28 @@ struct SmtPrintFrame {
     }
 };
 
+struct SmtAssumptionScope {
+    std::vector<std::string>* previous = nullptr;
+    explicit SmtAssumptionScope(std::vector<std::string>& assumptions) {
+        previous = SmtPrintState::assumptions;
+        SmtPrintState::assumptions = &assumptions;
+    }
+    ~SmtAssumptionScope() {
+        SmtPrintState::assumptions = previous;
+    }
+};
+
+struct SmtVarTypeScope {
+    const std::unordered_map<std::string, TypeInfo>* previous = nullptr;
+    explicit SmtVarTypeScope(const std::unordered_map<std::string, TypeInfo>& var_types) {
+        previous = SmtPrintState::var_types;
+        SmtPrintState::var_types = &var_types;
+    }
+    ~SmtVarTypeScope() {
+        SmtPrintState::var_types = previous;
+    }
+};
+
 static bool isBoolType(const TypeInfo& type) {
     return type.hw_kind == "bool" || type.name == "bool";
 }
@@ -42,8 +69,11 @@ static bool isSignedBitVectorType(const TypeInfo& type) {
 }
 
 static bool sameSmtType(const TypeInfo& a, const TypeInfo& b) {
-    return a.width == b.width && isBoolType(a) == isBoolType(b) &&
-           isSignedBitVectorType(a) == isSignedBitVectorType(b);
+    return a.width == b.width && isBoolType(a) == isBoolType(b);
+}
+
+static bool boolBitVec1Compatible(const TypeInfo& a, const TypeInfo& b) {
+    return a.width == 1 && b.width == 1 && isBoolType(a) != isBoolType(b);
 }
 
 static void maskToWidth(std::vector<unsigned char>& bytes, int width) {
@@ -212,6 +242,39 @@ static std::string boolLiteralToSmt(const std::string& value) {
 static std::string guardToSmt(const ExprPtr& e, const PredicateProgram* prog);
 static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog);
 
+static bool smtExprYieldsBitVec(const ExprPtr& e) {
+    if (!e) return false;
+    switch (e->kind) {
+    case ExprKind::Literal:
+        return !isBoolType(e->type);
+    case ExprKind::Slice:
+    case ExprKind::WriteSlice:
+    case ExprKind::WriteBit:
+    case ExprKind::Concat:
+    case ExprKind::Repeat:
+    case ExprKind::ZExt:
+    case ExprKind::SExt:
+    case ExprKind::Trunc:
+        return true;
+    case ExprKind::UnaryOp:
+        return e->op == "~" || e->op == "-";
+    case ExprKind::BinaryOp:
+        return e->op == "+" || e->op == "-" || e->op == "*" ||
+               e->op == "/" || e->op == "%" ||
+               e->op == "&" || e->op == "|" || e->op == "^" ||
+               e->op == "<<" || e->op == ">>";
+    default:
+        return false;
+    }
+}
+
+static const TypeInfo* declaredVarType(const std::string& name) {
+    if (!SmtPrintState::var_types) return nullptr;
+    auto it = SmtPrintState::var_types->find(name);
+    if (it == SmtPrintState::var_types->end() || it->second.width <= 0) return nullptr;
+    return &it->second;
+}
+
 static bool signedComparisonFor(const ExprPtr& e) {
     if (!e || !e->left || !e->right) return false;
     bool left_signed = isSignedBitVectorType(e->left->type);
@@ -219,9 +282,15 @@ static bool signedComparisonFor(const ExprPtr& e) {
     if (left_signed != right_signed) {
         throw std::runtime_error("SmtEmitter: mixed signed/unsigned comparison was not canonicalized");
     }
-    if (e->left->type.width > 0 && e->right->type.width > 0 &&
-        e->left->type.width != e->right->type.width) {
-        throw std::runtime_error("SmtEmitter: comparison operands have mismatched widths");
+    return left_signed;
+}
+
+static bool signedArithmeticFor(const ExprPtr& e, const std::string& op) {
+    if (!e || !e->left || !e->right) return false;
+    bool left_signed = isSignedBitVectorType(e->left->type);
+    bool right_signed = isSignedBitVectorType(e->right->type);
+    if (left_signed != right_signed) {
+        throw std::runtime_error("SmtEmitter: mixed signed/unsigned " + op + " was not canonicalized");
     }
     return left_signed;
 }
@@ -233,6 +302,10 @@ static void rememberVarType(std::unordered_map<std::string, TypeInfo>& var_types
     auto it = var_types.find(name);
     if (it == var_types.end()) {
         var_types[name] = type;
+        return;
+    }
+    if (boolBitVec1Compatible(it->second, type)) {
+        if (isBoolType(type)) it->second = type;
         return;
     }
     if (!sameSmtType(it->second, type)) {
@@ -291,11 +364,55 @@ static std::string boolAsBitVec(const ExprPtr& e, const PredicateProgram* prog) 
                            e && isSignedBitVectorType(e->type));
 }
 
+static std::string bitVecValueToSmt(const ExprPtr& e,
+                                    const PredicateProgram* prog,
+                                    int dst_width) {
+    if (!e) {
+        throw std::runtime_error("SmtEmitter: cannot convert missing expression to BitVec");
+    }
+    if (dst_width <= 0) {
+        throw std::runtime_error("SmtEmitter: target bit-vector width must be known");
+    }
+    if (isBoolType(e->type)) {
+        return resizeBitVecSmt(boolAsBitVec(e, prog), 1, dst_width, false);
+    }
+    if (e->kind == ExprKind::VarRef) {
+        if (const TypeInfo* declared = declaredVarType(e->var_name)) {
+            if (isBoolType(*declared)) {
+                return resizeBitVecSmt("(ite " + e->var_name + " #b1 #b0)", 1, dst_width, false);
+            }
+            bool signed_value = e->type.width > 0
+                ? isSignedBitVectorType(e->type)
+                : isSignedBitVectorType(*declared);
+            return resizeBitVecSmt(e->var_name, declared->width, dst_width, signed_value);
+        }
+    }
+    if (e->kind == ExprKind::BitSelect) {
+        return resizeBitVecSmt("(ite " + exprToSmt(e, prog) + " #b1 #b0)", 1, dst_width, false);
+    }
+    return resizeBitVecSmt(exprToSmt(e, prog),
+                           e->type.width,
+                           dst_width,
+                           isSignedBitVectorType(e->type));
+}
+
+static std::string valueForTypeToSmt(const ExprPtr& e,
+                                     const PredicateProgram* prog,
+                                     const TypeInfo& type) {
+    if (isBoolType(type)) return guardToSmt(e, prog);
+    return bitVecValueToSmt(e, prog, type.width);
+}
+
 static std::string bitVecAsBool(const ExprPtr& e, const PredicateProgram* prog) {
     if (!e || e->type.width <= 0) {
         throw std::runtime_error("SmtEmitter: cannot convert unknown-width expression to Bool");
     }
-    return "(not (= " + exprToSmt(e, prog) + " " + bitVecLiteral(0, e->type.width) + "))";
+    if (isBoolType(e->type)) return guardToSmt(e, prog);
+    if (e->type.width == 1) {
+        return "(= " + bitVecValueToSmt(e, prog, 1) + " #b1)";
+    }
+    return "(not (= " + bitVecValueToSmt(e, prog, e->type.width) + " " +
+           bitVecLiteral(0, e->type.width) + "))";
 }
 
 static std::string writeSliceToSmt(const ExprPtr& e, const PredicateProgram* prog) {
@@ -304,13 +421,8 @@ static std::string writeSliceToSmt(const ExprPtr& e, const PredicateProgram* pro
         throw std::runtime_error("SmtEmitter: invalid write_slice range");
     }
     int slice_width = e->hi - e->lo + 1;
-    std::string base = exprToSmt(e->base, prog);
-    std::string value = e->value && isBoolType(e->value->type)
-        ? resizeBitVecSmt(boolAsBitVec(e->value, prog), 1, slice_width, false)
-        : resizeBitVecSmt(exprToSmt(e->value, prog),
-                           e->value ? e->value->type.width : 0,
-                           slice_width,
-                           e->value && isSignedBitVectorType(e->value->type));
+    std::string base = bitVecValueToSmt(e->base, prog, base_width);
+    std::string value = bitVecValueToSmt(e->value, prog, slice_width);
 
     if (slice_width == base_width) return value;
 
@@ -334,7 +446,7 @@ static std::string reduceToSmt(const ExprPtr& e, const PredicateProgram* prog) {
     if (width <= 0) {
         throw std::runtime_error("SmtEmitter: reduce operand width must be known");
     }
-    std::string operand = exprToSmt(e->operand, prog);
+    std::string operand = bitVecValueToSmt(e->operand, prog, width);
     if (e->kind == ExprKind::ReduceOr) {
         return "(not (= " + operand + " " + bitVecLiteral(0, width) + "))";
     }
@@ -368,23 +480,73 @@ static std::string lookupToSmt(const ExprPtr& e, const PredicateProgram* prog) {
     if (index_width <= 0 || value_width <= 0) {
         throw std::runtime_error("SmtEmitter: lookup index/value width must be known");
     }
-    std::string index_smt = exprToSmt(index, prog);
-    bool table_is_total = false;
+    std::string index_smt = bitVecValueToSmt(index, prog, index_width);
+    bool total = false;
     if (index_width < static_cast<int>(sizeof(size_t) * 8)) {
-        table_is_total = values.size() == (size_t{1} << index_width);
+        total = values.size() == (static_cast<size_t>(1) << index_width);
     }
-    if (!table_is_total) {
-        throw std::runtime_error("SmtEmitter: lookup table '" + table_name +
-            "' is not total for index width " + std::to_string(index_width));
+    if (!total && SmtPrintState::assumptions) {
+        SmtPrintState::assumptions->push_back(
+            "(bvult " + index_smt + " " +
+            bitVecLiteral(static_cast<unsigned long long>(values.size()), index_width) + ")");
     }
-
-    std::string out = bitVecLiteral(values.back(), value_width);
-    for (int i = static_cast<int>(values.size()) - 2; i >= 0; --i) {
+    std::string out = bitVecLiteral(0, value_width);
+    for (int i = static_cast<int>(values.size()) - 1; i >= 0; --i) {
         std::string cond = "(= " + index_smt + " " + bitVecLiteral(static_cast<unsigned long long>(i), index_width) + ")";
         std::string value = bitVecLiteral(values[static_cast<size_t>(i)], value_width);
         out = "(ite " + cond + " " + value + " " + out + ")";
     }
     return out;
+}
+
+static void addDynamicBoundsAssumption(const std::string& index_smt,
+                                       int index_width,
+                                       int max_index) {
+    if (!SmtPrintState::assumptions || index_width <= 0 || max_index < 0) return;
+    bool entire_domain_is_valid = false;
+    if (index_width < 63) {
+        const auto domain_max = (std::uint64_t{1} << index_width) - 1;
+        entire_domain_is_valid = domain_max <= static_cast<std::uint64_t>(max_index);
+    }
+    if (!entire_domain_is_valid) {
+        SmtPrintState::assumptions->push_back(
+            "(bvule " + index_smt + " " +
+            bitVecLiteral(static_cast<unsigned long long>(max_index), index_width) + ")");
+    }
+}
+
+static std::string dynamicSelectToSmt(const ExprPtr& e,
+                                      const PredicateProgram* prog,
+                                      bool bit_select) {
+    if (!e || e->args.size() < 2 || !e->args[0] || !e->args[1]) {
+        throw std::runtime_error("SmtEmitter: dynamic select requires receiver and index");
+    }
+    const auto& base = e->args[0];
+    const auto& index = e->args[1];
+    const int base_width = base->type.width;
+    const int index_width = index->type.width;
+    const int result_width = bit_select ? 1 : e->type.width;
+    if (base_width <= 0 || index_width <= 0 || result_width <= 0) {
+        throw std::runtime_error("SmtEmitter: dynamic select widths must be known");
+    }
+    if (result_width > base_width) {
+        throw std::runtime_error("SmtEmitter: dynamic range width exceeds receiver width");
+    }
+
+    const std::string base_smt = bitVecValueToSmt(base, prog, base_width);
+    const std::string index_smt = bitVecValueToSmt(index, prog, index_width);
+    const std::string shift_smt =
+        resizeBitVecSmt(index_smt, index_width, base_width, false);
+    const std::string shifted = "(bvlshr " + base_smt + " " + shift_smt + ")";
+
+    addDynamicBoundsAssumption(index_smt,
+                               index_width,
+                               base_width - result_width);
+    if (bit_select) {
+        return "(= ((_ extract 0 0) " + shifted + ") #b1)";
+    }
+    return "((_ extract " + std::to_string(result_width - 1) +
+           " 0) " + shifted + ")";
 }
 
 static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
@@ -419,33 +581,59 @@ static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
         if (op == "||") {
             return "(or " + guardToSmt(e->left, prog) + " " + guardToSmt(e->right, prog) + ")";
         }
+        auto operand_width = [&]() {
+            int width = e->type.width;
+            if (e->left && e->left->type.width > width) width = e->left->type.width;
+            if (e->right && e->right->type.width > width) width = e->right->type.width;
+            if (width <= 0) throw std::runtime_error("SmtEmitter: binary operand width must be known");
+            return width;
+        };
+
         std::string smt_op;
         if (op == "+") smt_op = "bvadd";
         else if (op == "-") smt_op = "bvsub";
         else if (op == "*") smt_op = "bvmul";
-        else if (op == "/" || op == "%") {
-            throw std::runtime_error("SmtEmitter: division/modulo is unsupported in Predicate IR SMT");
-        }
+        else if (op == "/") smt_op = signedArithmeticFor(e, "division") ? "bvsdiv" : "bvudiv";
+        else if (op == "%") smt_op = signedArithmeticFor(e, "modulo") ? "bvsrem" : "bvurem";
         else if (op == "&") smt_op = "bvand";
         else if (op == "|") smt_op = "bvor";
         else if (op == "^") smt_op = "bvxor";
         else if (op == "<<") smt_op = "bvshl";
         else if (op == ">>") smt_op = isSignedBitVectorType(e->left ? e->left->type : TypeInfo{}) ? "bvashr" : "bvlshr";
         else if (op == "==") smt_op = "=";
-        else if (op == "!=") return "(not (= " + exprToSmt(e->left, prog) + " " + exprToSmt(e->right, prog) + "))";
+        else if (op == "!=") smt_op = "=";
         else if (op == "<") smt_op = signedComparisonFor(e) ? "bvslt" : "bvult";
         else if (op == "<=") smt_op = signedComparisonFor(e) ? "bvsle" : "bvule";
         else if (op == ">") smt_op = signedComparisonFor(e) ? "bvsgt" : "bvugt";
         else if (op == ">=") smt_op = signedComparisonFor(e) ? "bvsge" : "bvuge";
         else smt_op = op;
 
-        return "(" + smt_op + " " + exprToSmt(e->left, prog) + " " + exprToSmt(e->right, prog) + ")";
+        if (op == "==" || op == "!=") {
+            bool both_bool = e->left && e->right && isBoolType(e->left->type) && isBoolType(e->right->type);
+            std::string left = both_bool ? guardToSmt(e->left, prog) : bitVecValueToSmt(e->left, prog, operand_width());
+            std::string right = both_bool ? guardToSmt(e->right, prog) : bitVecValueToSmt(e->right, prog, operand_width());
+            std::string eq = "(= " + left + " " + right + ")";
+            return op == "!=" ? "(not " + eq + ")" : eq;
+        }
+
+        if (op == "<<" || op == ">>") {
+            int left_width = e->left ? e->left->type.width : 0;
+            if (left_width <= 0) throw std::runtime_error("SmtEmitter: shift left operand width must be known");
+            return "(" + smt_op + " " +
+                   bitVecValueToSmt(e->left, prog, left_width) + " " +
+                   bitVecValueToSmt(e->right, prog, left_width) + ")";
+        }
+
+        int width = operand_width();
+        return "(" + smt_op + " " +
+               bitVecValueToSmt(e->left, prog, width) + " " +
+               bitVecValueToSmt(e->right, prog, width) + ")";
     }
 
     case ExprKind::UnaryOp: {
         if (e->op == "!") return "(not " + guardToSmt(e->operand, prog) + ")";
-        if (e->op == "~") return "(bvnot " + exprToSmt(e->operand, prog) + ")";
-        if (e->op == "-") return "(bvneg " + exprToSmt(e->operand, prog) + ")";
+        if (e->op == "~") return "(bvnot " + bitVecValueToSmt(e->operand, prog, e->operand ? e->operand->type.width : 0) + ")";
+        if (e->op == "-") return "(bvneg " + bitVecValueToSmt(e->operand, prog, e->operand ? e->operand->type.width : 0) + ")";
         return "(" + e->op + " " + exprToSmt(e->operand, prog) + ")";
     }
 
@@ -457,9 +645,10 @@ static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
 
     case ExprKind::Call: {
         if (e->intrinsic == IntrinsicKind::DynamicRangeAt || e->intrinsic == IntrinsicKind::DynamicBitAt) {
-            throw std::runtime_error(e->intrinsic == IntrinsicKind::DynamicBitAt
-                ? "SmtEmitter: dynamic bit select is not supported yet"
-                : "SmtEmitter: dynamic range select is not supported yet");
+            return dynamicSelectToSmt(
+                e,
+                prog,
+                e->intrinsic == IntrinsicKind::DynamicBitAt);
         }
         if (e->callee == "lookup") return lookupToSmt(e, prog);
         throw std::runtime_error("SmtEmitter: unsupported remaining Call '" + e->callee + "'");
@@ -480,12 +669,13 @@ static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
                 int extra = w - src_w;
                 std::string op = isSignedBitVectorType(e->cast_expr->type) ? "sign_extend" : "zero_extend";
                 return "((_ " + op + " " + std::to_string(extra) + ") " +
-                    exprToSmt(e->cast_expr, prog) + ")";
+                    bitVecValueToSmt(e->cast_expr, prog, src_w) + ")";
             }
             if (src_w > 0 && w == src_w) {
-                return exprToSmt(e->cast_expr, prog);
+                return bitVecValueToSmt(e->cast_expr, prog, w);
             }
-            return "((_ extract " + std::to_string(w-1) + " 0) " + exprToSmt(e->cast_expr, prog) + ")";
+            return "((_ extract " + std::to_string(w-1) + " 0) " +
+                   bitVecValueToSmt(e->cast_expr, prog, src_w) + ")";
         }
         return exprToSmt(e->cast_expr, prog);
     }
@@ -500,7 +690,8 @@ static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
         }
         int extra = e->to_width - src_w;
         if (extra <= 0) return exprToSmt(e->cast_expr, prog);
-        return "((_ zero_extend " + std::to_string(extra) + ") " + exprToSmt(e->cast_expr, prog) + ")";
+        return "((_ zero_extend " + std::to_string(extra) + ") " +
+               bitVecValueToSmt(e->cast_expr, prog, src_w) + ")";
     }
 
     case ExprKind::SExt: {
@@ -513,7 +704,8 @@ static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
         }
         int extra = e->to_width - src_w;
         if (extra <= 0) return exprToSmt(e->cast_expr, prog);
-        return "((_ sign_extend " + std::to_string(extra) + ") " + exprToSmt(e->cast_expr, prog) + ")";
+        return "((_ sign_extend " + std::to_string(extra) + ") " +
+               bitVecValueToSmt(e->cast_expr, prog, src_w) + ")";
     }
 
     case ExprKind::Trunc:
@@ -523,24 +715,32 @@ static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
             }
             return boolAsBitVec(e->cast_expr, prog);
         }
-        return "((_ extract " + std::to_string(e->to_width - 1) + " 0) " + exprToSmt(e->cast_expr, prog) + ")";
+        return "((_ extract " + std::to_string(e->to_width - 1) + " 0) " +
+               bitVecValueToSmt(e->cast_expr, prog, e->cast_expr ? e->cast_expr->type.width : 0) + ")";
 
     case ExprKind::Slice:
         return "((_ extract " + std::to_string(e->hi) + " " + std::to_string(e->lo) + ") " +
-               exprToSmt(e->base, prog) + ")";
+               bitVecValueToSmt(e->base, prog, e->base ? e->base->type.width : 0) + ")";
 
     case ExprKind::BitSelect:
         return "(= ((_ extract " + std::to_string(e->bit) + " " + std::to_string(e->bit) + ") " +
-               exprToSmt(e->base, prog) + ") #b1)";
+               bitVecValueToSmt(e->base, prog, e->base ? e->base->type.width : 0) + ") #b1)";
 
     case ExprKind::Concat: {
+        if (e->parts.empty()) {
+            throw std::runtime_error("SmtEmitter: concat requires at least one operand");
+        }
+        if (e->parts.size() == 1) {
+            return bitVecValueToSmt(e->parts.front(), prog, e->parts.front() ? e->parts.front()->type.width : 0);
+        }
         std::string s = "(concat";
-        for (auto& p : e->parts) s += " " + exprToSmt(p, prog);
+        for (auto& p : e->parts) s += " " + bitVecValueToSmt(p, prog, p ? p->type.width : 0);
         return s + ")";
     }
 
     case ExprKind::Repeat:
-        return "((_ repeat " + std::to_string(e->times) + ") " + exprToSmt(e->operand, prog) + ")";
+        return "((_ repeat " + std::to_string(e->times) + ") " +
+               bitVecValueToSmt(e->operand, prog, e->operand ? e->operand->type.width : 0) + ")";
 
     case ExprKind::WriteSlice:
         return writeSliceToSmt(e, prog);
@@ -559,9 +759,14 @@ static std::string exprToSmt(const ExprPtr& e, const PredicateProgram* prog) {
         return reduceToSmt(e, prog);
 
     case ExprKind::Ternary:
+        if (isBoolType(e->type)) {
+            return "(ite " + guardToSmt(e->cond, prog) + " " +
+                   guardToSmt(e->then_expr, prog) + " " +
+                   guardToSmt(e->else_expr, prog) + ")";
+        }
         return "(ite " + guardToSmt(e->cond, prog) + " " +
-               exprToSmt(e->then_expr, prog) + " " +
-               exprToSmt(e->else_expr, prog) + ")";
+               bitVecValueToSmt(e->then_expr, prog, e->type.width) + " " +
+               bitVecValueToSmt(e->else_expr, prog, e->type.width) + ")";
     }
 
     return "?";
@@ -572,6 +777,15 @@ static std::string guardToSmt(const ExprPtr& e, const PredicateProgram* prog) {
     if (isBoolLiteral(e)) {
         auto bool_value = boolLiteralToSmt(e->literal_value);
         if (!bool_value.empty()) return bool_value;
+    }
+    if (e->kind == ExprKind::VarRef) {
+        if (const TypeInfo* declared = declaredVarType(e->var_name)) {
+            if (isBoolType(*declared)) return e->var_name;
+            return "(not (= " + e->var_name + " " + bitVecLiteral(0, declared->width) + "))";
+        }
+    }
+    if (e->type.width == 1 && smtExprYieldsBitVec(e)) {
+        return "(= " + exprToSmt(e, prog) + " #b1)";
     }
     if (isBoolType(e->type)) {
         return exprToSmt(e, prog);
@@ -659,6 +873,28 @@ static std::string stripSsaSuffix(const std::string& var) {
     return var.substr(0, pos);
 }
 
+static std::string previousSsaVersion(const std::string& var) {
+    auto pos = var.rfind('_');
+    if (pos == std::string::npos || pos + 1 >= var.size()) return {};
+    for (size_t i = pos + 1; i < var.size(); ++i) {
+        if (var[i] < '0' || var[i] > '9') return {};
+    }
+    int version = 0;
+    try {
+        version = std::stoi(var.substr(pos + 1));
+    } catch (...) {
+        return {};
+    }
+    if (version <= 0) return {};
+    return var.substr(0, pos + 1) + std::to_string(version - 1);
+}
+
+static bool isUnconditionalGuard(const ExprPtr& guard) {
+    return !guard ||
+           (guard->kind == ExprKind::Literal &&
+            (guard->literal_value == "1" || guard->literal_value == "true"));
+}
+
 static bool isExternalSmtLeaf(const PredicateProgram& prog, const std::string& var) {
     auto is_input_direction = [&](const std::string& name) {
         auto it = prog.param_directions.find(name);
@@ -703,6 +939,11 @@ std::string emitSmt(const PredicateProgram& prog) {
     os << "\n";
 
     std::vector<bool> include_assignment(prog.assignments.size(), false);
+    std::set<std::string> all_assignment_targets;
+    for (const auto& assignment : prog.assignments) {
+        std::string target = smtTargetName(assignment.target);
+        if (!target.empty()) all_assignment_targets.insert(target);
+    }
     std::set<std::string> required_vars;
     for (const auto& out : prog.output_expressions) {
         required_vars.insert(out.name);
@@ -721,6 +962,14 @@ std::string emitSmt(const PredicateProgram& prog) {
             std::set<std::string> deps;
             collectVars(ga.guard, deps);
             collectVars(ga.value, deps);
+            if (!isUnconditionalGuard(ga.guard)) {
+                std::string previous = previousSsaVersion(target);
+                if (!previous.empty() &&
+                    (all_assignment_targets.count(previous) != 0 ||
+                     isExternalSmtLeaf(prog, previous))) {
+                    deps.insert(previous);
+                }
+            }
             for (const auto& dep : deps) {
                 if (required_vars.insert(dep).second) changed = true;
             }
@@ -750,6 +999,7 @@ std::string emitSmt(const PredicateProgram& prog) {
     // Declare variables
     std::set<std::string> all_vars;
     std::unordered_map<std::string, TypeInfo> expr_var_types;
+    std::unordered_map<std::string, TypeInfo> declared_var_types;
     for (size_t i = 0; i < prog.assignments.size(); ++i) {
         if (!include_assignment[i]) continue;
         const auto& ga = prog.assignments[i];
@@ -759,6 +1009,15 @@ std::string emitSmt(const PredicateProgram& prog) {
         collectVarTypes(ga.guard, expr_var_types);
         collectVarTypes(ga.target, expr_var_types);
         collectVarTypes(ga.value, expr_var_types);
+        if (!isUnconditionalGuard(ga.guard)) {
+            std::string previous = previousSsaVersion(smtTargetName(ga.target));
+            if (!previous.empty() && required_vars.count(previous) != 0) {
+                all_vars.insert(previous);
+                TypeInfo target_type =
+                    ga.type.width > 0 ? ga.type : (ga.target ? ga.target->type : TypeInfo{});
+                rememberVarType(expr_var_types, previous, target_type);
+            }
+        }
     }
     for (auto& out : prog.output_expressions) {
         all_vars.insert(out.name);
@@ -769,6 +1028,7 @@ std::string emitSmt(const PredicateProgram& prog) {
 
     for (auto& var : all_vars) {
         TypeInfo type = typeForVar(prog, var, expr_var_types);
+        rememberVarType(declared_var_types, var, type);
         int width = type.width > 0 ? type.width : 32;
         if (isBoolType(type)) {
             os << "(declare-const " << var << " Bool)\n";
@@ -778,27 +1038,55 @@ std::string emitSmt(const PredicateProgram& prog) {
     }
     os << "\n";
 
-    // Emit assignments as assertions
-    for (size_t i = 0; i < prog.assignments.size(); ++i) {
-        if (!include_assignment[i]) continue;
-        const auto& ga = prog.assignments[i];
-        std::string target = exprToSmt(ga.target, &prog);
-        TypeInfo target_type = ga.type.width > 0 ? ga.type : (ga.target ? ga.target->type : TypeInfo{});
-        std::string value = isBoolType(target_type) ? guardToSmt(ga.value, &prog) : exprToSmt(ga.value, &prog);
-        std::string guard = guardToSmt(ga.guard, &prog);
+    std::vector<std::string> assumptions;
+    std::ostringstream body;
+    {
+        SmtAssumptionScope assumption_scope(assumptions);
+        SmtVarTypeScope var_type_scope(declared_var_types);
 
-        if (guard == "true" || guard == "1") {
-            os << "(assert (= " << target << " " << value << "))\n";
-        } else {
-            os << "(assert (=> " << guard << " (= " << target << " " << value << ")))\n";
+        // Emit assignments as assertions
+        for (size_t i = 0; i < prog.assignments.size(); ++i) {
+            if (!include_assignment[i]) continue;
+            const auto& ga = prog.assignments[i];
+            std::string target = exprToSmt(ga.target, &prog);
+            TypeInfo target_type = ga.type.width > 0 ? ga.type : (ga.target ? ga.target->type : TypeInfo{});
+            std::string value = valueForTypeToSmt(ga.value, &prog, target_type);
+            std::string guard = guardToSmt(ga.guard, &prog);
+
+            if (guard == "true" || guard == "1") {
+                body << "(assert (= " << target << " " << value << "))\n";
+            } else {
+                std::string previous = previousSsaVersion(smtTargetName(ga.target));
+                if (!previous.empty() && declared_var_types.count(previous) != 0) {
+                    std::string fallback = valueForTypeToSmt(
+                        make_var(previous, declared_var_types.at(previous)),
+                        &prog,
+                        target_type);
+                    body << "(assert (= " << target << " (ite " << guard << " "
+                         << value << " " << fallback << ")))\n";
+                } else {
+                    body << "(assert (=> " << guard << " (= " << target << " "
+                         << value << ")))\n";
+                }
+            }
+        }
+
+        body << "\n; output_expressions\n";
+        for (auto& out : prog.output_expressions) {
+            std::string value = valueForTypeToSmt(out.expr, &prog, out.type);
+            body << "(assert (= " << out.name << " " << value << "))\n";
         }
     }
 
-    os << "\n; output_expressions\n";
-    for (auto& out : prog.output_expressions) {
-        std::string value = isBoolType(out.type) ? guardToSmt(out.expr, &prog) : exprToSmt(out.expr, &prog);
-        os << "(assert (= " << out.name << " " << value << "))\n";
+    std::set<std::string> unique_assumptions(assumptions.begin(), assumptions.end());
+    if (!unique_assumptions.empty()) {
+        os << "; lookup/domain assumptions\n";
+        for (const auto& assumption : unique_assumptions) {
+            os << "(assert " << assumption << ")\n";
+        }
+        os << "\n";
     }
+    os << body.str();
 
     os << "\n(check-sat)\n";
     return os.str();
