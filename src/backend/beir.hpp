@@ -39,6 +39,8 @@ enum class OperationKind {
     ReduceXor,
     DynamicBitSelect,
     DynamicSlice,
+    DynamicWriteSlice,
+    DynamicWriteBit,
     Lookup,
 };
 

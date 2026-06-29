@@ -411,6 +411,21 @@ static EvalValue evalExpr(const ExprPtr& e,
         std::uint64_t bit = std::uint64_t{1} << e->bit;
         return evalMake(v.bits & 1 ? (b.bits | bit) : (b.bits & ~bit), e->type.width > 0 ? e->type : e->base->type);
     }
+    case ExprKind::DynamicWriteSlice: {
+        auto b = evalExpr(e->base, vars, lookup_tables);
+        auto idx = evalExpr(e->index, vars, lookup_tables);
+        auto v = evalExpr(e->value, vars, lookup_tables);
+        int width = v.width;
+        std::uint64_t field = evalMask(width) << idx.bits;
+        return evalMake((b.bits & ~field) | ((v.bits & evalMask(width)) << idx.bits), e->type.width > 0 ? e->type : e->base->type);
+    }
+    case ExprKind::DynamicWriteBit: {
+        auto b = evalExpr(e->base, vars, lookup_tables);
+        auto idx = evalExpr(e->index, vars, lookup_tables);
+        auto v = evalExpr(e->value, vars, lookup_tables);
+        std::uint64_t bit = std::uint64_t{1} << idx.bits;
+        return evalMake(v.bits & 1 ? (b.bits | bit) : (b.bits & ~bit), e->type.width > 0 ? e->type : e->base->type);
+    }
     case ExprKind::Concat: {
         std::uint64_t bits = 0;
         int width = 0;

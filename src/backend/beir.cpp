@@ -97,6 +97,8 @@ static const char* operationKindText(OperationKind kind) {
     case OperationKind::ReduceXor: return "reduce_xor";
     case OperationKind::DynamicBitSelect: return "dynamic_bit_select";
     case OperationKind::DynamicSlice: return "dynamic_slice";
+    case OperationKind::DynamicWriteSlice: return "dynamic_write_slice";
+    case OperationKind::DynamicWriteBit: return "dynamic_write_bit";
     case OperationKind::Lookup: return "lookup";
     }
     return "unknown";
@@ -197,6 +199,8 @@ static OperationKind operationKindForExpr(const ExprPtr& e) {
     case ExprKind::BitSelect: return OperationKind::BitSelect;
     case ExprKind::WriteSlice: return OperationKind::WriteSlice;
     case ExprKind::WriteBit: return OperationKind::WriteBit;
+    case ExprKind::DynamicWriteSlice: return OperationKind::DynamicWriteSlice;
+    case ExprKind::DynamicWriteBit: return OperationKind::DynamicWriteBit;
     case ExprKind::Concat: return OperationKind::Concat;
     case ExprKind::Repeat: return OperationKind::Repeat;
     case ExprKind::ReduceOr: return OperationKind::ReduceOr;
@@ -583,6 +587,12 @@ private:
         case ExprKind::WriteBit:
             op.bit = expr->bit;
             op.operands.push_back(flattenExpr(expr->base));
+            op.operands.push_back(flattenExpr(expr->value));
+            break;
+        case ExprKind::DynamicWriteSlice:
+        case ExprKind::DynamicWriteBit:
+            op.operands.push_back(flattenExpr(expr->base));
+            op.operands.push_back(flattenExpr(expr->index));
             op.operands.push_back(flattenExpr(expr->value));
             break;
         case ExprKind::Concat:

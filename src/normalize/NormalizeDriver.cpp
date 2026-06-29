@@ -3011,7 +3011,9 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
         return make_slice(b, e->hi, e->lo, e->type);
     }
     case ExprKind::WriteSlice:
-    case ExprKind::WriteBit: {
+    case ExprKind::WriteBit:
+    case ExprKind::DynamicWriteSlice:
+    case ExprKind::DynamicWriteBit: {
         ExprPtr b;
         if (e->base && e->base->kind == ExprKind::VarRef &&
             env.symbols.count(e->base->var_name) &&
@@ -3030,6 +3032,24 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
         auto v = rewriteExpr(e->value, env);
         if (!env.error.empty()) return nullptr;
         int base_width = b ? b->type.width : 0;
+        if (e->kind == ExprKind::DynamicWriteBit) {
+            auto idx = rewriteExpr(e->index, env);
+            if (!env.error.empty()) return nullptr;
+            return make_dynamic_write_bit(b, idx, castIfWidthChanges(v, make_hw_type("bool", 1, false)), e->type);
+        }
+        if (e->kind == ExprKind::DynamicWriteSlice) {
+            auto idx = rewriteExpr(e->index, env);
+            if (!env.error.empty()) return nullptr;
+            int width = v ? v->type.width : 0;
+            if (width <= 0 || (base_width > 0 && width > base_width)) {
+                env.error = "Dynamic slice assignment width out of bounds";
+                return nullptr;
+            }
+            TypeInfo slice_ty = make_hw_type(v && v->type.is_signed ? "Int" : "UInt",
+                                             width,
+                                             v ? v->type.is_signed : false);
+            return make_dynamic_write_slice(b, idx, castIfWidthChanges(v, slice_ty), e->type);
+        }
         if (e->kind == ExprKind::WriteBit) {
             if (e->bit < 0 || (base_width > 0 && e->bit >= base_width)) {
                 env.error = "Bit assignment out of bounds";
@@ -3322,7 +3342,9 @@ StmtPtr rewriteBitSliceAssign(const StmtPtr& s, Env& env) {
     }
     bool is_bit = false;
     bool is_slice = false;
+    bool is_dynamic = false;
     ExprPtr base_expr;
+    ExprPtr dynamic_index;
     int hi = -1;
     int lo = -1;
     if (target_call->kind == ExprKind::Call &&
@@ -3335,6 +3357,32 @@ StmtPtr rewriteBitSliceAssign(const StmtPtr& s, Env& env) {
         if (is_slice && target_call->args.size() >= 3) {
             hi = literalIntValue(target_call->args[1], -1);
             lo = literalIntValue(target_call->args[2], -1);
+        }
+    } else if (target_call->kind == ExprKind::Call &&
+               (target_call->intrinsic == IntrinsicKind::DynamicBitAt ||
+                target_call->intrinsic == IntrinsicKind::DynamicRangeAt ||
+                target_call->callee == "__dynamic_bit_at" ||
+                target_call->callee == "__dynamic_range_at")) {
+        is_bit = target_call->intrinsic == IntrinsicKind::DynamicBitAt ||
+                 target_call->callee == "__dynamic_bit_at";
+        is_slice = !is_bit;
+        is_dynamic = true;
+        if (target_call->args.size() < 2) {
+            env.error = is_bit ? "Unsupported dynamic bit assignment without index"
+                               : "Unsupported dynamic slice assignment without index";
+            return nullptr;
+        }
+        base_expr = target_call->args[0];
+        dynamic_index = rewriteExpr(target_call->args[1], env);
+        if (!env.error.empty()) return nullptr;
+        if (is_bit) {
+            hi = lo = 0;
+        } else {
+            int width = target_call->to_width > 0 ? target_call->to_width : target_call->type.width;
+            if (width > 0) {
+                hi = width - 1;
+                lo = 0;
+            }
         }
     } else if (target_call->kind == ExprKind::BitSelect || target_call->kind == ExprKind::Slice) {
         is_bit = target_call->kind == ExprKind::BitSelect;
@@ -3353,10 +3401,20 @@ StmtPtr rewriteBitSliceAssign(const StmtPtr& s, Env& env) {
     TypeInfo base_type = env.symbols.count(base) ? env.symbols[base] : base_expr->type;
     auto value = rewriteExpr(s->assign_value, env);
     if (!env.error.empty()) return nullptr;
+    if (is_dynamic && is_slice && (hi < 0 || lo < 0)) {
+        int width = value ? value->type.width : 0;
+        if (width <= 0) {
+            env.error = "Unsupported dynamic slice assignment with unknown width";
+            return nullptr;
+        }
+        hi = width - 1;
+        lo = 0;
+    }
     if (env.param_directions.count(base)) {
         markFormalWrite(env, base);
     }
-    bool base_has_value = env.initialized.count(base) || hasAnyBitInitialized(env, base);
+    bool base_has_value = is_dynamic ? env.initialized.count(base)
+                                     : (env.initialized.count(base) || hasAnyBitInitialized(env, base));
     ExprPtr base_value_override;
     if (!base_has_value &&
         std::find(env.output_params.begin(), env.output_params.end(), base) != env.output_params.end()) {
@@ -3367,7 +3425,7 @@ StmtPtr rewriteBitSliceAssign(const StmtPtr& s, Env& env) {
         base_value_override = zeroValueForType(base_type);
         base_has_value = true;
     }
-    if (!base_has_value && (hi < 0 || lo < 0)) {
+    if (!base_has_value && (is_dynamic || hi < 0 || lo < 0)) {
         env.error = "Dynamic bit/slice assignment to uninitialized '" + base +
             "' requires a previous value";
         return nullptr;
@@ -3378,7 +3436,22 @@ StmtPtr rewriteBitSliceAssign(const StmtPtr& s, Env& env) {
     }
     ExprPtr write_expr;
     auto base_var = base_value_override ? base_value_override : make_var(base, base_type);
-    if (is_bit) {
+    if (is_dynamic && is_bit) {
+        write_expr = make_dynamic_write_bit(
+            base_var,
+            dynamic_index,
+            castIfWidthChanges(value, make_hw_type("bool", 1, false)),
+            base_type);
+    } else if (is_dynamic) {
+        TypeInfo slice_ty = make_hw_type(value && value->type.is_signed ? "Int" : "UInt",
+                                         hi - lo + 1,
+                                         value ? value->type.is_signed : false);
+        write_expr = make_dynamic_write_slice(
+            base_var,
+            dynamic_index,
+            castIfWidthChanges(value, slice_ty),
+            base_type);
+    } else if (is_bit) {
         write_expr = make_write_bit(base_var, hi, castIfWidthChanges(value, make_hw_type("bool", 1, false)), base_type);
     } else {
         TypeInfo slice_ty = make_hw_type(value && value->type.is_signed ? "Int" : "UInt", hi - lo + 1, value ? value->type.is_signed : false);
@@ -3390,7 +3463,9 @@ StmtPtr rewriteBitSliceAssign(const StmtPtr& s, Env& env) {
     out->assign_target = make_var(base, base_type);
     out->assign_value = write_expr;
     env.symbols[base] = base_type;
-    if (hi >= 0 && lo >= 0) {
+    if (is_dynamic) {
+        markScalarFullyInitialized(env, base, base_type);
+    } else if (hi >= 0 && lo >= 0) {
         markBitRangeInitialized(env, base, base_type, hi, lo);
         if (!env.error.empty()) return nullptr;
     } else {
@@ -4213,4 +4288,3 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
 }
 
 } // namespace pred
-

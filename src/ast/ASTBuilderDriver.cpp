@@ -1260,6 +1260,12 @@ static void collectReadBasesExpr(const ExprPtr& e, std::unordered_set<std::strin
         collectReadBasesExpr(e->base, out);
         collectReadBasesExpr(e->value, out);
         return;
+    case ExprKind::DynamicWriteSlice:
+    case ExprKind::DynamicWriteBit:
+        collectReadBasesExpr(e->base, out);
+        collectReadBasesExpr(e->index, out);
+        collectReadBasesExpr(e->value, out);
+        return;
     case ExprKind::Concat:
         for (auto& part : e->parts) collectReadBasesExpr(part, out);
         return;
@@ -1292,6 +1298,12 @@ static void collectReadBasesFromAssignmentTarget(const ExprPtr& e,
     case ExprKind::WriteSlice:
     case ExprKind::WriteBit:
         collectReadBasesFromAssignmentTarget(e->base, out);
+        collectReadBasesExpr(e->value, out);
+        return;
+    case ExprKind::DynamicWriteSlice:
+    case ExprKind::DynamicWriteBit:
+        collectReadBasesFromAssignmentTarget(e->base, out);
+        collectReadBasesExpr(e->index, out);
         collectReadBasesExpr(e->value, out);
         return;
     default:
@@ -2305,6 +2317,9 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             result->callee = is_bit_at ? "__dynamic_bit_at" : "__dynamic_range_at";
             result->intrinsic = is_bit_at ? IntrinsicKind::DynamicBitAt : IntrinsicKind::DynamicRangeAt;
             result->type = is_bit_at ? make_hw_type("bool", 1, false) : convertType(type);
+            if (!is_bit_at && vul_call.template_value.has_value()) {
+                result->to_width = *vul_call.template_value;
+            }
             if (!is_bit_at && result->type.width <= 0 && vul_call.template_value.has_value()) {
                 result->type = make_hw_type("UInt", *vul_call.template_value, false);
             }

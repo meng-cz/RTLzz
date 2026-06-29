@@ -196,6 +196,18 @@ EvalBits PredicateEvaluator::eval(const ExprPtr& expr) const {
         return writeSlice(eval(expr->base), expr->hi, expr->lo, eval(expr->value));
     case ExprKind::WriteBit:
         return writeBit(eval(expr->base), expr->bit, eval(expr->value));
+    case ExprKind::DynamicWriteSlice: {
+        auto base = eval(expr->base);
+        int lo = shiftAmount(eval(expr->index));
+        auto value = eval(expr->value);
+        int width = value.width > 0 ? value.width : expr->value->type.width;
+        return writeSlice(std::move(base), lo + width - 1, lo, std::move(value));
+    }
+    case ExprKind::DynamicWriteBit: {
+        auto base = eval(expr->base);
+        int bit_index = shiftAmount(eval(expr->index));
+        return writeBit(std::move(base), bit_index, eval(expr->value));
+    }
     case ExprKind::Concat: {
         std::vector<EvalBits> parts;
         for (const auto& part : expr->parts) parts.push_back(eval(part));

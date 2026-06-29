@@ -59,6 +59,10 @@ static bool exprEqual(const ExprPtr& a, const ExprPtr& b) {
                exprEqual(a->value, b->value);
     case ExprKind::WriteBit:
         return a->bit == b->bit && exprEqual(a->base, b->base) && exprEqual(a->value, b->value);
+    case ExprKind::DynamicWriteSlice:
+    case ExprKind::DynamicWriteBit:
+        return exprEqual(a->base, b->base) && exprEqual(a->index, b->index) &&
+               exprEqual(a->value, b->value);
     case ExprKind::Concat:
         if (a->parts.size() != b->parts.size()) return false;
         for (size_t i = 0; i < a->parts.size(); ++i) {

@@ -96,6 +96,8 @@ enum class ExprKind {
     BitSelect,
     WriteSlice,
     WriteBit,
+    DynamicWriteSlice,
+    DynamicWriteBit,
     Concat,
     Repeat,
     ReduceOr,
@@ -419,6 +421,26 @@ inline ExprPtr make_write_bit(ExprPtr base, int bit, ExprPtr value, TypeInfo typ
     e->kind = ExprKind::WriteBit;
     e->base = std::move(base);
     e->bit = bit;
+    e->value = std::move(value);
+    e->type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    return e;
+}
+
+inline ExprPtr make_dynamic_write_slice(ExprPtr base, ExprPtr index, ExprPtr value, TypeInfo type = {}) {
+    auto e = std::make_shared<Expr>();
+    e->kind = ExprKind::DynamicWriteSlice;
+    e->base = std::move(base);
+    e->index = std::move(index);
+    e->value = std::move(value);
+    e->type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    return e;
+}
+
+inline ExprPtr make_dynamic_write_bit(ExprPtr base, ExprPtr index, ExprPtr value, TypeInfo type = {}) {
+    auto e = std::make_shared<Expr>();
+    e->kind = ExprKind::DynamicWriteBit;
+    e->base = std::move(base);
+    e->index = std::move(index);
     e->value = std::move(value);
     e->type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
     return e;

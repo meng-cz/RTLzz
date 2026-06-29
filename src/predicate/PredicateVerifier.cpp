@@ -31,6 +31,8 @@ std::string exprKindName(ExprKind kind) {
     case ExprKind::BitSelect: return "BitSelect";
     case ExprKind::WriteSlice: return "WriteSlice";
     case ExprKind::WriteBit: return "WriteBit";
+    case ExprKind::DynamicWriteSlice: return "DynamicWriteSlice";
+    case ExprKind::DynamicWriteBit: return "DynamicWriteBit";
     case ExprKind::Concat: return "Concat";
     case ExprKind::Repeat: return "Repeat";
     case ExprKind::ReduceOr: return "ReduceOr";
@@ -357,6 +359,31 @@ PredicateVerifyResult verifyExpr(const ExprPtr& e, VerifyState& state) {
         if (e->value && e->value->type.width > 1) {
             return finish(fail("PredicateVerifier: write_bit value width must be <= 1"));
         }
+        return finish(verify_child(e->value));
+    case ExprKind::DynamicWriteSlice:
+        if (!e->base) return finish(fail("PredicateVerifier: dynamic_write_slice without base"));
+        if (!e->index) return finish(fail("PredicateVerifier: dynamic_write_slice without index"));
+        if (!e->value) return finish(fail("PredicateVerifier: dynamic_write_slice without value"));
+        if (e->base->type.width <= 0) return finish(fail("PredicateVerifier: dynamic_write_slice base width must be known"));
+        if (e->index->type.width <= 0) return finish(fail("PredicateVerifier: dynamic_write_slice index width must be known"));
+        if (e->value->type.width <= 0) return finish(fail("PredicateVerifier: dynamic_write_slice value width must be known"));
+        if (e->value->type.width > e->base->type.width) {
+            return finish(fail("PredicateVerifier: dynamic_write_slice value width exceeds base width"));
+        }
+        if (auto r = verify_child(e->base); !r.ok) return finish(r);
+        if (auto r = verify_child(e->index); !r.ok) return finish(r);
+        return finish(verify_child(e->value));
+    case ExprKind::DynamicWriteBit:
+        if (!e->base) return finish(fail("PredicateVerifier: dynamic_write_bit without base"));
+        if (!e->index) return finish(fail("PredicateVerifier: dynamic_write_bit without index"));
+        if (!e->value) return finish(fail("PredicateVerifier: dynamic_write_bit without value"));
+        if (e->base->type.width <= 0) return finish(fail("PredicateVerifier: dynamic_write_bit base width must be known"));
+        if (e->index->type.width <= 0) return finish(fail("PredicateVerifier: dynamic_write_bit index width must be known"));
+        if (e->value->type.width > 1) {
+            return finish(fail("PredicateVerifier: dynamic_write_bit value width must be <= 1"));
+        }
+        if (auto r = verify_child(e->base); !r.ok) return finish(r);
+        if (auto r = verify_child(e->index); !r.ok) return finish(r);
         return finish(verify_child(e->value));
     case ExprKind::Concat: {
         int width = 0;

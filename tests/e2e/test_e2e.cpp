@@ -424,7 +424,13 @@ int main() {
         "\"signed_shift\"",
         "\"plain_cmp\"",
     });
-    checkFixture("tests/fixtures/int_range.logic.cpp", {"\"kind\": \"slice\"", "\"kind\": \"write_slice\"", "\"kind\": \"write_bit\""});
+    checkFixture("tests/fixtures/int_range.logic.cpp", {
+        "\"kind\": \"slice\"",
+        "\"kind\": \"write_slice\"",
+        "\"kind\": \"write_bit\"",
+        "\"kind\": \"dynamic_write_slice\"",
+        "\"kind\": \"dynamic_write_bit\"",
+    });
     checkFixture("tests/fixtures/int_concat_repeat.logic.cpp", {"\"kind\": \"concat\"", "\"kind\": \"repeat\"", "\"kind\": \"reduce_or\"", "\"kind\": \"reduce_and\"", "\"kind\": \"reduce_xor\""});
     auto struct_ref = runFile("tests/fixtures/struct_ref.logic.cpp");
     if (!struct_ref.error.empty()) std::cerr << struct_ref.error << "\n";

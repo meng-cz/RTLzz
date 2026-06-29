@@ -167,6 +167,8 @@ static std::string exprKindName(const ExprPtr& e) {
     case ExprKind::BitSelect: return "bit_select";
     case ExprKind::WriteSlice: return "write_slice";
     case ExprKind::WriteBit: return "write_bit";
+    case ExprKind::DynamicWriteSlice: return "dynamic_write_slice";
+    case ExprKind::DynamicWriteBit: return "dynamic_write_bit";
     case ExprKind::Concat: return "concat";
     case ExprKind::Repeat: return "repeat";
     case ExprKind::ReduceOr: return "reduce_or";
@@ -526,6 +528,12 @@ private:
         case ExprKind::WriteBit:
             op.bit = expr->bit;
             op.operands.push_back(flattenExpr(expr->base));
+            op.operands.push_back(flattenExpr(expr->value));
+            break;
+        case ExprKind::DynamicWriteSlice:
+        case ExprKind::DynamicWriteBit:
+            op.operands.push_back(flattenExpr(expr->base));
+            op.operands.push_back(flattenExpr(expr->index));
             op.operands.push_back(flattenExpr(expr->value));
             break;
         case ExprKind::Concat:

@@ -184,6 +184,14 @@ class ListJsonEvaluator:
             base, value = int(ops[0]), int(ops[1]) & 1
             bit = int(driver["bit"])
             return ((base & ~(1 << bit)) | (value << bit)) & out_mask
+        if kind == "dynamic_write_slice":
+            base, idx, value = int(ops[0]), int(ops[1]), int(ops[2])
+            width = type_width(driver["operands"][2]["type"])
+            field_mask = mask(width) << idx
+            return ((base & ~field_mask) | ((value & mask(width)) << idx)) & out_mask
+        if kind == "dynamic_write_bit":
+            base, idx, value = int(ops[0]), int(ops[1]), int(ops[2]) & 1
+            return ((base & ~(1 << idx)) | (value << idx)) & out_mask
         if kind == "concat":
             result = 0
             for operand, value in zip(driver["operands"], ops):

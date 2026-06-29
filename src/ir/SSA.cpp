@@ -198,6 +198,8 @@ static std::string exprLabel(const ExprPtr& e) {
     case ExprKind::BitSelect: return "BitSelect";
     case ExprKind::WriteSlice: return "WriteSlice";
     case ExprKind::WriteBit: return "WriteBit";
+    case ExprKind::DynamicWriteSlice: return "DynamicWriteSlice";
+    case ExprKind::DynamicWriteBit: return "DynamicWriteBit";
     case ExprKind::Concat: return "Concat";
     case ExprKind::Repeat: return "Repeat";
     case ExprKind::ReduceOr: return "ReduceOr";
