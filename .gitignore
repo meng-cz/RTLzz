@@ -44,6 +44,18 @@ settings.json
 rtl_test_outputs*/
 *_outputs/
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
 
 
 
