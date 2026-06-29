@@ -62,6 +62,11 @@ struct Aggregate {
     std::vector<std::string> element_symbols;
 };
 
+struct LookupTable {
+    std::string name;
+    std::vector<std::string> values;
+};
+
 struct ListProgram {
     std::string function_name;
     std::vector<std::string> inputs;
@@ -70,6 +75,7 @@ struct ListProgram {
     std::unordered_map<std::string, std::size_t> port_index;
     std::vector<Aggregate> aggregates;
     std::unordered_map<std::string, std::size_t> aggregate_index;
+    std::vector<LookupTable> lookup_tables;
     std::vector<Signal> signals;
     std::unordered_map<std::string, std::size_t> signal_index;
 };
@@ -249,6 +255,12 @@ public:
     ListProgram build(const PredicateProgram& source) {
         program_.function_name = source.function_name;
         program_.outputs = source.outputs;
+        for (const auto& name : sortedKeys(source.lookup_tables)) {
+            LookupTable table;
+            table.name = name;
+            table.values = source.lookup_tables.at(name);
+            program_.lookup_tables.push_back(std::move(table));
+        }
         if (program_.outputs.empty()) {
             for (const auto& [name, direction] : source.param_directions) {
                 if (direction == "Output") program_.outputs.push_back(name);
@@ -773,6 +785,23 @@ std::string emitListJson(const PredicateProgram& prog) {
         os << "]\n";
         os << "    }";
         if (i + 1 < list.aggregates.size()) os << ",";
+        os << "\n";
+    }
+    os << "  ],\n";
+
+    os << "  \"lookup_tables\": [\n";
+    for (std::size_t i = 0; i < list.lookup_tables.size(); ++i) {
+        const auto& table = list.lookup_tables[i];
+        os << "    {\n";
+        os << "      \"name\": \"" << jsonEscape(table.name) << "\",\n";
+        os << "      \"values\": [";
+        for (std::size_t j = 0; j < table.values.size(); ++j) {
+            if (j) os << ", ";
+            os << "\"" << jsonEscape(table.values[j]) << "\"";
+        }
+        os << "]\n";
+        os << "    }";
+        if (i + 1 < list.lookup_tables.size()) os << ",";
         os << "\n";
     }
     os << "  ],\n";
