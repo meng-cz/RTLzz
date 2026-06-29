@@ -187,6 +187,9 @@ static int runMain(int argc, char* argv[]) {
 
     for (auto& [name, type] : norm_result.symbols) pred_prog.symbols[name] = type;
     pred_prog.param_directions = norm_result.param_directions;
+    for (const auto& param : func.params) {
+        if (param.debug_loc.valid()) pred_prog.param_debug_locs[param.name] = param.debug_loc;
+    }
     pred_prog.output_default_reasons = norm_result.output_default_reasons;
     pred_prog.output_paired_controls = norm_result.output_paired_controls;
     pred_prog.lookup_tables = norm_result.lookup_tables;

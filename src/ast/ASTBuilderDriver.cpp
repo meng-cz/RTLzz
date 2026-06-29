@@ -256,7 +256,9 @@ static bool isMutableParamPassing(ParamPassingKind passing) {
 
 // Forward declarations
 static ExprPtr convertExpr(CXCursor cursor);
+static ExprPtr convertExprImpl(CXCursor cursor);
 static StmtPtr convertStmt(CXCursor cursor);
+static StmtPtr convertStmtImpl(CXCursor cursor);
 static std::vector<StmtPtr> convertChildren(CXCursor cursor);
 
 // Visitor that collects child cursors
@@ -388,6 +390,35 @@ static std::string cursorLocation(CXCursor cursor) {
     clang_getExpansionLocation(loc, &file, &line, &column, &offset);
     std::string file_name = file ? cxToStr(clang_getFileName(file)) : "<unknown>";
     return file_name + ":" + std::to_string(line) + ":" + std::to_string(column);
+}
+
+static DebugLoc debugLocFromCursor(CXCursor cursor) {
+    DebugLoc out;
+    CXSourceRange range = clang_getCursorExtent(cursor);
+    CXFile start_file = nullptr;
+    CXFile end_file = nullptr;
+    unsigned start_line = 0, start_column = 0, start_offset = 0;
+    unsigned end_line = 0, end_column = 0, end_offset = 0;
+    clang_getExpansionLocation(clang_getRangeStart(range), &start_file,
+                               &start_line, &start_column, &start_offset);
+    clang_getExpansionLocation(clang_getRangeEnd(range), &end_file,
+                               &end_line, &end_column, &end_offset);
+    if (start_file) out.file = cxToStr(clang_getFileName(start_file));
+    out.line = static_cast<int>(start_line);
+    out.column = static_cast<int>(start_column);
+    out.end_line = static_cast<int>(end_line);
+    out.end_column = static_cast<int>(end_column);
+    return out;
+}
+
+static ExprPtr withDebugLoc(ExprPtr expr, CXCursor cursor) {
+    if (expr && !expr->debug_loc.valid()) expr->debug_loc = debugLocFromCursor(cursor);
+    return expr;
+}
+
+static StmtPtr withDebugLoc(StmtPtr stmt, CXCursor cursor) {
+    if (stmt && !stmt->debug_loc.valid()) stmt->debug_loc = debugLocFromCursor(cursor);
+    return stmt;
 }
 
 static std::string cursorUsr(CXCursor cursor) {
@@ -1609,7 +1640,7 @@ static std::string checkHelperCallGraphRecursion(const std::vector<FunctionCurso
     return "";
 }
 
-static ExprPtr convertExpr(CXCursor cursor) {
+static ExprPtr convertExprImpl(CXCursor cursor) {
     CXCursorKind kind = clang_getCursorKind(cursor);
     CXType type = clang_getCursorType(cursor);
     auto children = getChildren(cursor);
@@ -2637,6 +2668,10 @@ static ExprPtr convertExpr(CXCursor cursor) {
     return unsupported;
 }
 
+static ExprPtr convertExpr(CXCursor cursor) {
+    return withDebugLoc(convertExprImpl(cursor), cursor);
+}
+
 static std::vector<StmtPtr> convertBlock(CXCursor cursor) {
     std::vector<StmtPtr> result;
     if (clang_getCursorKind(cursor) != CXCursor_CompoundStmt) {
@@ -2713,7 +2748,7 @@ static void collectInitArgExprs(CXCursor cursor, std::vector<ExprPtr>& out, int 
     for (auto& child : children) collectInitArgExprs(child, out, depth + 1);
 }
 
-static StmtPtr convertStmt(CXCursor cursor) {
+static StmtPtr convertStmtImpl(CXCursor cursor) {
     CXCursorKind kind = clang_getCursorKind(cursor);
     auto children = getChildren(cursor);
 
@@ -2779,8 +2814,8 @@ static StmtPtr convertStmt(CXCursor cursor) {
                 return stmt;
             }
         }
-        return nullptr;
-    }
+    return nullptr;
+}
 
     case CXCursor_UnaryOperator: {
         auto unary = convertExpr(cursor);
@@ -3118,6 +3153,10 @@ static StmtPtr convertStmt(CXCursor cursor) {
     }
 }
 
+static StmtPtr convertStmt(CXCursor cursor) {
+    return withDebugLoc(convertStmtImpl(cursor), cursor);
+}
+
 static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name) {
     FunctionAST func;
     func.name = name;
@@ -3128,6 +3167,7 @@ static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name)
         CXCursor param = clang_Cursor_getArgument(cursor, i);
         ParamDecl pd;
         pd.name = cxToStr(clang_getCursorSpelling(param));
+        pd.debug_loc = debugLocFromCursor(param);
         CXType pt = clang_getCursorType(param);
         pd.type = convertType(pt);
         pd.passing = classifyParamPassing(pt);
@@ -3198,6 +3238,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         if (kind == CXCursor_ParmDecl) {
             ParamDecl p;
             p.name = cxToStr(clang_getCursorSpelling(c));
+            p.debug_loc = debugLocFromCursor(c);
             p.type = convertType(clang_getCursorType(c));
             p.is_output = false;
             fn->params.push_back(p);
@@ -3220,6 +3261,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
             if (mk == CXCursor_ParmDecl) {
                 ParamDecl p;
                 p.name = cxToStr(clang_getCursorSpelling(mc));
+                p.debug_loc = debugLocFromCursor(mc);
                 p.type = convertType(clang_getCursorType(mc));
                 p.is_output = false;
                 ctx->fn->params.push_back(p);
@@ -3252,6 +3294,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
             if (kind == CXCursor_ParmDecl) {
                 ParamDecl p;
                 p.name = cxToStr(clang_getCursorSpelling(c));
+                p.debug_loc = debugLocFromCursor(c);
                 p.type = convertType(clang_getCursorType(c));
                 p.is_output = false;
                 fn->params.push_back(p);

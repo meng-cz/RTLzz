@@ -9,6 +9,19 @@
 
 namespace pred {
 
+struct DebugLoc {
+    std::string file;
+    int line = 0;
+    int column = 0;
+    int end_line = 0;
+    int end_column = 0;
+
+    bool valid() const {
+        return !file.empty() || line > 0 || column > 0 ||
+               end_line > 0 || end_column > 0;
+    }
+};
+
 // --- Type representation ---
 
 struct TypeInfo {
@@ -101,6 +114,7 @@ enum class IntrinsicKind {
 struct Expr {
     ExprKind kind;
     TypeInfo type;
+    DebugLoc debug_loc;
 
     // Literal
     std::string literal_value;
@@ -174,6 +188,7 @@ struct CaseClause {
 
 struct Stmt {
     StmtKind kind;
+    DebugLoc debug_loc;
 
     // Assign: target = value
     ExprPtr assign_target;
@@ -220,6 +235,7 @@ struct Stmt {
 struct ParamDecl {
     TypeInfo type;
     std::string name;
+    DebugLoc debug_loc;
     bool is_output = false; // compatibility mirror for direction != Input
     ParamDirection direction = ParamDirection::Input;
     ParamPassingKind passing = ParamPassingKind::Value;

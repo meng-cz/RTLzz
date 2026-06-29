@@ -1,6 +1,7 @@
 #include "emitter/ListJsonEmitter.h"
 
 #include <algorithm>
+#include <cctype>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -38,6 +39,7 @@ struct Operation {
     int times = 0;
     std::size_t source_assignment = 0;
     bool has_source_assignment = false;
+    std::vector<DebugLoc> source_locs;
 };
 
 struct Signal {
@@ -78,6 +80,7 @@ struct PendingAssignment {
     ExprPtr value;
     TypeInfo type;
     std::size_t source_assignment = 0;
+    DebugLoc debug_loc;
 };
 
 static std::string ind(int level) {
@@ -170,6 +173,76 @@ static std::string exprKindName(const ExprPtr& e) {
     return "unknown";
 }
 
+static std::string readableOpName(const std::string& op) {
+    if (op == "+") return "add";
+    if (op == "-") return "sub";
+    if (op == "*") return "mul";
+    if (op == "/") return "div";
+    if (op == "%") return "mod";
+    if (op == "&") return "and";
+    if (op == "|") return "or";
+    if (op == "^") return "xor";
+    if (op == "&&") return "logic_and";
+    if (op == "||") return "logic_or";
+    if (op == "==") return "eq";
+    if (op == "!=") return "ne";
+    if (op == "<") return "lt";
+    if (op == "<=") return "le";
+    if (op == ">") return "gt";
+    if (op == ">=") return "ge";
+    if (op == "<<") return "shl";
+    if (op == ">>") return "shr";
+    if (op == "!") return "not";
+    if (op == "~") return "bit_not";
+    return op.empty() ? "op" : op;
+}
+
+static std::string sanitizeNamePart(const std::string& text) {
+    std::string out;
+    for (char ch : text) {
+        unsigned char c = static_cast<unsigned char>(ch);
+        if (std::isalnum(c)) out.push_back(static_cast<char>(std::tolower(c)));
+        else if (ch == '_') out.push_back('_');
+        else if (out.empty() || out.back() != '_') out.push_back('_');
+    }
+    while (!out.empty() && out.front() == '_') out.erase(out.begin());
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    return out.empty() ? "tmp" : out;
+}
+
+static std::string tempStemForExpr(const ExprPtr& expr) {
+    if (!expr) return "const";
+    switch (expr->kind) {
+    case ExprKind::BinaryOp:
+        return readableOpName(expr->op);
+    case ExprKind::UnaryOp:
+        return readableOpName(expr->op);
+    case ExprKind::Ternary:
+        return "mux";
+    case ExprKind::Call:
+        if (!expr->callee.empty()) return "call_" + expr->callee;
+        return exprKindName(expr);
+    case ExprKind::FieldAccess:
+        return "field_" + expr->field_name;
+    case ExprKind::ZExt:
+    case ExprKind::SExt:
+    case ExprKind::Trunc:
+        return exprKindName(expr) + "_" + std::to_string(expr->to_width);
+    case ExprKind::Slice:
+        return "slice_" + std::to_string(expr->hi) + "_" + std::to_string(expr->lo);
+    case ExprKind::BitSelect:
+        return "bit_" + std::to_string(expr->bit);
+    case ExprKind::Repeat:
+        return "repeat_" + std::to_string(expr->times);
+    case ExprKind::ReduceOr:
+    case ExprKind::ReduceAnd:
+    case ExprKind::ReduceXor:
+        return exprKindName(expr);
+    default:
+        return exprKindName(expr);
+    }
+}
+
 class Builder {
 public:
     ListProgram build(const PredicateProgram& source) {
@@ -196,7 +269,7 @@ public:
         }
         std::sort(program_.inputs.begin(), program_.inputs.end());
 
-        connectInputPorts();
+        connectInputPorts(source);
         std::vector<std::string> target_order;
         std::unordered_map<std::string, std::vector<PendingAssignment>> by_target;
         std::unordered_map<std::string, TypeInfo> target_types;
@@ -212,7 +285,8 @@ public:
                 assign.guard ? assign.guard : make_true_guard(),
                 assign.value,
                 type,
-                i
+                i,
+                assign.debug_loc
             });
         }
 
@@ -228,6 +302,9 @@ public:
             op.type = type;
             op.source_assignment = assignments.back().source_assignment;
             op.has_source_assignment = true;
+            for (const auto& assignment : assignments) {
+                if (assignment.debug_loc.valid()) op.source_locs.push_back(assignment.debug_loc);
+            }
             setDriver(target_name, std::move(op), false);
         }
 
@@ -238,6 +315,9 @@ public:
             op.kind = "assign";
             op.operands.push_back(std::move(rhs));
             op.type = signal.type.width ? signal.type : output.type;
+            if (output.expr && output.expr->debug_loc.valid()) {
+                op.source_locs.push_back(output.expr->debug_loc);
+            }
             setDriver(output.name, std::move(op), false);
         }
 
@@ -321,7 +401,7 @@ private:
         return program_.aggregates.back();
     }
 
-    void connectInputPorts() {
+    void connectInputPorts(const PredicateProgram& source) {
         for (const auto& port : program_.ports) {
             if (port.direction != "Input") continue;
             for (std::size_t i = 0; i < port.element_symbols.size(); ++i) {
@@ -329,6 +409,10 @@ private:
                 op.kind = "port_read";
                 op.type = signalType(port.element_symbols[i]);
                 op.operands.push_back(portOperand(port.name, port.type));
+                auto loc_it = source.param_debug_locs.find(port.name);
+                if (loc_it != source.param_debug_locs.end() && loc_it->second.valid()) {
+                    op.source_locs.push_back(loc_it->second);
+                }
                 if (port.element_symbols.size() > 1) {
                     op.operands.push_back(literalOperand(std::to_string(i), TypeInfo{"int", 32, true}));
                 }
@@ -366,12 +450,13 @@ private:
                                  scalarElementType(expr->type));
         }
 
-        std::string temp_name = makeTempName();
+        std::string temp_name = makeTempName(tempStemForExpr(expr));
         ensureSignal(temp_name, expr->type);
 
         Operation op;
         op.kind = exprKindName(expr);
         op.type = expr->type;
+        if (expr->debug_loc.valid()) op.source_locs.push_back(expr->debug_loc);
 
         switch (expr->kind) {
         case ExprKind::BinaryOp:
@@ -462,6 +547,7 @@ private:
             }
             TypeInfo mux_type = assignment.type.width > 0 ? assignment.type : type;
             result = make_ite(assignment.guard, assignment.value, result, mux_type);
+            result->debug_loc = assignment.debug_loc;
         }
         return result;
     }
@@ -524,9 +610,10 @@ private:
         if (existing.struct_name.empty()) existing.struct_name = incoming.struct_name;
     }
 
-    std::string makeTempName() {
+    std::string makeTempName(const std::string& stem) {
+        std::string clean = sanitizeNamePart(stem);
         while (true) {
-            std::string name = "__rtlzz_t" + std::to_string(next_temp_++);
+            std::string name = "__rtlzz_" + clean + "_" + std::to_string(next_temp_++);
             if (!program_.signal_index.count(name) && !program_.aggregate_index.count(name)) return name;
         }
     }
@@ -562,6 +649,30 @@ static void emitOperand(std::ostream& os, const Operand& operand, int indent) {
     os << "\n" << ind(indent) << "}";
 }
 
+static void emitDebugLoc(std::ostream& os, const DebugLoc& loc, int indent) {
+    os << "{\n";
+    os << ind(indent + 1) << "\"file\": \"" << jsonEscape(loc.file) << "\",\n";
+    os << ind(indent + 1) << "\"line\": " << loc.line << ",\n";
+    os << ind(indent + 1) << "\"column\": " << loc.column << ",\n";
+    os << ind(indent + 1) << "\"end_line\": " << loc.end_line << ",\n";
+    os << ind(indent + 1) << "\"end_column\": " << loc.end_column << "\n";
+    os << ind(indent) << "}";
+}
+
+static void emitDebugInfo(std::ostream& os, const Operation& op, int indent) {
+    os << "{\n";
+    os << ind(indent + 1) << "\"source_locs\": [";
+    if (!op.source_locs.empty()) os << "\n";
+    for (std::size_t i = 0; i < op.source_locs.size(); ++i) {
+        os << ind(indent + 2);
+        emitDebugLoc(os, op.source_locs[i], indent + 2);
+        if (i + 1 < op.source_locs.size()) os << ",";
+        os << "\n";
+    }
+    os << ind(indent + 1) << "]\n";
+    os << ind(indent) << "}";
+}
+
 static void emitOperation(std::ostream& os, const Operation& op, int indent) {
     os << "{\n";
     os << ind(indent + 1) << "\"kind\": \"" << jsonEscape(op.kind) << "\",\n";
@@ -578,6 +689,9 @@ static void emitOperation(std::ostream& os, const Operation& op, int indent) {
     os << ind(indent + 1) << "\"source_assignment\": ";
     if (op.has_source_assignment) os << op.source_assignment;
     else os << "null";
+    os << ",\n";
+    os << ind(indent + 1) << "\"debug\": ";
+    emitDebugInfo(os, op, indent + 1);
     os << ",\n";
     os << ind(indent + 1) << "\"operands\": [";
     if (!op.operands.empty()) os << "\n";

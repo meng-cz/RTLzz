@@ -325,6 +325,7 @@ PredicateProgram predicate(const SSAProgram& ssa) {
                 ga.target = s->assign_target;
                 ga.value = s->assign_value;
                 if (s->assign_target) ga.type = s->assign_target->type;
+                ga.debug_loc = s->debug_loc;
                 prog.assignments.push_back(ga);
             } else if (s->kind == StmtKind::Decl && s->decl_init.has_value()) {
                 GuardedAssign ga;
@@ -332,6 +333,7 @@ PredicateProgram predicate(const SSAProgram& ssa) {
                 ga.target = make_var(s->decl_name, s->decl_type);
                 ga.value = s->decl_init.value();
                 ga.type = s->decl_type;
+                ga.debug_loc = s->debug_loc;
                 prog.assignments.push_back(ga);
             }
         }
@@ -341,4 +343,3 @@ PredicateProgram predicate(const SSAProgram& ssa) {
 }
 
 } // namespace pred
-

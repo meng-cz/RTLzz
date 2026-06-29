@@ -14,6 +14,7 @@ struct GuardedAssign {
     ExprPtr target;     // LHS (variable, array element, struct field)
     ExprPtr value;      // RHS expression (may contain ite)
     TypeInfo type;      // type of the assignment
+    DebugLoc debug_loc; // best source location for this assignment
 };
 
 struct OutputExpression {
@@ -45,6 +46,7 @@ struct PredicateProgram {
     // Symbol table: variable name -> type info
     std::unordered_map<std::string, TypeInfo> symbols;
     std::unordered_map<std::string, std::string> param_directions;
+    std::unordered_map<std::string, DebugLoc> param_debug_locs;
     std::unordered_map<std::string, std::string> output_default_reasons;
     std::unordered_map<std::string, std::string> output_paired_controls;
     std::unordered_map<std::string, std::vector<std::string>> lookup_tables;
