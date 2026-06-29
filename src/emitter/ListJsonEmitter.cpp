@@ -38,7 +38,6 @@ struct Operation {
     int times = 0;
     std::size_t source_assignment = 0;
     bool has_source_assignment = false;
-    std::optional<Operand> guard;
 };
 
 struct Signal {
@@ -72,6 +71,13 @@ struct ListProgram {
     std::unordered_map<std::string, std::size_t> aggregate_index;
     std::vector<Signal> signals;
     std::unordered_map<std::string, std::size_t> signal_index;
+};
+
+struct PendingAssignment {
+    ExprPtr guard;
+    ExprPtr value;
+    TypeInfo type;
+    std::size_t source_assignment = 0;
 };
 
 static std::string ind(int level) {
@@ -119,6 +125,19 @@ static TypeInfo scalarElementType(TypeInfo type) {
     type.array_size = 0;
     type.array_dims.clear();
     return type;
+}
+
+static bool isTrueGuard(const ExprPtr& expr) {
+    return !expr || (expr->kind == ExprKind::Literal &&
+        (expr->literal_value == "1" || expr->literal_value == "true"));
+}
+
+static ExprPtr defaultValueFor(const TypeInfo& type) {
+    TypeInfo out_type = type;
+    if (out_type.width == 1 && (out_type.name == "bool" || out_type.hw_kind == "bool")) {
+        return make_literal("false", out_type);
+    }
+    return make_literal("0", out_type);
 }
 
 static std::string exprKindName(const ExprPtr& e) {
@@ -178,20 +197,38 @@ public:
         std::sort(program_.inputs.begin(), program_.inputs.end());
 
         connectInputPorts();
+        std::vector<std::string> target_order;
+        std::unordered_map<std::string, std::vector<PendingAssignment>> by_target;
+        std::unordered_map<std::string, TypeInfo> target_types;
         for (std::size_t i = 0; i < source.assignments.size(); ++i) {
             const auto& assign = source.assignments[i];
-            Operand guard = flattenExpr(assign.guard ? assign.guard : make_true_guard());
             Operand target = flattenTarget(assign.target);
-            Operand value = flattenExpr(assign.value);
+            if (!by_target.count(target.text)) target_order.push_back(target.text);
+
+            TypeInfo type = target.type.width ? target.type : assign.type;
+            if (type.width <= 0 && assign.value) type = assign.value->type;
+            target_types[target.text] = type;
+            by_target[target.text].push_back({
+                assign.guard ? assign.guard : make_true_guard(),
+                assign.value,
+                type,
+                i
+            });
+        }
+
+        for (const auto& target_name : target_order) {
+            const auto& assignments = by_target.at(target_name);
+            TypeInfo type = target_types[target_name];
+            ExprPtr value = buildMuxTree(assignments, type);
+            Operand rhs = flattenExpr(value);
 
             Operation op;
             op.kind = "assign";
-            op.operands.push_back(std::move(value));
-            op.type = target.type.width ? target.type : assign.type;
-            op.source_assignment = i;
+            op.operands.push_back(std::move(rhs));
+            op.type = type;
+            op.source_assignment = assignments.back().source_assignment;
             op.has_source_assignment = true;
-            op.guard = std::move(guard);
-            setDriver(target.text, std::move(op), false);
+            setDriver(target_name, std::move(op), false);
         }
 
         for (const auto& output : source.output_expressions) {
@@ -415,6 +452,20 @@ private:
         return symbolOperand(temp_name, expr->type);
     }
 
+    ExprPtr buildMuxTree(const std::vector<PendingAssignment>& assignments,
+                         const TypeInfo& type) {
+        ExprPtr result = defaultValueFor(type);
+        for (const auto& assignment : assignments) {
+            if (isTrueGuard(assignment.guard)) {
+                result = assignment.value;
+                continue;
+            }
+            TypeInfo mux_type = assignment.type.width > 0 ? assignment.type : type;
+            result = make_ite(assignment.guard, assignment.value, result, mux_type);
+        }
+        return result;
+    }
+
     Operand symbolOperand(const std::string& name, TypeInfo type) {
         if (type.is_array || program_.aggregate_index.count(name)) {
             ensureAggregate(name, type);
@@ -526,10 +577,6 @@ static void emitOperation(std::ostream& os, const Operation& op, int indent) {
     os << ind(indent + 1) << "\"times\": " << op.times << ",\n";
     os << ind(indent + 1) << "\"source_assignment\": ";
     if (op.has_source_assignment) os << op.source_assignment;
-    else os << "null";
-    os << ",\n";
-    os << ind(indent + 1) << "\"guard\": ";
-    if (op.guard) emitOperand(os, *op.guard, indent + 1);
     else os << "null";
     os << ",\n";
     os << ind(indent + 1) << "\"operands\": [";
