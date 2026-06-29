@@ -34,6 +34,19 @@ static TypeInfo scalarElementType(TypeInfo type) {
     type.is_array = false;
     type.array_size = 0;
     type.array_dims.clear();
+    type.struct_name.clear();
+    return type;
+}
+
+static bool hasStructType(const TypeInfo& type) {
+    return !type.struct_name.empty();
+}
+
+static TypeInfo beirType(TypeInfo type) {
+    if (hasStructType(type)) {
+        throw std::runtime_error("beir requires flattened scalar data, got struct type: " +
+                                 type.struct_name);
+    }
     return type;
 }
 
@@ -50,35 +63,150 @@ static ExprPtr defaultValueFor(const TypeInfo& type) {
     return make_literal("0", out_type);
 }
 
-static std::string exprKindName(const ExprPtr& e) {
-    switch (e->kind) {
-    case ExprKind::Literal: return "literal";
-    case ExprKind::VarRef: return "var";
-    case ExprKind::BinaryOp: return "binary";
-    case ExprKind::UnaryOp: return "unary";
-    case ExprKind::ArrayAccess: return "array_access";
-    case ExprKind::FieldAccess: return "field_access";
-    case ExprKind::Call:
-        if (e->intrinsic == IntrinsicKind::DynamicBitAt) return "dynamic_bit_select";
-        if (e->intrinsic == IntrinsicKind::DynamicRangeAt) return "dynamic_slice";
-        if (e->callee == "lookup") return "lookup";
-        return "call";
-    case ExprKind::Cast: return "cast";
-    case ExprKind::Ternary: return "ite";
-    case ExprKind::ZExt: return "zext";
-    case ExprKind::SExt: return "sext";
-    case ExprKind::Trunc: return "trunc";
-    case ExprKind::Slice: return "slice";
-    case ExprKind::BitSelect: return "bit_select";
-    case ExprKind::WriteSlice: return "write_slice";
-    case ExprKind::WriteBit: return "write_bit";
-    case ExprKind::Concat: return "concat";
-    case ExprKind::Repeat: return "repeat";
-    case ExprKind::ReduceOr: return "reduce_or";
-    case ExprKind::ReduceAnd: return "reduce_and";
-    case ExprKind::ReduceXor: return "reduce_xor";
+static const char* operandKindText(OperandKind kind) {
+    switch (kind) {
+    case OperandKind::Symbol: return "symbol";
+    case OperandKind::Literal: return "literal";
+    case OperandKind::Port: return "port";
+    case OperandKind::Aggregate: return "aggregate";
     }
     return "unknown";
+}
+
+static const char* operationKindText(OperationKind kind) {
+    switch (kind) {
+    case OperationKind::Assign: return "assign";
+    case OperationKind::PortRead: return "port_read";
+    case OperationKind::Binary: return "binary";
+    case OperationKind::Unary: return "unary";
+    case OperationKind::ArrayAccess: return "array_access";
+    case OperationKind::Call: return "call";
+    case OperationKind::Cast: return "cast";
+    case OperationKind::Ite: return "ite";
+    case OperationKind::ZExt: return "zext";
+    case OperationKind::SExt: return "sext";
+    case OperationKind::Trunc: return "trunc";
+    case OperationKind::Slice: return "slice";
+    case OperationKind::BitSelect: return "bit_select";
+    case OperationKind::WriteSlice: return "write_slice";
+    case OperationKind::WriteBit: return "write_bit";
+    case OperationKind::Concat: return "concat";
+    case OperationKind::Repeat: return "repeat";
+    case OperationKind::ReduceOr: return "reduce_or";
+    case OperationKind::ReduceAnd: return "reduce_and";
+    case OperationKind::ReduceXor: return "reduce_xor";
+    case OperationKind::DynamicBitSelect: return "dynamic_bit_select";
+    case OperationKind::DynamicSlice: return "dynamic_slice";
+    case OperationKind::Lookup: return "lookup";
+    }
+    return "unknown";
+}
+
+static const char* opCodeText(OpCode op) {
+    switch (op) {
+    case OpCode::None: return "";
+    case OpCode::Add: return "+";
+    case OpCode::Sub: return "-";
+    case OpCode::Mul: return "*";
+    case OpCode::Div: return "/";
+    case OpCode::Mod: return "%";
+    case OpCode::BitAnd: return "&";
+    case OpCode::BitOr: return "|";
+    case OpCode::BitXor: return "^";
+    case OpCode::LogicAnd: return "&&";
+    case OpCode::LogicOr: return "||";
+    case OpCode::Eq: return "==";
+    case OpCode::Ne: return "!=";
+    case OpCode::Lt: return "<";
+    case OpCode::Le: return "<=";
+    case OpCode::Gt: return ">";
+    case OpCode::Ge: return ">=";
+    case OpCode::Shl: return "<<";
+    case OpCode::Shr: return ">>";
+    case OpCode::LogicNot: return "!";
+    case OpCode::BitNot: return "~";
+    case OpCode::Neg: return "-";
+    }
+    return "";
+}
+
+static OpCode parseBinaryOpCode(const std::string& op) {
+    if (op == "+") return OpCode::Add;
+    if (op == "-") return OpCode::Sub;
+    if (op == "*") return OpCode::Mul;
+    if (op == "/") return OpCode::Div;
+    if (op == "%") return OpCode::Mod;
+    if (op == "&") return OpCode::BitAnd;
+    if (op == "|") return OpCode::BitOr;
+    if (op == "^") return OpCode::BitXor;
+    if (op == "&&") return OpCode::LogicAnd;
+    if (op == "||") return OpCode::LogicOr;
+    if (op == "==") return OpCode::Eq;
+    if (op == "!=") return OpCode::Ne;
+    if (op == "<") return OpCode::Lt;
+    if (op == "<=") return OpCode::Le;
+    if (op == ">") return OpCode::Gt;
+    if (op == ">=") return OpCode::Ge;
+    if (op == "<<") return OpCode::Shl;
+    if (op == ">>") return OpCode::Shr;
+    throw std::runtime_error("beir unsupported binary op: " + op);
+}
+
+static OpCode parseUnaryOpCode(const std::string& op) {
+    if (op == "!") return OpCode::LogicNot;
+    if (op == "~") return OpCode::BitNot;
+    if (op == "-") return OpCode::Neg;
+    throw std::runtime_error("beir unsupported unary op: " + op);
+}
+
+static PortDirection parsePortDirection(const std::string& text) {
+    if (text == "Input") return PortDirection::Input;
+    if (text == "Output") return PortDirection::Output;
+    if (text == "InOut") return PortDirection::InOut;
+    return PortDirection::Unknown;
+}
+
+static const char* portDirectionText(PortDirection direction) {
+    switch (direction) {
+    case PortDirection::Input: return "Input";
+    case PortDirection::Output: return "Output";
+    case PortDirection::InOut: return "InOut";
+    case PortDirection::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+static OperationKind operationKindForExpr(const ExprPtr& e) {
+    switch (e->kind) {
+    case ExprKind::BinaryOp: return OperationKind::Binary;
+    case ExprKind::UnaryOp: return OperationKind::Unary;
+    case ExprKind::ArrayAccess: return OperationKind::ArrayAccess;
+    case ExprKind::FieldAccess:
+        throw std::runtime_error("beir rejects unflattened field access");
+    case ExprKind::Call:
+        if (e->intrinsic == IntrinsicKind::DynamicBitAt) return OperationKind::DynamicBitSelect;
+        if (e->intrinsic == IntrinsicKind::DynamicRangeAt) return OperationKind::DynamicSlice;
+        if (e->callee == "lookup") return OperationKind::Lookup;
+        return OperationKind::Call;
+    case ExprKind::Cast: return OperationKind::Cast;
+    case ExprKind::Ternary: return OperationKind::Ite;
+    case ExprKind::ZExt: return OperationKind::ZExt;
+    case ExprKind::SExt: return OperationKind::SExt;
+    case ExprKind::Trunc: return OperationKind::Trunc;
+    case ExprKind::Slice: return OperationKind::Slice;
+    case ExprKind::BitSelect: return OperationKind::BitSelect;
+    case ExprKind::WriteSlice: return OperationKind::WriteSlice;
+    case ExprKind::WriteBit: return OperationKind::WriteBit;
+    case ExprKind::Concat: return OperationKind::Concat;
+    case ExprKind::Repeat: return OperationKind::Repeat;
+    case ExprKind::ReduceOr: return OperationKind::ReduceOr;
+    case ExprKind::ReduceAnd: return OperationKind::ReduceAnd;
+    case ExprKind::ReduceXor: return OperationKind::ReduceXor;
+    case ExprKind::Literal:
+    case ExprKind::VarRef:
+        break;
+    }
+    throw std::runtime_error("beir expression kind does not map to an operation");
 }
 
 static std::string readableOpName(const std::string& op) {
@@ -130,13 +258,14 @@ static std::string tempStemForExpr(const ExprPtr& expr) {
     case ExprKind::Call:
         if (expr->callee == "lookup") return "lookup";
         if (!expr->callee.empty()) return expr->callee;
-        return exprKindName(expr);
+        return operationKindText(operationKindForExpr(expr));
     case ExprKind::FieldAccess:
-        return "field_" + expr->field_name;
+        throw std::runtime_error("beir rejects unflattened field access: " + expr->field_name);
     case ExprKind::ZExt:
     case ExprKind::SExt:
     case ExprKind::Trunc:
-        return exprKindName(expr) + "_" + std::to_string(expr->to_width);
+        return std::string(operationKindText(operationKindForExpr(expr))) + "_" +
+               std::to_string(expr->to_width);
     case ExprKind::Slice:
         return "slice_" + std::to_string(expr->hi) + "_" + std::to_string(expr->lo);
     case ExprKind::BitSelect:
@@ -146,9 +275,9 @@ static std::string tempStemForExpr(const ExprPtr& expr) {
     case ExprKind::ReduceOr:
     case ExprKind::ReduceAnd:
     case ExprKind::ReduceXor:
-        return exprKindName(expr);
+        return operationKindText(operationKindForExpr(expr));
     default:
-        return exprKindName(expr);
+        return operationKindText(operationKindForExpr(expr));
     }
 }
 
@@ -172,17 +301,21 @@ public:
         }
         if (program_.outputs.empty()) {
             for (const auto& [name, direction] : source.param_directions) {
-                if (direction == "Output") program_.outputs.push_back(name);
+                if (parsePortDirection(direction) == PortDirection::Output) {
+                    program_.outputs.push_back(name);
+                }
             }
             std::sort(program_.outputs.begin(), program_.outputs.end());
         }
 
         for (const auto& name : sortedKeys(source.symbols)) {
             const TypeInfo& type = source.symbols.at(name);
+            if (hasStructType(type)) continue;
             auto dir = source.param_directions.find(name);
             if (dir != source.param_directions.end()) {
-                ensurePort(name, dir->second, type);
-                if (dir->second == "Input") program_.inputs.push_back(name);
+                PortDirection direction = parsePortDirection(dir->second);
+                ensurePort(name, direction, type);
+                if (direction == PortDirection::Input) program_.inputs.push_back(name);
             } else if (type.is_array) {
                 ensureAggregate(name, type);
             } else {
@@ -203,6 +336,7 @@ public:
 
             TypeInfo type = target.type.width ? target.type : assign.type;
             if (type.width <= 0 && assign.value) type = assign.value->type;
+            type = beirType(type);
             target_types[target.text] = type;
             by_target[target.text].push_back({
                 assign.guard ? assign.guard : make_true_guard(),
@@ -219,7 +353,7 @@ public:
             Operand rhs = flattenExpr(value);
 
             Operation op;
-            op.kind = "assign";
+            op.kind = OperationKind::Assign;
             op.operands.push_back(std::move(rhs));
             op.type = type;
             for (const auto& assignment : assignments) {
@@ -232,7 +366,7 @@ public:
             Operand rhs = flattenExpr(output.expr);
             Signal& signal = ensureSignal(output.name, output.type);
             Operation op;
-            op.kind = "assign";
+            op.kind = OperationKind::Assign;
             op.operands.push_back(std::move(rhs));
             op.type = signal.type.width ? signal.type : output.type;
             if (output.expr && output.expr->debug_loc.valid()) {
@@ -252,6 +386,7 @@ private:
     std::size_t next_temp_ = 0;
 
     Signal& ensureSignal(const std::string& name, TypeInfo type) {
+        type = beirType(std::move(type));
         if (type.is_array) {
             throw std::runtime_error("beir scalar signal cannot use array type: " + name);
         }
@@ -270,7 +405,8 @@ private:
         return signal;
     }
 
-    Port& ensurePort(const std::string& name, const std::string& direction, TypeInfo type) {
+    Port& ensurePort(const std::string& name, PortDirection direction, TypeInfo type) {
+        type = beirType(std::move(type));
         auto it = port_index_.find(name);
         if (it != port_index_.end()) return program_.ports[it->second];
 
@@ -303,6 +439,7 @@ private:
     }
 
     Aggregate& ensureAggregate(const std::string& name, TypeInfo type) {
+        type = beirType(std::move(type));
         auto it = aggregate_index_.find(name);
         if (it != aggregate_index_.end()) return program_.aggregates[it->second];
 
@@ -326,10 +463,10 @@ private:
 
     void connectInputPorts(const PredicateProgram& source) {
         for (const auto& port : program_.ports) {
-            if (port.direction != "Input") continue;
+            if (port.direction != PortDirection::Input) continue;
             for (std::size_t i = 0; i < port.element_symbols.size(); ++i) {
                 Operation op;
-                op.kind = "port_read";
+                op.kind = OperationKind::PortRead;
                 op.type = signalType(port.element_symbols[i]);
                 op.operands.push_back(portOperand(port.name, port.type));
                 auto loc_it = source.param_debug_locs.find(port.name);
@@ -347,6 +484,9 @@ private:
     Operand flattenTarget(const ExprPtr& expr) {
         if (!expr) throw std::runtime_error("beir assignment target is null");
         if (expr->kind == ExprKind::VarRef) {
+            if (hasStructType(expr->type)) {
+                throw std::runtime_error("beir rejects struct assignment target: " + expr->var_name);
+            }
             return symbolOperand(expr->var_name, expr->type);
         }
         if (expr->kind == ExprKind::ArrayAccess && expr->array_base &&
@@ -364,6 +504,9 @@ private:
             return literalOperand(expr->literal_value, expr->type);
         }
         if (expr->kind == ExprKind::VarRef) {
+            if (hasStructType(expr->type)) {
+                throw std::runtime_error("beir rejects struct operand: " + expr->var_name);
+            }
             return symbolOperand(expr->var_name, expr->type);
         }
         if (expr->kind == ExprKind::ArrayAccess && expr->array_base &&
@@ -377,18 +520,18 @@ private:
         ensureSignal(temp_name, expr->type);
 
         Operation op;
-        op.kind = exprKindName(expr);
+        op.kind = operationKindForExpr(expr);
         op.type = expr->type;
         if (expr->debug_loc.valid()) op.source_locs.push_back(expr->debug_loc);
 
         switch (expr->kind) {
         case ExprKind::BinaryOp:
-            op.op = expr->op;
+            op.op = parseBinaryOpCode(expr->op);
             op.operands.push_back(flattenExpr(expr->left));
             op.operands.push_back(flattenExpr(expr->right));
             break;
         case ExprKind::UnaryOp:
-            op.op = expr->op;
+            op.op = parseUnaryOpCode(expr->op);
             op.operands.push_back(flattenExpr(expr->operand));
             break;
         case ExprKind::ArrayAccess:
@@ -396,9 +539,7 @@ private:
             op.operands.push_back(flattenExpr(expr->index));
             break;
         case ExprKind::FieldAccess:
-            op.op = expr->field_name;
-            op.operands.push_back(flattenExpr(expr->struct_base));
-            break;
+            throw std::runtime_error("beir rejects unflattened field access: " + expr->field_name);
         case ExprKind::Call:
             if (expr->intrinsic != IntrinsicKind::DynamicBitAt &&
                 expr->intrinsic != IntrinsicKind::DynamicRangeAt &&
@@ -481,10 +622,11 @@ private:
     }
 
     Operand symbolOperand(const std::string& name, TypeInfo type) {
+        type = beirType(std::move(type));
         if (type.is_array || aggregate_index_.count(name)) {
             ensureAggregate(name, type);
             Operand operand;
-            operand.kind = "aggregate";
+            operand.kind = OperandKind::Aggregate;
             operand.text = name;
             operand.type = std::move(type);
             return operand;
@@ -492,7 +634,7 @@ private:
 
         Signal& signal = ensureSignal(name, type);
         Operand operand;
-        operand.kind = "symbol";
+        operand.kind = OperandKind::Symbol;
         operand.text = signal.name;
         operand.type = signal.type;
         return operand;
@@ -500,17 +642,17 @@ private:
 
     Operand literalOperand(std::string value, TypeInfo type) {
         Operand operand;
-        operand.kind = "literal";
+        operand.kind = OperandKind::Literal;
         operand.text = std::move(value);
-        operand.type = std::move(type);
+        operand.type = beirType(std::move(type));
         return operand;
     }
 
     Operand portOperand(std::string value, TypeInfo type) {
         Operand operand;
-        operand.kind = "port";
+        operand.kind = OperandKind::Port;
         operand.text = std::move(value);
-        operand.type = std::move(type);
+        operand.type = beirType(std::move(type));
         return operand;
     }
 
@@ -535,7 +677,6 @@ private:
         if (!existing.is_signed) existing.is_signed = incoming.is_signed;
         if (!existing.is_hw_int) existing.is_hw_int = incoming.is_hw_int;
         if (existing.hw_kind.empty()) existing.hw_kind = incoming.hw_kind;
-        if (existing.struct_name.empty()) existing.struct_name = incoming.struct_name;
     }
 
     std::string makeTempName(const std::string& stem) {
@@ -562,7 +703,6 @@ static std::string typeText(const TypeInfo& type) {
         os << "]";
     }
     if (!type.hw_kind.empty()) os << " kind=" << type.hw_kind;
-    if (!type.struct_name.empty()) os << " struct=" << type.struct_name;
     return os.str();
 }
 
@@ -590,12 +730,12 @@ static void emitLocs(std::ostream& os, const std::vector<DebugLoc>& locs) {
 }
 
 static void emitOperand(std::ostream& os, const Operand& operand) {
-    os << operand.kind << "(" << operand.text << " : " << typeText(operand.type) << ")";
+    os << operandKindText(operand.kind) << "(" << operand.text << " : " << typeText(operand.type) << ")";
 }
 
 static void emitOperation(std::ostream& os, const Operation& op, const std::string& prefix) {
-    os << prefix << "driver " << op.kind;
-    if (!op.op.empty()) os << " op=\"" << op.op << "\"";
+    os << prefix << "driver " << operationKindText(op.kind);
+    if (op.op != OpCode::None) os << " op=\"" << opCodeText(op.op) << "\"";
     os << " : " << typeText(op.type);
     if (op.to_width) os << " to_width=" << op.to_width;
     if (op.hi >= 0 || op.lo >= 0) os << " range=" << op.hi << ":" << op.lo;
@@ -629,7 +769,7 @@ std::string emitText(const Program& program) {
 
     os << "ports\n";
     for (const auto& port : program.ports) {
-        os << "  " << port.direction << " " << port.name << " : " << typeText(port.type)
+        os << "  " << portDirectionText(port.direction) << " " << port.name << " : " << typeText(port.type)
            << " elements=";
         emitNameList(os, port.element_symbols);
         os << "\n";

@@ -9,15 +9,80 @@
 
 namespace pred::beir {
 
+enum class OperandKind {
+    Symbol,
+    Literal,
+    Port,
+    Aggregate,
+};
+
+enum class OperationKind {
+    Assign,
+    PortRead,
+    Binary,
+    Unary,
+    ArrayAccess,
+    Call,
+    Cast,
+    Ite,
+    ZExt,
+    SExt,
+    Trunc,
+    Slice,
+    BitSelect,
+    WriteSlice,
+    WriteBit,
+    Concat,
+    Repeat,
+    ReduceOr,
+    ReduceAnd,
+    ReduceXor,
+    DynamicBitSelect,
+    DynamicSlice,
+    Lookup,
+};
+
+enum class OpCode {
+    None,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    BitAnd,
+    BitOr,
+    BitXor,
+    LogicAnd,
+    LogicOr,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Shl,
+    Shr,
+    LogicNot,
+    BitNot,
+    Neg,
+};
+
+enum class PortDirection {
+    Input,
+    Output,
+    InOut,
+    Unknown,
+};
+
 struct Operand {
-    std::string kind = "symbol";
+    OperandKind kind = OperandKind::Symbol;
     std::string text;
     TypeInfo type;
 };
 
 struct Operation {
-    std::string kind;
-    std::string op;
+    OperationKind kind = OperationKind::Assign;
+    OpCode op = OpCode::None;
     std::vector<Operand> operands;
     TypeInfo type;
     int to_width = 0;
@@ -38,7 +103,7 @@ struct Signal {
 
 struct Port {
     std::string name;
-    std::string direction;
+    PortDirection direction = PortDirection::Unknown;
     TypeInfo type;
     std::vector<std::string> element_symbols;
 };
