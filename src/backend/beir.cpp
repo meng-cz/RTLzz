@@ -1,108 +1,13 @@
-#include "emitter/ListJsonEmitter.h"
+#include "backend/beir.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
-#include <vector>
 
-namespace pred {
+namespace pred::beir {
 namespace {
-
-constexpr const char* kSchemaVersion = "rtlzz-signal-list-json-v1";
-constexpr const char* kToolVersion = "predicate-expand-0.1";
-
-#ifdef PREDICATE_EXPAND_BUILD_COMMIT
-constexpr const char* kBuildCommit = PREDICATE_EXPAND_BUILD_COMMIT;
-#else
-constexpr const char* kBuildCommit = "unknown";
-#endif
-
-struct Operand {
-    std::string kind = "symbol";
-    std::string text;
-    TypeInfo type;
-};
-
-struct Operation {
-    std::string kind;
-    std::string op;
-    std::vector<Operand> operands;
-    TypeInfo type;
-    int to_width = 0;
-    int hi = -1;
-    int lo = -1;
-    int bit = -1;
-    int times = 0;
-    std::vector<DebugLoc> source_locs;
-};
-
-struct Signal {
-    std::string name;
-    TypeInfo type;
-    std::string port_name;
-    int port_element_index = -1;
-    std::optional<Operation> driver;
-};
-
-struct Port {
-    std::string name;
-    std::string direction;
-    TypeInfo type;
-    std::vector<std::string> element_symbols;
-};
-
-struct Aggregate {
-    std::string name;
-    TypeInfo type;
-    std::vector<std::string> element_symbols;
-};
-
-struct LookupTable {
-    std::string name;
-    std::vector<std::string> values;
-};
-
-struct ListProgram {
-    std::string function_name;
-    std::vector<std::string> inputs;
-    std::vector<std::string> outputs;
-    std::vector<Port> ports;
-    std::unordered_map<std::string, std::size_t> port_index;
-    std::vector<Aggregate> aggregates;
-    std::unordered_map<std::string, std::size_t> aggregate_index;
-    std::vector<LookupTable> lookup_tables;
-    std::vector<Signal> signals;
-    std::unordered_map<std::string, std::size_t> signal_index;
-};
-
-struct PendingAssignment {
-    ExprPtr guard;
-    ExprPtr value;
-    TypeInfo type;
-    DebugLoc debug_loc;
-};
-
-static std::string ind(int level) {
-    return std::string(level * 2, ' ');
-}
-
-static std::string jsonEscape(const std::string& s) {
-    std::string result;
-    for (char c : s) {
-        switch (c) {
-        case '"': result += "\\\""; break;
-        case '\\': result += "\\\\"; break;
-        case '\n': result += "\\n"; break;
-        case '\r': result += "\\r"; break;
-        case '\t': result += "\\t"; break;
-        default: result += c; break;
-        }
-    }
-    return result;
-}
 
 template <typename Map>
 static std::vector<std::string> sortedKeys(const Map& map) {
@@ -247,9 +152,16 @@ static std::string tempStemForExpr(const ExprPtr& expr) {
     }
 }
 
+struct PendingAssignment {
+    ExprPtr guard;
+    ExprPtr value;
+    TypeInfo type;
+    DebugLoc debug_loc;
+};
+
 class Builder {
 public:
-    ListProgram build(const PredicateProgram& source) {
+    Program build(const PredicateProgram& source) {
         program_.function_name = source.function_name;
         program_.outputs = source.outputs;
         for (const auto& name : sortedKeys(source.lookup_tables)) {
@@ -280,6 +192,7 @@ public:
         std::sort(program_.inputs.begin(), program_.inputs.end());
 
         connectInputPorts(source);
+
         std::vector<std::string> target_order;
         std::unordered_map<std::string, std::vector<PendingAssignment>> by_target;
         std::unordered_map<std::string, TypeInfo> target_types;
@@ -332,17 +245,20 @@ public:
     }
 
 private:
-    ListProgram program_;
+    Program program_;
+    std::unordered_map<std::string, std::size_t> port_index_;
+    std::unordered_map<std::string, std::size_t> aggregate_index_;
+    std::unordered_map<std::string, std::size_t> signal_index_;
     std::size_t next_temp_ = 0;
 
     Signal& ensureSignal(const std::string& name, TypeInfo type) {
         if (type.is_array) {
-            throw std::runtime_error("listjson scalar signal cannot use array type: " + name);
+            throw std::runtime_error("beir scalar signal cannot use array type: " + name);
         }
-        auto it = program_.signal_index.find(name);
-        if (it == program_.signal_index.end()) {
+        auto it = signal_index_.find(name);
+        if (it == signal_index_.end()) {
             std::size_t index = program_.signals.size();
-            program_.signal_index.emplace(name, index);
+            signal_index_.emplace(name, index);
             Signal signal;
             signal.name = name;
             signal.type = std::move(type);
@@ -355,11 +271,11 @@ private:
     }
 
     Port& ensurePort(const std::string& name, const std::string& direction, TypeInfo type) {
-        auto it = program_.port_index.find(name);
-        if (it != program_.port_index.end()) return program_.ports[it->second];
+        auto it = port_index_.find(name);
+        if (it != port_index_.end()) return program_.ports[it->second];
 
         std::size_t index = program_.ports.size();
-        program_.port_index.emplace(name, index);
+        port_index_.emplace(name, index);
         Port port;
         port.name = name;
         port.direction = direction;
@@ -387,11 +303,11 @@ private:
     }
 
     Aggregate& ensureAggregate(const std::string& name, TypeInfo type) {
-        auto it = program_.aggregate_index.find(name);
-        if (it != program_.aggregate_index.end()) return program_.aggregates[it->second];
+        auto it = aggregate_index_.find(name);
+        if (it != aggregate_index_.end()) return program_.aggregates[it->second];
 
         std::size_t index = program_.aggregates.size();
-        program_.aggregate_index.emplace(name, index);
+        aggregate_index_.emplace(name, index);
         Aggregate aggregate;
         aggregate.name = name;
         aggregate.type = type;
@@ -429,7 +345,7 @@ private:
     }
 
     Operand flattenTarget(const ExprPtr& expr) {
-        if (!expr) throw std::runtime_error("listjson assignment target is null");
+        if (!expr) throw std::runtime_error("beir assignment target is null");
         if (expr->kind == ExprKind::VarRef) {
             return symbolOperand(expr->var_name, expr->type);
         }
@@ -439,7 +355,7 @@ private:
             return symbolOperand(base.text + "_" + expr->index->literal_value,
                                  scalarElementType(expr->type));
         }
-        throw std::runtime_error("listjson assignment target must flatten to a named signal");
+        throw std::runtime_error("beir assignment target must flatten to a named signal");
     }
 
     Operand flattenExpr(const ExprPtr& expr) {
@@ -487,7 +403,7 @@ private:
             if (expr->intrinsic != IntrinsicKind::DynamicBitAt &&
                 expr->intrinsic != IntrinsicKind::DynamicRangeAt &&
                 expr->callee != "lookup") {
-                throw std::runtime_error("listjson unsupported call expression after normalization: " +
+                throw std::runtime_error("beir unsupported call expression after normalization: " +
                                          expr->callee);
             }
             for (const auto& arg : expr->args) op.operands.push_back(flattenExpr(arg));
@@ -565,7 +481,7 @@ private:
     }
 
     Operand symbolOperand(const std::string& name, TypeInfo type) {
-        if (type.is_array || program_.aggregate_index.count(name)) {
+        if (type.is_array || aggregate_index_.count(name)) {
             ensureAggregate(name, type);
             Operand operand;
             operand.kind = "aggregate";
@@ -599,8 +515,8 @@ private:
     }
 
     TypeInfo signalType(const std::string& name) const {
-        auto it = program_.signal_index.find(name);
-        if (it == program_.signal_index.end()) return {};
+        auto it = signal_index_.find(name);
+        if (it == signal_index_.end()) return {};
         return program_.signals[it->second].type;
     }
 
@@ -608,7 +524,7 @@ private:
         Signal& signal = ensureSignal(signal_name, op.type);
         if (signal.driver) {
             if (allow_existing_same_kind && signal.driver->kind == op.kind) return;
-            throw std::runtime_error("listjson signal has more than one driver: " + signal_name);
+            throw std::runtime_error("beir signal has more than one driver: " + signal_name);
         }
         signal.driver = std::move(op);
     }
@@ -626,198 +542,132 @@ private:
         std::string clean = sanitizeNamePart(stem);
         while (true) {
             std::string name = "__rtlzz_" + clean + "_" + std::to_string(next_temp_++);
-            if (!program_.signal_index.count(name) && !program_.aggregate_index.count(name)) return name;
+            if (!signal_index_.count(name) && !aggregate_index_.count(name)) return name;
         }
     }
 };
 
-static void emitType(std::ostream& os, const TypeInfo& type) {
-    os << "{"
-       << "\"name\": \"" << jsonEscape(type.name) << "\", "
-       << "\"width\": " << type.width << ", "
-       << "\"signed\": " << (type.is_signed ? "true" : "false") << ", "
-       << "\"is_hw_int\": " << (type.is_hw_int ? "true" : "false") << ", "
-       << "\"hw_kind\": \"" << jsonEscape(type.hw_kind) << "\", "
-       << "\"is_array\": " << (type.is_array ? "true" : "false") << ", "
-       << "\"array_size\": " << type.array_size << ", "
-       << "\"array_dims\": [";
-    for (std::size_t i = 0; i < type.array_dims.size(); ++i) {
+static std::string typeText(const TypeInfo& type) {
+    std::ostringstream os;
+    os << type.name;
+    if (type.width > 0) os << " width=" << type.width;
+    if (type.is_signed) os << " signed";
+    if (type.is_array) {
+        os << " array[";
+        for (std::size_t i = 0; i < type.array_dims.size(); ++i) {
+            if (i) os << "x";
+            os << type.array_dims[i];
+        }
+        if (type.array_dims.empty()) os << type.array_size;
+        os << "]";
+    }
+    if (!type.hw_kind.empty()) os << " kind=" << type.hw_kind;
+    if (!type.struct_name.empty()) os << " struct=" << type.struct_name;
+    return os.str();
+}
+
+static void emitNameList(std::ostream& os, const std::vector<std::string>& values) {
+    os << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
         if (i) os << ", ";
-        os << type.array_dims[i];
+        os << values[i];
     }
     os << "]";
-    if (!type.struct_name.empty()) {
-        os << ", \"struct_name\": \"" << jsonEscape(type.struct_name) << "\"";
+}
+
+static void emitLocs(std::ostream& os, const std::vector<DebugLoc>& locs) {
+    if (locs.empty()) return;
+    os << " locs=[";
+    for (std::size_t i = 0; i < locs.size(); ++i) {
+        if (i) os << ", ";
+        const auto& loc = locs[i];
+        os << loc.file << ":" << loc.line << ":" << loc.column;
+        if (loc.end_line || loc.end_column) {
+            os << "-" << loc.end_line << ":" << loc.end_column;
+        }
     }
-    os << "}";
+    os << "]";
 }
 
-static void emitOperand(std::ostream& os, const Operand& operand, int indent) {
-    os << "{\n";
-    os << ind(indent + 1) << "\"kind\": \"" << jsonEscape(operand.kind) << "\",\n";
-    os << ind(indent + 1) << "\"text\": \"" << jsonEscape(operand.text) << "\",\n";
-    os << ind(indent + 1) << "\"type\": ";
-    emitType(os, operand.type);
-    os << "\n" << ind(indent) << "}";
+static void emitOperand(std::ostream& os, const Operand& operand) {
+    os << operand.kind << "(" << operand.text << " : " << typeText(operand.type) << ")";
 }
 
-static void emitDebugLoc(std::ostream& os, const DebugLoc& loc, int indent) {
-    os << "{\n";
-    os << ind(indent + 1) << "\"file\": \"" << jsonEscape(loc.file) << "\",\n";
-    os << ind(indent + 1) << "\"line\": " << loc.line << ",\n";
-    os << ind(indent + 1) << "\"column\": " << loc.column << ",\n";
-    os << ind(indent + 1) << "\"end_line\": " << loc.end_line << ",\n";
-    os << ind(indent + 1) << "\"end_column\": " << loc.end_column << "\n";
-    os << ind(indent) << "}";
-}
-
-static void emitDebugInfo(std::ostream& os, const Operation& op, int indent) {
-    os << "{\n";
-    os << ind(indent + 1) << "\"source_locs\": [";
-    if (!op.source_locs.empty()) os << "\n";
-    for (std::size_t i = 0; i < op.source_locs.size(); ++i) {
-        os << ind(indent + 2);
-        emitDebugLoc(os, op.source_locs[i], indent + 2);
-        if (i + 1 < op.source_locs.size()) os << ",";
-        os << "\n";
-    }
-    os << ind(indent + 1) << "]\n";
-    os << ind(indent) << "}";
-}
-
-static void emitOperation(std::ostream& os, const Operation& op, int indent) {
-    os << "{\n";
-    os << ind(indent + 1) << "\"kind\": \"" << jsonEscape(op.kind) << "\",\n";
-    os << ind(indent + 1) << "\"op\": \"" << jsonEscape(op.op) << "\",\n";
-    os << ind(indent + 1) << "\"type\": ";
-    emitType(os, op.type);
-    os << ",\n";
-    os << ind(indent + 1) << "\"to_width\": " << op.to_width << ",\n";
-    os << ind(indent + 1) << "\"hi\": " << op.hi << ",\n";
-    os << ind(indent + 1) << "\"lo\": " << op.lo << ",\n";
-    os << ind(indent + 1) << "\"bit\": " << op.bit << ",\n";
-    os << ind(indent + 1) << "\"times\": " << op.times << ",\n";
-    os << ind(indent + 1) << "\"debug\": ";
-    emitDebugInfo(os, op, indent + 1);
-    os << ",\n";
-    os << ind(indent + 1) << "\"operands\": [";
-    if (!op.operands.empty()) os << "\n";
+static void emitOperation(std::ostream& os, const Operation& op, const std::string& prefix) {
+    os << prefix << "driver " << op.kind;
+    if (!op.op.empty()) os << " op=\"" << op.op << "\"";
+    os << " : " << typeText(op.type);
+    if (op.to_width) os << " to_width=" << op.to_width;
+    if (op.hi >= 0 || op.lo >= 0) os << " range=" << op.hi << ":" << op.lo;
+    if (op.bit >= 0) os << " bit=" << op.bit;
+    if (op.times) os << " times=" << op.times;
+    emitLocs(os, op.source_locs);
+    os << "\n";
     for (std::size_t i = 0; i < op.operands.size(); ++i) {
-        os << ind(indent + 2);
-        emitOperand(os, op.operands[i], indent + 2);
-        if (i + 1 < op.operands.size()) os << ",";
+        os << prefix << "  operand" << i << " = ";
+        emitOperand(os, op.operands[i]);
         os << "\n";
     }
-    os << ind(indent + 1) << "]\n";
-    os << ind(indent) << "}";
 }
 
 } // namespace
 
-std::string emitListJson(const PredicateProgram& prog) {
-    ListProgram list = Builder().build(prog);
+Program buildProgram(const PredicateProgram& source) {
+    return Builder().build(source);
+}
+
+std::string emitText(const Program& program) {
     std::ostringstream os;
+    os << "beir v1\n";
+    os << "function " << program.function_name << "\n";
+    os << "inputs ";
+    emitNameList(os, program.inputs);
+    os << "\n";
+    os << "outputs ";
+    emitNameList(os, program.outputs);
+    os << "\n\n";
 
-    os << "{\n";
-    os << "  \"schema_version\": \"" << jsonEscape(kSchemaVersion) << "\",\n";
-    os << "  \"tool_version\": \"" << jsonEscape(kToolVersion) << "\",\n";
-    os << "  \"build_commit\": \"" << jsonEscape(kBuildCommit) << "\",\n";
-    os << "  \"function\": \"" << jsonEscape(list.function_name) << "\",\n";
-
-    os << "  \"inputs\": [";
-    for (std::size_t i = 0; i < list.inputs.size(); ++i) {
-        if (i) os << ", ";
-        os << "\"" << jsonEscape(list.inputs[i]) << "\"";
+    os << "ports\n";
+    for (const auto& port : program.ports) {
+        os << "  " << port.direction << " " << port.name << " : " << typeText(port.type)
+           << " elements=";
+        emitNameList(os, port.element_symbols);
+        os << "\n";
     }
-    os << "],\n";
+    os << "\n";
 
-    os << "  \"outputs\": [";
-    for (std::size_t i = 0; i < list.outputs.size(); ++i) {
-        if (i) os << ", ";
-        os << "\"" << jsonEscape(list.outputs[i]) << "\"";
+    os << "aggregates\n";
+    for (const auto& aggregate : program.aggregates) {
+        os << "  " << aggregate.name << " : " << typeText(aggregate.type) << " elements=";
+        emitNameList(os, aggregate.element_symbols);
+        os << "\n";
     }
-    os << "],\n";
+    os << "\n";
 
-    os << "  \"ports\": [\n";
-    for (std::size_t i = 0; i < list.ports.size(); ++i) {
-        const auto& port = list.ports[i];
-        os << "    {\n";
-        os << "      \"name\": \"" << jsonEscape(port.name) << "\",\n";
-        os << "      \"direction\": \"" << jsonEscape(port.direction) << "\",\n";
-        os << "      \"type\": ";
-        emitType(os, port.type);
-        os << ",\n";
-        os << "      \"element_symbols\": [";
-        for (std::size_t j = 0; j < port.element_symbols.size(); ++j) {
-            if (j) os << ", ";
-            os << "\"" << jsonEscape(port.element_symbols[j]) << "\"";
+    os << "lookup_tables\n";
+    for (const auto& table : program.lookup_tables) {
+        os << "  " << table.name << " = ";
+        emitNameList(os, table.values);
+        os << "\n";
+    }
+    os << "\n";
+
+    os << "signals\n";
+    for (const auto& signal : program.signals) {
+        os << "  signal " << signal.name << " : " << typeText(signal.type);
+        if (!signal.port_name.empty()) {
+            os << " port=" << signal.port_name << "[" << signal.port_element_index << "]";
         }
-        os << "]\n";
-        os << "    }";
-        if (i + 1 < list.ports.size()) os << ",";
         os << "\n";
+        if (signal.driver) emitOperation(os, *signal.driver, "    ");
+        else os << "    driver <none>\n";
     }
-    os << "  ],\n";
-
-    os << "  \"aggregates\": [\n";
-    for (std::size_t i = 0; i < list.aggregates.size(); ++i) {
-        const auto& aggregate = list.aggregates[i];
-        os << "    {\n";
-        os << "      \"name\": \"" << jsonEscape(aggregate.name) << "\",\n";
-        os << "      \"type\": ";
-        emitType(os, aggregate.type);
-        os << ",\n";
-        os << "      \"element_symbols\": [";
-        for (std::size_t j = 0; j < aggregate.element_symbols.size(); ++j) {
-            if (j) os << ", ";
-            os << "\"" << jsonEscape(aggregate.element_symbols[j]) << "\"";
-        }
-        os << "]\n";
-        os << "    }";
-        if (i + 1 < list.aggregates.size()) os << ",";
-        os << "\n";
-    }
-    os << "  ],\n";
-
-    os << "  \"lookup_tables\": [\n";
-    for (std::size_t i = 0; i < list.lookup_tables.size(); ++i) {
-        const auto& table = list.lookup_tables[i];
-        os << "    {\n";
-        os << "      \"name\": \"" << jsonEscape(table.name) << "\",\n";
-        os << "      \"values\": [";
-        for (std::size_t j = 0; j < table.values.size(); ++j) {
-            if (j) os << ", ";
-            os << "\"" << jsonEscape(table.values[j]) << "\"";
-        }
-        os << "]\n";
-        os << "    }";
-        if (i + 1 < list.lookup_tables.size()) os << ",";
-        os << "\n";
-    }
-    os << "  ],\n";
-
-    os << "  \"signals\": [\n";
-    for (std::size_t i = 0; i < list.signals.size(); ++i) {
-        const auto& signal = list.signals[i];
-        os << "    {\n";
-        os << "      \"name\": \"" << jsonEscape(signal.name) << "\",\n";
-        os << "      \"type\": ";
-        emitType(os, signal.type);
-        os << ",\n";
-        os << "      \"port_name\": \"" << jsonEscape(signal.port_name) << "\",\n";
-        os << "      \"port_element_index\": " << signal.port_element_index << ",\n";
-        os << "      \"driver\": ";
-        if (signal.driver) emitOperation(os, *signal.driver, 3);
-        else os << "null";
-        os << "\n";
-        os << "    }";
-        if (i + 1 < list.signals.size()) os << ",";
-        os << "\n";
-    }
-    os << "  ]\n";
-    os << "}\n";
 
     return os.str();
 }
 
-} // namespace pred
+std::string emitText(const PredicateProgram& source) {
+    return emitText(buildProgram(source));
+}
+
+} // namespace pred::beir

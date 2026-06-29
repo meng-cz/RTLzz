@@ -114,6 +114,7 @@ add_executable(predicate-expand
     src/predicate/DefaultTotalizationPass.cpp
     src/predicate/OutputExpressionMap.cpp
     src/predicate/PredicateVerifier.cpp
+    src/backend/beir.cpp
     src/emitter/ListJsonEmitter.cpp
 )
 

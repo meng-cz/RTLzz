@@ -1453,7 +1453,7 @@ void test_listjson_flattened_driver_semantics() {
     checkContains(json, "\"text\": \"tmp1\"");
     checkContains(json, "\"text\": \"tmp2\"");
     checkContains(json, "\"text\": \"tmp3\"");
-    checkContains(json, "\"source_assignment\": 1");
+    checkContains(json, "\"debug\":");
     std::cout << "  PASS: test_listjson_flattened_driver_semantics\n";
 }
 

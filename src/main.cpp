@@ -6,6 +6,7 @@
 #include "transform/Predicate.h"
 #include "predicate/OutputExpressionMap.h"
 #include "predicate/PredicateVerifier.h"
+#include "backend/beir.hpp"
 #include "emitter/ListJsonEmitter.h"
 
 #include <cctype>
@@ -19,7 +20,7 @@
 
 static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " <source.cpp> --top <function_name> [--format listjson]"
+              << " <source.cpp> --top <function_name> [--format listjson|beir]"
               << " [--input source.cpp] [--unroll-limit N] [--clang-arg ARG ...] [-o output_file]\n";
 }
 
@@ -137,7 +138,7 @@ static int runMain(int argc, char* argv[]) {
         std::cerr << "--top must not be empty\n";
         return 1;
     }
-    if (format != "listjson") {
+    if (format != "listjson" && format != "beir") {
         std::cerr << "Unknown format: " << format << "\n";
         return 1;
     }
@@ -206,9 +207,13 @@ static int runMain(int argc, char* argv[]) {
     // Step 7: Emit output
     std::string output;
     try {
-        output = pred::emitListJson(pred_prog);
+        if (format == "listjson") {
+            output = pred::emitListJson(pred_prog);
+        } else {
+            output = pred::beir::emitText(pred_prog);
+        }
     } catch (const std::exception& ex) {
-        std::cerr << "Error during listjson emission: " << ex.what() << "\n";
+        std::cerr << "Error during " << format << " emission: " << ex.what() << "\n";
         return 1;
     }
 
