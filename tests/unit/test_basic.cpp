@@ -6,9 +6,7 @@
 #include "transform/Predicate.h"
 #include "predicate/OutputExpressionMap.h"
 #include "predicate/PredicateVerifier.h"
-#include "emitter/TextEmitter.h"
-#include "emitter/JsonEmitter.h"
-#include "emitter/SmtEmitter.h"
+#include "emitter/ListJsonEmitter.h"
 #include "eval/PredicateEvaluator.h"
 #include "ir/CanonicalIR.h"
 #include "ir/TypedDAG.h"
@@ -182,15 +180,11 @@ static PipeResult runPipeline(FunctionAST f, int unroll_limit = 64) {
         r.error = verified.error;
         return r;
     }
-    trace("text.begin");
-    r.text = emitText(r.prog);
-    trace("text.end");
-    trace("json.begin");
-    r.json = emitJson(r.prog);
-    trace("json.end");
-    trace("smt.begin");
-    r.smt = emitSmt(r.prog);
-    trace("smt.end");
+    trace("listjson.begin");
+    r.json = emitListJson(r.prog);
+    r.text = r.json;
+    r.smt = r.json;
+    trace("listjson.end");
     return r;
 }
 
@@ -687,7 +681,7 @@ void test_uninitialized_and_partial_output_errors() {
     CHECK(partial.prog.param_directions.at("out") == "InOut");
     CHECK(std::find(partial.prog.inputs.begin(), partial.prog.inputs.end(), "out") !=
           partial.prog.inputs.end());
-    checkContains(emitText(partial.prog), "out_0");
+    checkContains(emitListJson(partial.prog), "out_0");
     bool has_inout_diagnostic = false;
     for (const auto& diagnostic : partial.prog.diagnostics) {
         if (diagnostic.find("partial_mutable_reference_promoted_to_inout") !=
@@ -1381,25 +1375,21 @@ void test_helper_function_inline() {
     std::cout << "  PASS: test_helper_function_inline\n";
 }
 
-void test_text_json_output_semantics() {
+void test_listjson_output_semantics() {
     auto r = runPipeline(fn({assign("out", make_binary("+", make_var("a", u(8)), make_var("b", u(8)), u(8)), u(8))}));
     CHECK(r.error.empty());
-    checkContains(r.text, "function: comb");
-    checkContains(r.text, "(a_0 + b_0)");
-    checkContains(r.json, "\"schema_version\": \"gpef-predicate-json-v1\"");
+    checkContains(r.json, "\"schema_version\": \"rtlzz-signal-list-json-v1\"");
     checkContains(r.json, "\"tool_version\": \"predicate-expand-0.1\"");
     checkContains(r.json, "\"build_commit\"");
     checkContains(r.json, "\"function\": \"comb\"");
     checkContains(r.json, "\"inputs\"");
     checkContains(r.json, "\"outputs\"");
-    checkContains(r.json, "\"symbols\"");
-    checkContains(r.json, "\"assignments\"");
-    checkContains(r.json, "\"output_expressions\"");
-    checkContains(r.json, "\"lookup_tables\"");
-    checkContains(r.json, "\"diagnostics\"");
+    checkContains(r.json, "\"ports\"");
+    checkContains(r.json, "\"signals\"");
+    checkContains(r.json, "\"driver\"");
     checkContains(r.json, "\"kind\": \"binary\"");
-    checkContains(r.json, "\"target\": \"out_");
-    std::cout << "  PASS: test_text_json_output_semantics\n";
+    checkContains(r.json, "\"text\": \"out");
+    std::cout << "  PASS: test_listjson_output_semantics\n";
 }
 
 void test_nested_slice_simplification() {
@@ -1417,404 +1407,9 @@ void test_nested_slice_simplification() {
     std::cout << "  PASS: test_nested_slice_simplification\n";
 }
 
-void test_smt_smoke() {
-    auto r = runPipeline(fn({assign("out", make_binary("+", make_var("a", u(8)), make_var("b", u(8)), u(8)), u(8))}));
-    CHECK(r.error.empty());
-    checkContains(r.smt, "; predicate expansion for function: comb");
-    checkContains(r.smt, "; output_expressions");
-    checkContains(r.smt, "(declare-const a_0");
-    checkContains(r.smt, "(declare-const out (_ BitVec 8))");
-    checkContains(r.smt, "(assert");
-    checkContains(r.smt, "(check-sat)");
-    CHECK(r.smt.find("(=> (_ bv1 1)") == std::string::npos);
-
-    FunctionAST port_names;
-    port_names.name = "smt_ports";
-    port_names.return_type = TypeInfo{"void", 0, false};
-    port_names.params.push_back(param(u(8), "a"));
-    port_names.params.push_back(param(boolean(), "output__vld__", ParamDirection::Output));
-    port_names.params.push_back(param(u(8), "output_s__", ParamDirection::Output));
-    port_names.body.push_back(assign("output__vld__", make_literal("true", boolean()), boolean()));
-    port_names.body.push_back(assign("output_s__", make_var("a", u(8)), u(8)));
-    auto ports = runPipeline(std::move(port_names));
-    CHECK(ports.error.empty());
-    checkContains(ports.smt, "(declare-const output__vld__ Bool)");
-    checkContains(ports.smt, "(declare-const output_s__ (_ BitVec 8))");
-    CHECK(ports.smt.find("(declare-const output__vld__ (_ BitVec 32))") == std::string::npos);
-    CHECK(ports.smt.find("(declare-const output_s__ (_ BitVec 32))") == std::string::npos);
-
-    std::cout << "  PASS: test_smt_smoke\n";
-}
-
-void test_smt_type_and_operation_semantics() {
-    {
-        FunctionAST f;
-        f.name = "smt_1bit_types";
-        f.return_type = TypeInfo{"void", 0, false};
-        auto u1 = u(1);
-        auto i1 = i(1);
-        f.params.push_back(param(boolean(), "flag"));
-        f.params.push_back(param(u1, "u1"));
-        f.params.push_back(param(i1, "i1"));
-        f.params.push_back(param(u1, "out_u", ParamDirection::Output));
-        f.params.push_back(param(boolean(), "out_b", ParamDirection::Output));
-        f.body.push_back(assign("out_u", make_binary("^", make_var("u1", u1), make_var("i1", i1), u1), u1));
-        f.body.push_back(assign("out_b", make_var("flag", boolean()), boolean()));
-        auto r = runPipeline(std::move(f));
-        CHECK(r.error.empty());
-        checkContains(r.smt, "(declare-const flag_0 Bool)");
-        checkContains(r.smt, "(declare-const out_b Bool)");
-        checkContains(r.smt, "(declare-const u1_0 (_ BitVec 1))");
-        checkContains(r.smt, "(declare-const i1_0 (_ BitVec 1))");
-        checkContains(r.smt, "(declare-const out_u (_ BitVec 1))");
-    }
-
-    {
-        TypeInfo s8 = signedView(8);
-        auto u8 = u(8);
-        FunctionAST f;
-        f.name = "smt_signed_compare";
-        f.return_type = TypeInfo{"void", 0, false};
-        f.params.push_back(param(s8, "sa"));
-        f.params.push_back(param(s8, "sb"));
-        f.params.push_back(param(u8, "ua"));
-        f.params.push_back(param(u8, "ub"));
-        f.params.push_back(param(boolean(), "lt", ParamDirection::Output));
-        f.params.push_back(param(boolean(), "gt", ParamDirection::Output));
-        f.params.push_back(param(boolean(), "ult", ParamDirection::Output));
-        f.body.push_back(assign("lt", make_binary("<", make_var("sa", s8), make_var("sb", s8), boolean()), boolean()));
-        f.body.push_back(assign("gt", make_binary(">", make_var("sa", s8), make_var("sb", s8), boolean()), boolean()));
-        f.body.push_back(assign("ult", make_binary("<", make_var("ua", u8), make_var("ub", u8), boolean()), boolean()));
-        auto r = runPipeline(std::move(f));
-        CHECK(r.error.empty());
-        checkContains(r.smt, "(bvslt sa_0 sb_0)");
-        checkContains(r.smt, "(bvsgt sa_0 sb_0)");
-        checkContains(r.smt, "(bvult ua_0 ub_0)");
-        CHECK(r.smt.find("(bvult sa_0 sb_0)") == std::string::npos);
-        CHECK(r.smt.find("(bvugt sa_0 sb_0)") == std::string::npos);
-    }
-
-    {
-        TypeInfo u64{"uint64_t", 64, false, true, "builtin"};
-        TypeInfo i64{"int64_t", 64, true, true, "builtin"};
-        FunctionAST f;
-        f.name = "smt_builtin_div_rem";
-        f.return_type = TypeInfo{"void", 0, false};
-        f.params.push_back(param(u64, "ua"));
-        f.params.push_back(param(u64, "ub"));
-        f.params.push_back(param(i64, "sa"));
-        f.params.push_back(param(i64, "sb"));
-        f.params.push_back(param(u64, "uq", ParamDirection::Output));
-        f.params.push_back(param(u64, "ur", ParamDirection::Output));
-        f.params.push_back(param(i64, "sq", ParamDirection::Output));
-        f.params.push_back(param(i64, "sr", ParamDirection::Output));
-        f.body.push_back(assign("uq", make_binary("/", make_var("ua", u64), make_var("ub", u64), u64), u64));
-        f.body.push_back(assign("ur", make_binary("%", make_var("ua", u64), make_var("ub", u64), u64), u64));
-        f.body.push_back(assign("sq", make_binary("/", make_var("sa", i64), make_var("sb", i64), i64), i64));
-        f.body.push_back(assign("sr", make_binary("%", make_var("sa", i64), make_var("sb", i64), i64), i64));
-        auto r = runPipeline(std::move(f));
-        CHECK(r.error.empty());
-        checkContains(r.smt, "(bvudiv ua_0 ub_0)");
-        checkContains(r.smt, "(bvurem ua_0 ub_0)");
-        checkContains(r.smt, "(bvsdiv sa_0 sb_0)");
-        checkContains(r.smt, "(bvsrem sa_0 sb_0)");
-    }
-
-    {
-        TypeInfo u64{"uint64_t", 64, false, true, "builtin"};
-        TypeInfo i64{"int64_t", 64, true, true, "builtin"};
-        FunctionAST f;
-        f.name = "smt_signed_cast_div_rem";
-        f.return_type = TypeInfo{"void", 0, false};
-        f.params.push_back(param(u64, "lhs"));
-        f.params.push_back(param(u64, "rhs"));
-        f.params.push_back(param(u64, "quot", ParamDirection::Output));
-        f.params.push_back(param(u64, "rem", ParamDirection::Output));
-
-        auto signed_lhs = castIfWidthChanges(make_var("lhs", u64), i64);
-        auto signed_rhs = castIfWidthChanges(make_var("rhs", u64), i64);
-        auto div = make_binary(
-            "/", cloneExpr(signed_lhs), cloneExpr(signed_rhs), i64);
-        auto mod = make_binary(
-            "%", cloneExpr(signed_lhs), cloneExpr(signed_rhs), i64);
-        f.body.push_back(assign(
-            "quot", castIfWidthChanges(std::move(div), u64), u64));
-        f.body.push_back(assign(
-            "rem", castIfWidthChanges(std::move(mod), u64), u64));
-
-        auto r = runPipeline(std::move(f));
-        CHECK(r.error.empty());
-        checkContains(r.smt, "(bvsdiv lhs_0 rhs_0)");
-        checkContains(r.smt, "(bvsrem lhs_0 rhs_0)");
-        CHECK(r.smt.find("(bvudiv lhs_0 rhs_0)") == std::string::npos);
-        CHECK(r.smt.find("(bvurem lhs_0 rhs_0)") == std::string::npos);
-    }
-
-    {
-        FunctionAST f;
-        f.name = "smt_negative_literals";
-        f.return_type = TypeInfo{"void", 0, false};
-        f.params.push_back(param(u(8), "m1", ParamDirection::Output));
-        f.params.push_back(param(u(8), "m128", ParamDirection::Output));
-        f.params.push_back(param(u(8), "p127", ParamDirection::Output));
-        f.params.push_back(param(u(8), "p255", ParamDirection::Output));
-        f.params.push_back(param(u(8), "hex", ParamDirection::Output));
-        f.params.push_back(param(u(8), "oct", ParamDirection::Output));
-        f.params.push_back(param(u(8), "bin", ParamDirection::Output));
-        f.body.push_back(assign("m1", make_literal("-1", u(8)), u(8)));
-        f.body.push_back(assign("m128", make_literal("-128", u(8)), u(8)));
-        f.body.push_back(assign("p127", make_literal("127", u(8)), u(8)));
-        f.body.push_back(assign("p255", make_literal("255", u(8)), u(8)));
-        f.body.push_back(assign("hex", make_literal("0xffU", u(8)), u(8)));
-        f.body.push_back(assign("oct", make_literal("0377UL", u(8)), u(8)));
-        f.body.push_back(assign("bin", make_literal("0b10101010ULL", u(8)), u(8)));
-        auto r = runPipeline(std::move(f));
-        CHECK(r.error.empty());
-        checkContains(r.smt, "(_ bv255 8)");
-        checkContains(r.smt, "(_ bv128 8)");
-        checkContains(r.smt, "(_ bv127 8)");
-        checkContains(r.smt, "(_ bv170 8)");
-        CHECK(r.smt.find("(_ bv-") == std::string::npos);
-
-        PredicateProgram bad_suffix;
-        bad_suffix.function_name = "smt_bad_suffix";
-        bad_suffix.symbols["out"] = u(8);
-        bad_suffix.output_expressions.push_back({"out", make_literal("1UU", u(8)), u(8)});
-        bool suffix_rejected = false;
-        try {
-            (void)emitSmt(bad_suffix);
-        } catch (const std::exception& ex) {
-            suffix_rejected = std::string(ex.what()).find("unsupported integer literal suffix") != std::string::npos;
-        }
-        CHECK(suffix_rejected);
-    }
-
-    {
-        FunctionAST f;
-        f.name = "smt_write_reduce";
-        f.return_type = TypeInfo{"void", 0, false};
-        f.params.push_back(param(u(8), "a"));
-        f.params.push_back(param(u(8), "b"));
-        f.params.push_back(param(u(8), "out", ParamDirection::Output));
-        f.params.push_back(param(boolean(), "any", ParamDirection::Output));
-        f.params.push_back(param(boolean(), "all", ParamDirection::Output));
-        f.params.push_back(param(boolean(), "parity", ParamDirection::Output));
-        f.body.push_back(assign("out", make_write_slice(make_var("a", u(8)), 3, 0, make_slice(make_var("b", u(8)), 3, 0, u(4)), u(8)), u(8)));
-        f.body.push_back(assign("any", make_reduce(ExprKind::ReduceOr, make_var("a", u(8))), boolean()));
-        f.body.push_back(assign("all", make_reduce(ExprKind::ReduceAnd, make_var("a", u(8))), boolean()));
-        f.body.push_back(assign("parity", make_reduce(ExprKind::ReduceXor, make_var("a", u(8))), boolean()));
-        auto r = runPipeline(std::move(f));
-        CHECK(r.error.empty());
-        CHECK(r.smt.find("write_slice") == std::string::npos);
-        CHECK(r.smt.find("reduce_or") == std::string::npos);
-        CHECK(r.smt.find("reduce_and") == std::string::npos);
-        CHECK(r.smt.find("reduce_xor") == std::string::npos);
-        checkContains(r.smt, "(concat");
-        checkContains(r.smt, "(bvnot (_ bv0 8))");
-        checkContains(r.smt, "(xor ");
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_bool_to_slice";
-        prog.inputs = {"base", "flag"};
-        prog.symbols["base"] = u(8);
-        prog.symbols["flag"] = boolean();
-        prog.symbols["out"] = u(8);
-        prog.param_directions["base"] = "Input";
-        prog.param_directions["flag"] = "Input";
-        prog.param_directions["out"] = "Output";
-        auto write = make_write_slice(make_var("base", u(8)), 3, 0, make_var("flag", boolean()), u(8));
-        prog.output_expressions.push_back({"out", write, u(8)});
-        auto smt = emitSmt(prog);
-        checkContains(smt, "((_ zero_extend 3) (ite flag #b1 #b0))");
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_bool_bitvec_casts";
-        prog.inputs = {"flag", "word"};
-        prog.symbols["flag"] = boolean();
-        prog.symbols["word"] = u(8);
-        prog.symbols["out_word"] = u(8);
-        prog.symbols["out_bool"] = boolean();
-        prog.param_directions["flag"] = "Input";
-        prog.param_directions["word"] = "Input";
-        prog.param_directions["out_word"] = "Output";
-        prog.param_directions["out_bool"] = "Output";
-        prog.output_expressions.push_back({"out_word", make_zext(make_var("flag", boolean()), 8), u(8)});
-        prog.output_expressions.push_back({"out_bool", make_var("word", u(8)), boolean()});
-        auto smt = emitSmt(prog);
-        checkContains(smt, "((_ zero_extend 7) (ite flag #b1 #b0))");
-        checkContains(smt, "(not (= word (_ bv0 8)))");
-        CHECK(smt.find("zero_extend 7) flag") == std::string::npos);
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_bitvec1_slice_as_bool";
-        prog.inputs = {"word"};
-        prog.symbols["word"] = u(8);
-        prog.param_directions["word"] = "Input";
-        prog.param_directions["out"] = "Output";
-        prog.output_expressions.push_back({
-            "out",
-            make_slice(make_var("word", u(8)), 0, 0, u(1)),
-            boolean()
-        });
-        auto smt = emitSmt(prog);
-        checkContains(smt, "(assert (= out (= ((_ extract 0 0) word) #b1)))");
-        CHECK(smt.find("(assert (= out ((_ extract 0 0) word)))") == std::string::npos);
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_bool_bitvec_alias_use";
-        prog.inputs = {"flag"};
-        prog.symbols["flag"] = boolean();
-        prog.symbols["tmp"] = boolean();
-        prog.symbols["out"] = u(1);
-        prog.param_directions["flag"] = "Input";
-        prog.param_directions["out"] = "Output";
-        prog.assignments.push_back({
-            make_literal("true", boolean()),
-            make_var("tmp", boolean()),
-            make_var("flag", boolean()),
-            boolean()
-        });
-        prog.output_expressions.push_back({"out", make_var("tmp", u(1)), u(1)});
-        auto smt = emitSmt(prog);
-        checkContains(smt, "(declare-const tmp Bool)");
-        checkContains(smt, "(assert (= out (ite tmp #b1 #b0)))");
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_shift_amount_resize";
-        auto u64 = TypeInfo{"uint64_t", 64, false, true, "builtin"};
-        auto u8 = TypeInfo{"uint8_t", 8, false, true, "builtin"};
-        prog.inputs = {"word", "sh"};
-        prog.symbols["word"] = u64;
-        prog.symbols["sh"] = u8;
-        prog.symbols["out"] = u64;
-        prog.param_directions["word"] = "Input";
-        prog.param_directions["sh"] = "Input";
-        prog.param_directions["out"] = "Output";
-        prog.output_expressions.push_back({
-            "out",
-            make_binary("<<", make_var("word", u64), make_var("sh", u8), u64),
-            u64
-        });
-        auto smt = emitSmt(prog);
-        checkContains(smt, "(bvshl word ((_ zero_extend 56) sh))");
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_lookup_total";
-        prog.lookup_tables["T"] = {"0", "1", "2", "3"};
-        prog.inputs = {"idx"};
-        prog.symbols["idx"] = u(2);
-        prog.symbols["out"] = u(2);
-        prog.param_directions["idx"] = "Input";
-        prog.param_directions["out"] = "Output";
-        auto table_name = make_literal("T", TypeInfo{"table_id", 0, false});
-        auto lookup = std::make_shared<Expr>();
-        lookup->kind = ExprKind::Call;
-        lookup->callee = "lookup";
-        lookup->args = {table_name, make_var("idx", u(2))};
-        lookup->type = u(2);
-        prog.output_expressions.push_back({"out", lookup, u(2)});
-        auto smt = emitSmt(prog);
-        checkContains(smt, "(ite (= idx (_ bv0 2)) (_ bv0 2)");
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_lookup_non_total_reject";
-        prog.lookup_tables["RC"] = {"1", "2", "4", "8", "16", "32", "64", "128", "27", "54"};
-        prog.inputs = {"idx"};
-        prog.symbols["idx"] = u(8);
-        prog.symbols["out"] = u(8);
-        prog.param_directions["idx"] = "Input";
-        prog.param_directions["out"] = "Output";
-        auto table_name = make_literal("RC", TypeInfo{"table_id", 0, false});
-        auto lookup = std::make_shared<Expr>();
-        lookup->kind = ExprKind::Call;
-        lookup->callee = "lookup";
-        lookup->args = {table_name, make_var("idx", u(8))};
-        lookup->type = u(8);
-        prog.output_expressions.push_back({"out", lookup, u(8)});
-        auto smt = emitSmt(prog);
-        checkContains(smt, "(assert (bvult idx (_ bv10 8)))");
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_dynamic_select";
-        prog.inputs = {"word", "idx"};
-        prog.symbols["word"] = u(8);
-        prog.symbols["idx"] = u(3);
-        prog.symbols["out"] = u(2);
-        prog.param_directions["word"] = "Input";
-        prog.param_directions["idx"] = "Input";
-        prog.param_directions["out"] = "Output";
-        auto dyn = std::make_shared<Expr>();
-        dyn->kind = ExprKind::Call;
-        dyn->callee = "__dynamic_range_at";
-        dyn->intrinsic = IntrinsicKind::DynamicRangeAt;
-        dyn->args = {make_var("word", u(8)), make_var("idx", u(3))};
-        dyn->type = u(2);
-        prog.output_expressions.push_back({"out", dyn, u(2)});
-        auto smt = emitSmt(prog);
-        checkContains(smt, "(assert (bvule idx (_ bv6 3)))");
-        checkContains(smt, "((_ extract 1 0) (bvlshr word");
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_unknown_type";
-        prog.symbols["out"] = u(8);
-        prog.output_expressions.push_back({"out", make_var("missing_type"), u(8)});
-        bool rejected = false;
-        try {
-            (void)emitSmt(prog);
-        } catch (const std::exception& ex) {
-            std::string msg = ex.what();
-            rejected = msg.find("type is unknown for variable 'missing_type'") != std::string::npos ||
-                       msg.find("required internal variable 'missing_type' has no defining assignment") != std::string::npos;
-        }
-        CHECK(rejected);
-    }
-
-    {
-        PredicateProgram prog;
-        prog.function_name = "smt_mixed_compare_reject";
-        auto s8 = signedView(8);
-        prog.inputs = {"sa", "ub"};
-        prog.symbols["sa"] = s8;
-        prog.symbols["ub"] = u(8);
-        prog.symbols["out"] = boolean();
-        prog.param_directions["sa"] = "Input";
-        prog.param_directions["ub"] = "Input";
-        prog.param_directions["out"] = "Output";
-        auto cmp = make_binary("<", make_var("sa", s8), make_var("ub", u(8)), boolean());
-        prog.output_expressions.push_back({"out", cmp, boolean()});
-        bool rejected = false;
-        try {
-            (void)emitSmt(prog);
-        } catch (const std::exception& ex) {
-            rejected = std::string(ex.what()).find("mixed signed/unsigned comparison") != std::string::npos;
-        }
-        CHECK(rejected);
-    }
-
-    std::cout << "  PASS: test_smt_type_and_operation_semantics\n";
-}
-
-void test_smt_reverse_pruning_and_closure() {
+void test_listjson_flattened_driver_semantics() {
     PredicateProgram prog;
-    prog.function_name = "smt_prune";
+    prog.function_name = "listjson_flatten";
     prog.inputs = {"input", "guard"};
     prog.symbols["input"] = u(8);
     prog.symbols["guard"] = boolean();
@@ -1849,55 +1444,17 @@ void test_smt_reverse_pruning_and_closure() {
     });
     prog.output_expressions.push_back({"out", make_var("tmp3", u(8)), u(8)});
 
-    auto smt = emitSmt(prog);
-    checkContains(smt, "(declare-const input");
-    checkContains(smt, "(declare-const guard");
-    checkContains(smt, "(declare-const tmp1");
-    checkContains(smt, "(declare-const tmp2");
-    checkContains(smt, "(declare-const tmp3");
-    CHECK(smt.find("dead") == std::string::npos);
-    CHECK(smt.find("dead_in") == std::string::npos);
-
-    PredicateProgram missing;
-    missing.function_name = "smt_missing_internal";
-    missing.symbols["out"] = u(8);
-    missing.symbols["tmp_missing"] = u(8);
-    missing.param_directions["out"] = "Output";
-    missing.output_expressions.push_back({"out", make_var("tmp_missing_0", u(8)), u(8)});
-    bool rejected = false;
-    try {
-        (void)emitSmt(missing);
-    } catch (const std::exception& ex) {
-        rejected = std::string(ex.what()).find("required internal variable 'tmp_missing_0' has no defining assignment") != std::string::npos;
-    }
-    CHECK(rejected);
-
-    std::cout << "  PASS: test_smt_reverse_pruning_and_closure\n";
-}
-
-void test_smt_guarded_ssa_is_totalized() {
-    PredicateProgram prog;
-    prog.function_name = "smt_guarded_ssa";
-    prog.inputs = {"state_0", "guard_0"};
-    prog.symbols["state"] = u(8);
-    prog.symbols["guard"] = boolean();
-    prog.symbols["out"] = u(8);
-    prog.param_directions["state"] = "Input";
-    prog.param_directions["guard"] = "Input";
-    prog.param_directions["out"] = "Output";
-    prog.assignments.push_back({
-        make_var("guard_0", boolean()),
-        make_var("state_1", u(8)),
-        make_literal("7", u(8)),
-        u(8)
-    });
-    prog.output_expressions.push_back({"out", make_var("state_1", u(8)), u(8)});
-
-    auto smt = emitSmt(prog);
-    checkContains(smt,
-        "(assert (= state_1 (ite guard_0 (_ bv7 8) state_0)))");
-    CHECK(smt.find("(assert (=> guard_0 (= state_1") == std::string::npos);
-    std::cout << "  PASS: test_smt_guarded_ssa_is_totalized\n";
+    auto json = emitListJson(prog);
+    checkContains(json, "\"schema_version\": \"rtlzz-signal-list-json-v1\"");
+    checkContains(json, "\"kind\": \"port_read\"");
+    checkContains(json, "\"kind\": \"assign\"");
+    checkContains(json, "\"kind\": \"binary\"");
+    checkContains(json, "\"kind\": \"trunc\"");
+    checkContains(json, "\"text\": \"tmp1\"");
+    checkContains(json, "\"text\": \"tmp2\"");
+    checkContains(json, "\"text\": \"tmp3\"");
+    checkContains(json, "\"source_assignment\": 1");
+    std::cout << "  PASS: test_listjson_flattened_driver_semantics\n";
 }
 
 void test_alias_graph_reference_paths() {
@@ -2282,12 +1839,9 @@ int main() {
     runTest("test_predicate_ir_evaluator_differential_smoke", test_predicate_ir_evaluator_differential_smoke);
     runTest("test_int_operator_and_bit_range_differential_smoke", test_int_operator_and_bit_range_differential_smoke);
     runTest("test_helper_function_inline", test_helper_function_inline);
-    runTest("test_text_json_output_semantics", test_text_json_output_semantics);
+    runTest("test_listjson_output_semantics", test_listjson_output_semantics);
     runTest("test_nested_slice_simplification", test_nested_slice_simplification);
-    runTest("test_smt_smoke", test_smt_smoke);
-    runTest("test_smt_type_and_operation_semantics", test_smt_type_and_operation_semantics);
-    runTest("test_smt_reverse_pruning_and_closure", test_smt_reverse_pruning_and_closure);
-    runTest("test_smt_guarded_ssa_is_totalized", test_smt_guarded_ssa_is_totalized);
+    runTest("test_listjson_flattened_driver_semantics", test_listjson_flattened_driver_semantics);
     runTest("test_alias_graph_reference_paths", test_alias_graph_reference_paths);
     runTest("test_typed_dag_stable_json", test_typed_dag_stable_json);
     runTest("test_predicate_evaluator_wide_bits", test_predicate_evaluator_wide_bits);
@@ -2296,4 +1850,3 @@ int main() {
     std::cout << "\nAll tests passed.\n";
     return 0;
 }
-

@@ -114,9 +114,7 @@ add_executable(predicate-expand
     src/predicate/DefaultTotalizationPass.cpp
     src/predicate/OutputExpressionMap.cpp
     src/predicate/PredicateVerifier.cpp
-    src/emitter/TextEmitter.cpp
-    src/emitter/JsonEmitter.cpp
-    src/emitter/SmtEmitter.cpp
+    src/emitter/ListJsonEmitter.cpp
 )
 
 target_include_directories(predicate-expand PRIVATE

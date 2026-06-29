@@ -6,8 +6,7 @@
 #include "transform/Predicate.h"
 #include "predicate/OutputExpressionMap.h"
 #include "predicate/PredicateVerifier.h"
-#include "emitter/TextEmitter.h"
-#include "emitter/JsonEmitter.h"
+#include "emitter/ListJsonEmitter.h"
 #include "eval/PredicateEvaluator.h"
 
 #include <cstdint>
@@ -60,17 +59,15 @@ static Result runFile(const std::string& file, const std::string& top = "hls_mai
     prog.lookup_tables = normalized.lookup_tables;
     prog.outputs = normalized.output_params;
     if (std::getenv("GPEF_E2E_TRACE")) {
-        std::cerr << pred::emitText(prog) << "\n";
+        std::cerr << pred::emitListJson(prog) << "\n";
     }
     pred::buildOutputExpressionMap(prog);
     auto verified = pred::verifyPredicateProgram(prog);
     if (!verified.ok) { r.error = verified.error; return r; }
-    trace("emitText.begin");
-    r.text = pred::emitText(prog);
-    trace("emitText.end");
-    trace("emitJson.begin");
-    r.json = pred::emitJson(prog);
-    trace("emitJson.end");
+    trace("emitListJson.begin");
+    r.json = pred::emitListJson(prog);
+    r.text = r.json;
+    trace("emitListJson.end");
     if (keep_program) {
         r.prog = std::move(prog);
     } else {

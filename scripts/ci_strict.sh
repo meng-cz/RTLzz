@@ -43,7 +43,6 @@ fi
 
 "$PS_BIN" -ExecutionPolicy Bypass -File "$ROOT/scripts/check_no_unsafe_lowering.ps1"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
-"$PS_BIN" -ExecutionPolicy Bypass -File "$ROOT/scripts/test_smt_solver.ps1" -BuildDir "$BUILD_DIR" -RequireZ3
 if [[ -n "$CUSTOMER_DIR" ]]; then
   "$PS_BIN" -ExecutionPolicy Bypass -File "$ROOT/scripts/test_customer_files.ps1" -BuildDir "$BUILD_DIR" -CustomerDir "$CUSTOMER_DIR"
 else

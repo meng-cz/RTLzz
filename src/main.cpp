@@ -6,9 +6,7 @@
 #include "transform/Predicate.h"
 #include "predicate/OutputExpressionMap.h"
 #include "predicate/PredicateVerifier.h"
-#include "emitter/TextEmitter.h"
-#include "emitter/JsonEmitter.h"
-#include "emitter/SmtEmitter.h"
+#include "emitter/ListJsonEmitter.h"
 
 #include <cctype>
 #include <cstdlib>
@@ -21,7 +19,7 @@
 
 static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " <source.cpp> --top <function_name> [--format text|json|stable_json|smt]"
+              << " <source.cpp> --top <function_name> [--format listjson]"
               << " [--input source.cpp] [--unroll-limit N] [--clang-arg ARG ...] [-o output_file]\n";
 }
 
@@ -89,7 +87,7 @@ static int runMain(int argc, char* argv[]) {
 
     std::string source_file;
     std::string top_function;
-    std::string format = "text";
+    std::string format = "listjson";
     std::string output_file;
     int unroll_limit = 1024;
     std::vector<std::string> clang_args;
@@ -139,7 +137,7 @@ static int runMain(int argc, char* argv[]) {
         std::cerr << "--top must not be empty\n";
         return 1;
     }
-    if (format != "text" && format != "json" && format != "stable_json" && format != "smt") {
+    if (format != "listjson") {
         std::cerr << "Unknown format: " << format << "\n";
         return 1;
     }
@@ -205,18 +203,9 @@ static int runMain(int argc, char* argv[]) {
     // Step 7: Emit output
     std::string output;
     try {
-        if (format == "text") {
-            output = pred::emitText(pred_prog);
-        } else if (format == "json" || format == "stable_json") {
-            output = pred::emitJson(pred_prog);
-        } else if (format == "smt") {
-            output = pred::emitSmt(pred_prog);
-        } else {
-            std::cerr << "Unknown format: " << format << "\n";
-            return 1;
-        }
+        output = pred::emitListJson(pred_prog);
     } catch (const std::exception& ex) {
-        std::cerr << "Error during Predicate IR emission: " << ex.what() << "\n";
+        std::cerr << "Error during listjson emission: " << ex.what() << "\n";
         return 1;
     }
 
