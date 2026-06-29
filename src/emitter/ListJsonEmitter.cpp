@@ -29,7 +29,6 @@ struct Operand {
 struct Operation {
     std::string kind;
     std::string op;
-    std::string callee;
     std::vector<Operand> operands;
     TypeInfo type;
     int to_width = 0;
@@ -154,6 +153,7 @@ static std::string exprKindName(const ExprPtr& e) {
     case ExprKind::Call:
         if (e->intrinsic == IntrinsicKind::DynamicBitAt) return "dynamic_bit_select";
         if (e->intrinsic == IntrinsicKind::DynamicRangeAt) return "dynamic_slice";
+        if (e->callee == "lookup") return "lookup";
         return "call";
     case ExprKind::Cast: return "cast";
     case ExprKind::Ternary: return "ite";
@@ -220,7 +220,8 @@ static std::string tempStemForExpr(const ExprPtr& expr) {
     case ExprKind::Ternary:
         return "mux";
     case ExprKind::Call:
-        if (!expr->callee.empty()) return "call_" + expr->callee;
+        if (expr->callee == "lookup") return "lookup";
+        if (!expr->callee.empty()) return expr->callee;
         return exprKindName(expr);
     case ExprKind::FieldAccess:
         return "field_" + expr->field_name;
@@ -477,7 +478,12 @@ private:
             op.operands.push_back(flattenExpr(expr->struct_base));
             break;
         case ExprKind::Call:
-            op.callee = expr->callee;
+            if (expr->intrinsic != IntrinsicKind::DynamicBitAt &&
+                expr->intrinsic != IntrinsicKind::DynamicRangeAt &&
+                expr->callee != "lookup") {
+                throw std::runtime_error("listjson unsupported call expression after normalization: " +
+                                         expr->callee);
+            }
             for (const auto& arg : expr->args) op.operands.push_back(flattenExpr(arg));
             break;
         case ExprKind::Cast:
@@ -677,7 +683,6 @@ static void emitOperation(std::ostream& os, const Operation& op, int indent) {
     os << "{\n";
     os << ind(indent + 1) << "\"kind\": \"" << jsonEscape(op.kind) << "\",\n";
     os << ind(indent + 1) << "\"op\": \"" << jsonEscape(op.op) << "\",\n";
-    os << ind(indent + 1) << "\"callee\": \"" << jsonEscape(op.callee) << "\",\n";
     os << ind(indent + 1) << "\"type\": ";
     emitType(os, op.type);
     os << ",\n";
