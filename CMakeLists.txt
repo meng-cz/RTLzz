@@ -115,6 +115,7 @@ add_executable(predicate-expand
     src/predicate/OutputExpressionMap.cpp
     src/predicate/PredicateVerifier.cpp
     src/backend/beir.cpp
+    src/backend/rtlgen.cpp
     src/emitter/ListJsonEmitter.cpp
 )
 

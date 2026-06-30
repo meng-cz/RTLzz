@@ -69,6 +69,7 @@ struct Env {
     AliasGraph alias_graph;
     std::unordered_set<std::string> input_arrays;
     std::vector<std::string> output_params;
+    std::unordered_set<std::string> formal_write_reset_done;
     std::shared_ptr<int> inline_counter = std::make_shared<int>(0);
     std::shared_ptr<std::unordered_set<std::string>> formal_reads =
         std::make_shared<std::unordered_set<std::string>>();
@@ -87,8 +88,11 @@ void markFormalWrite(Env& env, const std::string& name) {
         env.ssa_seed_symbols[name] = sym->second;
     } else {
         env.ssa_seed_symbols.erase(name);
-        env.initialized.erase(name);
-        env.bit_initialized.erase(name);
+        if (!env.formal_write_reset_done.count(name)) {
+            env.initialized.erase(name);
+            env.bit_initialized.erase(name);
+            env.formal_write_reset_done.insert(name);
+        }
     }
     auto it = env.param_directions.find(name);
     if (it != env.param_directions.end()) {
@@ -4032,6 +4036,11 @@ StmtPtr rewriteStmt(const StmtPtr& s, Env& env) {
             if (else_env.initialized.count(v)) merged.insert(v);
         }
         env.initialized = std::move(merged);
+        std::unordered_set<std::string> merged_resets = env.formal_write_reset_done;
+        for (const auto& v : then_env.formal_write_reset_done) {
+            if (else_env.formal_write_reset_done.count(v)) merged_resets.insert(v);
+        }
+        env.formal_write_reset_done = std::move(merged_resets);
         env.symbols.insert(then_env.symbols.begin(), then_env.symbols.end());
         env.symbols.insert(else_env.symbols.begin(), else_env.symbols.end());
         env.lookup_tables.insert(then_env.lookup_tables.begin(), then_env.lookup_tables.end());
