@@ -2,11 +2,90 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace pred::beir {
+
+bool Operand::Constant::isZero() const {
+    for (std::uint64_t limb : limbs) {
+        if (limb != 0) return false;
+    }
+    return true;
+}
+
+bool Operand::Constant::isOne() const {
+    if (limbs.empty()) return false;
+    if (limbs[0] != 1) return false;
+    for (std::size_t i = 1; i < limbs.size(); ++i) {
+        if (limbs[i] != 0) return false;
+    }
+    return true;
+}
+
+bool Operand::Constant::isAllOnes() const {
+    if (width <= 0) return false;
+    const std::size_t full_limbs = static_cast<std::size_t>(width / 64);
+    const int rem_bits = width % 64;
+    for (std::size_t i = 0; i < full_limbs; ++i) {
+        if (i >= limbs.size() || limbs[i] != std::numeric_limits<std::uint64_t>::max()) {
+            return false;
+        }
+    }
+    if (rem_bits == 0) return true;
+    const std::uint64_t mask = (std::uint64_t{1} << rem_bits) - 1;
+    return full_limbs < limbs.size() && limbs[full_limbs] == mask;
+}
+
+bool Operand::Constant::isBoolTrue() const {
+    return width == 1 && isOne();
+}
+
+bool Operand::Constant::isBoolFalse() const {
+    return width == 1 && isZero();
+}
+
+bool Operand::Constant::fitsU64() const {
+    if (width > 64) return false;
+    for (std::size_t i = 1; i < limbs.size(); ++i) {
+        if (limbs[i] != 0) return false;
+    }
+    return true;
+}
+
+std::uint64_t Operand::Constant::toU64() const {
+    if (!fitsU64()) {
+        throw std::runtime_error("beir constant does not fit in uint64_t");
+    }
+    return limbs.empty() ? 0 : limbs[0];
+}
+
+Signal* Program::findSignal(NodeId id) {
+    if (id >= signals.size()) return nullptr;
+    Signal& candidate = signals[static_cast<std::size_t>(id)];
+    return candidate.id == id ? &candidate : nullptr;
+}
+
+const Signal* Program::findSignal(NodeId id) const {
+    if (id >= signals.size()) return nullptr;
+    const Signal& candidate = signals[static_cast<std::size_t>(id)];
+    return candidate.id == id ? &candidate : nullptr;
+}
+
+Signal& Program::signal(NodeId id) {
+    if (Signal* found = findSignal(id)) return *found;
+    throw std::runtime_error("beir unknown node id");
+}
+
+const Signal& Program::signal(NodeId id) const {
+    if (const Signal* found = findSignal(id)) return *found;
+    throw std::runtime_error("beir unknown node id");
+}
+
 namespace {
 
 template <typename Map>
@@ -63,12 +142,125 @@ static ExprPtr defaultValueFor(const TypeInfo& type) {
     return make_literal("0", out_type);
 }
 
+static int constantWidthFor(const TypeInfo& type, const std::string& text) {
+    if (type.width > 0) return type.width;
+    if (text == "true" || text == "false") return 1;
+    return 64;
+}
+
+static std::size_t limbCountForWidth(int width) {
+    return width <= 0 ? 0 : static_cast<std::size_t>((width + 63) / 64);
+}
+
+static void maskHighBits(Operand::Constant& constant) {
+    if (constant.width <= 0 || constant.limbs.empty()) return;
+    const int rem_bits = constant.width % 64;
+    if (rem_bits == 0) return;
+    const std::uint64_t mask = (std::uint64_t{1} << rem_bits) - 1;
+    constant.limbs.back() &= mask;
+}
+
+static void addSmall(Operand::Constant& constant, std::uint32_t value) {
+    unsigned __int128 carry = value;
+    for (std::uint64_t& limb : constant.limbs) {
+        unsigned __int128 sum = static_cast<unsigned __int128>(limb) + carry;
+        limb = static_cast<std::uint64_t>(sum);
+        carry = sum >> 64;
+        if (!carry) break;
+    }
+    maskHighBits(constant);
+}
+
+static void multiplySmall(Operand::Constant& constant, std::uint32_t factor) {
+    unsigned __int128 carry = 0;
+    for (std::uint64_t& limb : constant.limbs) {
+        unsigned __int128 product = static_cast<unsigned __int128>(limb) * factor + carry;
+        limb = static_cast<std::uint64_t>(product);
+        carry = product >> 64;
+    }
+    maskHighBits(constant);
+}
+
+static void negateTwosComplement(Operand::Constant& constant) {
+    for (std::uint64_t& limb : constant.limbs) limb = ~limb;
+    addSmall(constant, 1);
+    maskHighBits(constant);
+}
+
+static std::string stripIntegerSuffix(std::string text) {
+    while (!text.empty()) {
+        char ch = text.back();
+        if (ch == 'u' || ch == 'U' || ch == 'l' || ch == 'L') text.pop_back();
+        else break;
+    }
+    return text;
+}
+
+static int digitValue(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static Operand::Constant parseConstant(std::string text, const TypeInfo& type) {
+    Operand::Constant constant;
+    constant.width = constantWidthFor(type, text);
+    constant.is_signed = type.is_signed;
+    constant.limbs.assign(limbCountForWidth(constant.width), 0);
+
+    if (text == "true" || text == "false") {
+        if (text == "true") addSmall(constant, 1);
+        return constant;
+    }
+
+    text = stripIntegerSuffix(std::move(text));
+    if (text.empty()) throw std::runtime_error("beir empty constant literal");
+
+    bool negative = false;
+    if (text.front() == '+' || text.front() == '-') {
+        negative = text.front() == '-';
+        text.erase(text.begin());
+    }
+    if (text.empty()) throw std::runtime_error("beir malformed constant literal");
+
+    int base = 10;
+    std::size_t pos = 0;
+    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        base = 16;
+        pos = 2;
+    } else if (text.size() > 2 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B')) {
+        base = 2;
+        pos = 2;
+    } else if (text.size() > 1 && text[0] == '0') {
+        base = 8;
+        pos = 1;
+    }
+
+    bool saw_digit = false;
+    for (; pos < text.size(); ++pos) {
+        if (text[pos] == '\'') continue;
+        int digit = digitValue(text[pos]);
+        if (digit < 0 || digit >= base) {
+            throw std::runtime_error("beir malformed constant literal: " + text);
+        }
+        saw_digit = true;
+        multiplySmall(constant, static_cast<std::uint32_t>(base));
+        addSmall(constant, static_cast<std::uint32_t>(digit));
+    }
+    if (!saw_digit) throw std::runtime_error("beir malformed constant literal: " + text);
+    if (negative) negateTwosComplement(constant);
+    maskHighBits(constant);
+    return constant;
+}
+
 static const char* operandKindText(OperandKind kind) {
     switch (kind) {
     case OperandKind::Symbol: return "symbol";
     case OperandKind::Literal: return "literal";
     case OperandKind::Port: return "port";
     case OperandKind::Aggregate: return "aggregate";
+    case OperandKind::LookupTable: return "lookup_table";
     }
     return "unknown";
 }
@@ -298,6 +490,7 @@ public:
         program_.function_name = source.function_name;
         program_.outputs = source.outputs;
         for (const auto& name : sortedKeys(source.lookup_tables)) {
+            lookup_table_names_.insert(name);
             LookupTable table;
             table.name = name;
             table.values = source.lookup_tables.at(name);
@@ -386,7 +579,9 @@ private:
     Program program_;
     std::unordered_map<std::string, std::size_t> port_index_;
     std::unordered_map<std::string, std::size_t> aggregate_index_;
-    std::unordered_map<std::string, std::size_t> signal_index_;
+    std::unordered_map<std::string, NodeId> signal_id_by_name_;
+    std::unordered_set<std::string> lookup_table_names_;
+    NodeId next_node_id_ = 0;
     std::size_t next_temp_ = 0;
 
     Signal& ensureSignal(const std::string& name, TypeInfo type) {
@@ -394,19 +589,28 @@ private:
         if (type.is_array) {
             throw std::runtime_error("beir scalar signal cannot use array type: " + name);
         }
-        auto it = signal_index_.find(name);
-        if (it == signal_index_.end()) {
-            std::size_t index = program_.signals.size();
-            signal_index_.emplace(name, index);
+        auto it = signal_id_by_name_.find(name);
+        if (it == signal_id_by_name_.end()) {
+            NodeId id = next_node_id_++;
+            signal_id_by_name_.emplace(name, id);
             Signal signal;
+            signal.id = id;
             signal.name = name;
             signal.type = std::move(type);
             program_.signals.push_back(std::move(signal));
             return program_.signals.back();
         }
-        Signal& signal = program_.signals[it->second];
+        Signal& signal = signalById(it->second);
         mergeType(signal.type, type);
         return signal;
+    }
+
+    Signal& signalById(NodeId id) {
+        return program_.signal(id);
+    }
+
+    const Signal& signalById(NodeId id) const {
+        return program_.signal(id);
     }
 
     Port& ensurePort(const std::string& name, PortDirection direction, TypeInfo type) {
@@ -426,14 +630,14 @@ private:
             int count = flattenedArraySize(type);
             for (int i = 0; i < count; ++i) {
                 std::string element_name = name + "_" + std::to_string(i);
-                port.element_symbols.push_back(element_name);
                 Signal& element = ensureSignal(element_name, element_type);
+                port.element_nodes.push_back(element.id);
                 element.port_name = name;
                 element.port_element_index = i;
             }
         } else {
-            port.element_symbols.push_back(name);
             Signal& element = ensureSignal(name, element_type);
+            port.element_nodes.push_back(element.id);
             element.port_name = name;
             element.port_element_index = 0;
         }
@@ -457,8 +661,8 @@ private:
         int count = flattenedArraySize(type);
         for (int i = 0; i < count; ++i) {
             std::string element_name = name + "_" + std::to_string(i);
-            aggregate.element_symbols.push_back(element_name);
-            ensureSignal(element_name, element_type);
+            Signal& element = ensureSignal(element_name, element_type);
+            aggregate.element_nodes.push_back(element.id);
         }
 
         program_.aggregates.push_back(std::move(aggregate));
@@ -468,19 +672,20 @@ private:
     void connectInputPorts(const PredicateProgram& source) {
         for (const auto& port : program_.ports) {
             if (port.direction != PortDirection::Input) continue;
-            for (std::size_t i = 0; i < port.element_symbols.size(); ++i) {
+            for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
+                const Signal& element = signalById(port.element_nodes[i]);
                 Operation op;
                 op.kind = OperationKind::PortRead;
-                op.type = signalType(port.element_symbols[i]);
+                op.type = element.type;
                 op.operands.push_back(portOperand(port.name, port.type));
                 auto loc_it = source.param_debug_locs.find(port.name);
                 if (loc_it != source.param_debug_locs.end() && loc_it->second.valid()) {
                     op.source_locs.push_back(loc_it->second);
                 }
-                if (port.element_symbols.size() > 1) {
+                if (port.element_nodes.size() > 1) {
                     op.operands.push_back(literalOperand(std::to_string(i), TypeInfo{"int", 32, true}));
                 }
-                setDriver(port.element_symbols[i], std::move(op), true);
+                setDriver(element.name, std::move(op), true);
             }
         }
     }
@@ -645,14 +850,28 @@ private:
         Signal& signal = ensureSignal(name, type);
         Operand operand;
         operand.kind = OperandKind::Symbol;
+        operand.node = signal.id;
         operand.text = signal.name;
         operand.type = signal.type;
         return operand;
     }
 
     Operand literalOperand(std::string value, TypeInfo type) {
+        type = beirType(std::move(type));
+        if (lookup_table_names_.count(value) || type.is_array) {
+            return lookupTableOperand(std::move(value), std::move(type));
+        }
         Operand operand;
         operand.kind = OperandKind::Literal;
+        operand.constant = parseConstant(value, type);
+        operand.text = std::move(value);
+        operand.type = std::move(type);
+        return operand;
+    }
+
+    Operand lookupTableOperand(std::string value, TypeInfo type) {
+        Operand operand;
+        operand.kind = OperandKind::LookupTable;
         operand.text = std::move(value);
         operand.type = beirType(std::move(type));
         return operand;
@@ -664,12 +883,6 @@ private:
         operand.text = std::move(value);
         operand.type = beirType(std::move(type));
         return operand;
-    }
-
-    TypeInfo signalType(const std::string& name) const {
-        auto it = signal_index_.find(name);
-        if (it == signal_index_.end()) return {};
-        return program_.signals[it->second].type;
     }
 
     void setDriver(const std::string& signal_name, Operation op, bool allow_existing_same_kind) {
@@ -693,7 +906,7 @@ private:
         std::string clean = sanitizeNamePart(stem);
         while (true) {
             std::string name = "__rtlzz_" + clean + "_" + std::to_string(next_temp_++);
-            if (!signal_index_.count(name) && !aggregate_index_.count(name)) return name;
+            if (!signal_id_by_name_.count(name) && !aggregate_index_.count(name)) return name;
         }
     }
 };
@@ -725,6 +938,28 @@ static void emitNameList(std::ostream& os, const std::vector<std::string>& value
     os << "]";
 }
 
+static void emitNodeList(std::ostream& os, const Program& program, const std::vector<NodeId>& values) {
+    os << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i) os << ", ";
+        os << "#" << values[i];
+        if (const Signal* signal = program.findSignal(values[i])) {
+            os << ":" << signal->name;
+        }
+    }
+    os << "]";
+}
+
+static void emitConstant(std::ostream& os, const Operand::Constant& constant) {
+    os << "const(width=" << constant.width << ", signed="
+       << (constant.is_signed ? "true" : "false") << ", limbs=[";
+    for (std::size_t i = 0; i < constant.limbs.size(); ++i) {
+        if (i) os << ", ";
+        os << constant.limbs[i];
+    }
+    os << "])";
+}
+
 static void emitLocs(std::ostream& os, const std::vector<DebugLoc>& locs) {
     if (locs.empty()) return;
     os << " locs=[";
@@ -739,11 +974,29 @@ static void emitLocs(std::ostream& os, const std::vector<DebugLoc>& locs) {
     os << "]";
 }
 
-static void emitOperand(std::ostream& os, const Operand& operand) {
-    os << operandKindText(operand.kind) << "(" << operand.text << " : " << typeText(operand.type) << ")";
+static void emitOperand(std::ostream& os, const Program& program, const Operand& operand) {
+    switch (operand.kind) {
+    case OperandKind::Symbol:
+        os << "symbol(#" << operand.node;
+        if (const Signal* signal = program.findSignal(operand.node)) {
+            os << " " << signal->name;
+        }
+        os << " : " << typeText(operand.type) << ")";
+        return;
+    case OperandKind::Literal:
+        emitConstant(os, operand.constant);
+        os << " : " << typeText(operand.type);
+        return;
+    case OperandKind::Port:
+    case OperandKind::Aggregate:
+    case OperandKind::LookupTable:
+        os << operandKindText(operand.kind) << "(" << operand.text << " : "
+           << typeText(operand.type) << ")";
+        return;
+    }
 }
 
-static void emitOperation(std::ostream& os, const Operation& op, const std::string& prefix) {
+static void emitOperation(std::ostream& os, const Program& program, const Operation& op, const std::string& prefix) {
     os << prefix << "driver " << operationKindText(op.kind);
     if (op.op != OpCode::None) os << " op=\"" << opCodeText(op.op) << "\"";
     os << " : " << typeText(op.type);
@@ -755,7 +1008,7 @@ static void emitOperation(std::ostream& os, const Operation& op, const std::stri
     os << "\n";
     for (std::size_t i = 0; i < op.operands.size(); ++i) {
         os << prefix << "  operand" << i << " = ";
-        emitOperand(os, op.operands[i]);
+        emitOperand(os, program, op.operands[i]);
         os << "\n";
     }
 }
@@ -781,7 +1034,7 @@ std::string emitText(const Program& program) {
     for (const auto& port : program.ports) {
         os << "  " << portDirectionText(port.direction) << " " << port.name << " : " << typeText(port.type)
            << " elements=";
-        emitNameList(os, port.element_symbols);
+        emitNodeList(os, program, port.element_nodes);
         os << "\n";
     }
     os << "\n";
@@ -789,7 +1042,7 @@ std::string emitText(const Program& program) {
     os << "aggregates\n";
     for (const auto& aggregate : program.aggregates) {
         os << "  " << aggregate.name << " : " << typeText(aggregate.type) << " elements=";
-        emitNameList(os, aggregate.element_symbols);
+        emitNodeList(os, program, aggregate.element_nodes);
         os << "\n";
     }
     os << "\n";
@@ -804,12 +1057,12 @@ std::string emitText(const Program& program) {
 
     os << "signals\n";
     for (const auto& signal : program.signals) {
-        os << "  signal " << signal.name << " : " << typeText(signal.type);
+        os << "  signal #" << signal.id << " " << signal.name << " : " << typeText(signal.type);
         if (!signal.port_name.empty()) {
             os << " port=" << signal.port_name << "[" << signal.port_element_index << "]";
         }
         os << "\n";
-        if (signal.driver) emitOperation(os, *signal.driver, "    ");
+        if (signal.driver) emitOperation(os, program, *signal.driver, "    ");
         else os << "    driver <none>\n";
     }
 

@@ -3,17 +3,22 @@
 #include "ast/AST.h"
 #include "predicate/PredicateIR.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace pred::beir {
 
+using NodeId = std::uint64_t;
+constexpr NodeId kInvalidNodeId = UINT64_MAX;
+
 enum class OperandKind {
     Symbol,
     Literal,
     Port,
     Aggregate,
+    LookupTable,
 };
 
 enum class OperationKind {
@@ -78,7 +83,21 @@ enum class PortDirection {
 
 struct Operand {
     OperandKind kind = OperandKind::Symbol;
+    NodeId node = kInvalidNodeId;
     std::string text;
+    struct Constant {
+        std::vector<std::uint64_t> limbs;
+        int width = 0;
+        bool is_signed = false;
+
+        bool isZero() const;
+        bool isOne() const;
+        bool isAllOnes() const;
+        bool isBoolTrue() const;
+        bool isBoolFalse() const;
+        bool fitsU64() const;
+        std::uint64_t toU64() const;
+    } constant;
     TypeInfo type;
 };
 
@@ -96,6 +115,7 @@ struct Operation {
 };
 
 struct Signal {
+    NodeId id = kInvalidNodeId;
     std::string name;
     TypeInfo type;
     std::string port_name;
@@ -107,13 +127,13 @@ struct Port {
     std::string name;
     PortDirection direction = PortDirection::Unknown;
     TypeInfo type;
-    std::vector<std::string> element_symbols;
+    std::vector<NodeId> element_nodes;
 };
 
 struct Aggregate {
     std::string name;
     TypeInfo type;
-    std::vector<std::string> element_symbols;
+    std::vector<NodeId> element_nodes;
 };
 
 struct LookupTable {
@@ -129,6 +149,11 @@ struct Program {
     std::vector<Aggregate> aggregates;
     std::vector<LookupTable> lookup_tables;
     std::vector<Signal> signals;
+
+    Signal* findSignal(NodeId id);
+    const Signal* findSignal(NodeId id) const;
+    Signal& signal(NodeId id);
+    const Signal& signal(NodeId id) const;
 };
 
 Program buildProgram(const PredicateProgram& source);
