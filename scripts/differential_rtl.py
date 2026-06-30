@@ -164,7 +164,7 @@ def build_verilator(verilator: str, top: str, rtl: Path, harness: Path, work: Pa
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("source", type=Path)
-    ap.add_argument("--top", default="hls_main")
+    ap.add_argument("--top", required=True, help="Top function name or '*' wildcard pattern")
     ap.add_argument("--build-dir", type=Path, default=ROOT / "build")
     ap.add_argument("--cases", type=int, default=100)
     ap.add_argument("--seed", type=int, default=1)
@@ -190,9 +190,10 @@ def main() -> int:
         lj.run(common_args + ["--format", "listjson", "-o", str(listjson)], cwd=ROOT)
         lj.run(common_args + ["--format", "rtl", "-o", str(rtl)], cwd=ROOT)
         program = json.loads(listjson.read_text())
+        resolved_top = program.get("function", args.top)
 
         oracle_cpp = work / "oracle.cpp"
-        oracle_input_order = lj.generate_harness(source, args.top, program, oracle_cpp)
+        oracle_input_order = lj.generate_harness(source, resolved_top, program, oracle_cpp)
         oracle_exe = work / "oracle"
         lj.run([
             args.cxx, "-std=c++20", str(oracle_cpp),
@@ -201,12 +202,12 @@ def main() -> int:
         ], cwd=ROOT)
 
         rtl_tb_cpp = work / "rtl_tb.cpp"
-        rtl_input_order = generate_verilator_harness(args.top, program, rtl_tb_cpp)
+        rtl_input_order = generate_verilator_harness(resolved_top, program, rtl_tb_cpp)
         if rtl_input_order != oracle_input_order:
             raise RuntimeError(
                 f"input order mismatch: rtl={rtl_input_order} oracle={oracle_input_order}"
             )
-        rtl_exe = build_verilator(args.verilator, args.top, rtl, rtl_tb_cpp, work)
+        rtl_exe = build_verilator(args.verilator, resolved_top, rtl, rtl_tb_cpp, work)
 
         rng = random.Random(args.seed)
         for case in range(args.cases):

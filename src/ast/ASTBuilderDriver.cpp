@@ -7,6 +7,7 @@
 #include <functional>
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -22,6 +23,64 @@ static std::string cxToStr(CXString s) {
     std::string result = c ? c : "";
     clang_disposeString(s);
     return result;
+}
+
+static bool sourceContainsFixintInclude(const std::string& source_file) {
+    std::ifstream in(source_file);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str().find("fixint.hpp") != std::string::npos;
+}
+
+static std::string includePathForSource(const std::string& source_file) {
+    std::string path = source_file;
+    try {
+        path = std::filesystem::absolute(source_file).string();
+    } catch (const std::exception&) {
+    }
+    std::string escaped;
+    escaped.reserve(path.size());
+    for (char ch : path) {
+        if (ch == '\\' || ch == '"') escaped.push_back('\\');
+        escaped.push_back(ch);
+    }
+    return escaped;
+}
+
+static std::string normalizedPath(const std::string& path) {
+    try {
+        return std::filesystem::weakly_canonical(std::filesystem::absolute(path)).string();
+    } catch (const std::exception&) {
+        try {
+            return std::filesystem::absolute(path).string();
+        } catch (const std::exception&) {
+            return path;
+        }
+    }
+}
+
+static bool wildcardMatch(const std::string& pattern, const std::string& text) {
+    std::size_t p = 0;
+    std::size_t t = 0;
+    std::size_t star = std::string::npos;
+    std::size_t star_text = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && pattern[p] == text[t]) {
+            ++p;
+            ++t;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            star = p++;
+            star_text = t;
+        } else if (star != std::string::npos) {
+            p = star + 1;
+            t = ++star_text;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p;
+    return p == pattern.size();
 }
 
 static bool parseVulWidthName(const std::string& name,
@@ -3620,10 +3679,26 @@ BuildResult buildASTFromSource(const std::string& source_file,
     args.push_back("-fsyntax-only");
     for (auto& a : extra_args) args.push_back(a.c_str());
 
+    std::string parse_file = source_file;
+    std::string wrapper_source;
+    CXUnsavedFile unsaved_file{};
+    CXUnsavedFile* unsaved_files = nullptr;
+    unsigned unsaved_count = 0;
+    if (!sourceContainsFixintInclude(source_file)) {
+        parse_file = "/tmp/rtlzz_fixint_include_wrapper.cpp";
+        wrapper_source = "#include <fixint.hpp>\n#include \"" +
+                         includePathForSource(source_file) + "\"\n";
+        unsaved_file.Filename = parse_file.c_str();
+        unsaved_file.Contents = wrapper_source.c_str();
+        unsaved_file.Length = static_cast<unsigned long>(wrapper_source.size());
+        unsaved_files = &unsaved_file;
+        unsaved_count = 1;
+    }
+
     CXTranslationUnit tu = clang_parseTranslationUnit(
-        index, source_file.c_str(),
+        index, parse_file.c_str(),
         args.data(), static_cast<int>(args.size()),
-        nullptr, 0,
+        unsaved_files, unsaved_count,
         CXTranslationUnit_None);
 
     if (!tu) {
@@ -3652,43 +3727,55 @@ BuildResult buildASTFromSource(const std::string& source_file,
     CXCursor root = clang_getTranslationUnitCursor(tu);
     struct FindCtx {
         std::string target;
-        CXCursor found;
-        bool success = false;
+        std::string source_file;
+        std::vector<std::pair<std::string, CXCursor>> matches;
     } ctx;
     ctx.target = top_function;
-    ctx.found = clang_getNullCursor();
+    ctx.source_file = normalizedPath(source_file);
 
     clang_visitChildren(root, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
         auto* ctx = static_cast<FindCtx*>(data);
         if (clang_getCursorKind(c) == CXCursor_FunctionDecl) {
             std::string name = cxToStr(clang_getCursorSpelling(c));
-            if (name == ctx->target && clang_isCursorDefinition(c)) {
-                ctx->found = c;
-                ctx->success = true;
-                return CXChildVisit_Break;
+            std::string file = normalizedPath(cursorFileName(c));
+            if (clang_isCursorDefinition(c) &&
+                file == ctx->source_file &&
+                wildcardMatch(ctx->target, name)) {
+                ctx->matches.push_back({name, c});
             }
         }
         return CXChildVisit_Continue;
     }, &ctx);
 
-    if (!ctx.success) {
+    if (ctx.matches.empty()) {
         result.error = "Function '" + top_function + "' not found in " + source_file;
         clang_disposeTranslationUnit(tu);
         clang_disposeIndex(index);
         return result;
     }
+    if (ctx.matches.size() > 1) {
+        std::ostringstream err;
+        err << "Function pattern '" << top_function << "' matched multiple functions:";
+        for (const auto& match : ctx.matches) err << " " << match.first;
+        result.error = err.str();
+        clang_disposeTranslationUnit(tu);
+        clang_disposeIndex(index);
+        return result;
+    }
+    CXCursor found = ctx.matches.front().second;
+    std::string resolved_top_function = ctx.matches.front().first;
 
-    std::string top_source_file = cursorFileName(ctx.found);
+    std::string top_source_file = cursorFileName(found);
     auto source_functions = collectSourceFunctionDefinitions(root, top_source_file);
     bool saw_top = false;
     for (const auto& fn : source_functions) {
-        if (fn.name == top_function && clang_equalCursors(fn.cursor, ctx.found)) {
+        if (fn.name == resolved_top_function && clang_equalCursors(fn.cursor, found)) {
             saw_top = true;
             break;
         }
     }
     if (!saw_top) {
-        source_functions.push_back({top_function, ctx.found});
+        source_functions.push_back({resolved_top_function, found});
     }
     collectLambdaOperatorNames(root);
 
@@ -3710,9 +3797,9 @@ BuildResult buildASTFromSource(const std::string& source_file,
         return result;
     }
 
-    FunctionAST func = convertFunctionDecl(ctx.found, top_function);
+    FunctionAST func = convertFunctionDecl(found, resolved_top_function);
     collectStructFieldLayouts(root, func);
-    collectLocalLambdas(ctx.found, func);
+    collectLocalLambdas(found, func);
     for (auto& [name, lambda] : func.lambdas) {
         if (!lambda) continue;
         auto unrolled = unrollLoops(lambda->body);
@@ -3739,7 +3826,7 @@ BuildResult buildASTFromSource(const std::string& source_file,
     }
 
     for (const auto& fn : source_functions) {
-        if (fn.name == func.name && clang_equalCursors(fn.cursor, ctx.found)) continue;
+        if (fn.name == func.name && clang_equalCursors(fn.cursor, found)) continue;
         if (fn.name == func.name) continue;
         auto helper = std::make_shared<FunctionAST>(convertFunctionDecl(fn.cursor, fn.name));
         auto unrolled = unrollLoops(helper->body);

@@ -401,6 +401,7 @@ def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path
         "#include <array>",
         "#include <cstdlib>",
         "#include <iostream>",
+        "#include <fixint.hpp>",
         f'#include "{source}"',
         "",
         "int main(int argc, char** argv) {",
@@ -503,7 +504,7 @@ def find_exe(build_dir: Path) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("source", type=Path)
-    ap.add_argument("--top", default="hls_main")
+    ap.add_argument("--top", required=True, help="Top function name or '*' wildcard pattern")
     ap.add_argument("--build-dir", type=Path, default=ROOT / "build")
     ap.add_argument("--cases", type=int, default=100)
     ap.add_argument("--seed", type=int, default=1)
@@ -526,9 +527,10 @@ def main() -> int:
             "-o", str(listjson),
         ], cwd=ROOT)
         program = json.loads(listjson.read_text())
+        resolved_top = program.get("function", args.top)
 
         harness_cpp = work / "harness.cpp"
-        input_order = generate_harness(source, args.top, program, harness_cpp)
+        input_order = generate_harness(source, resolved_top, program, harness_cpp)
         harness_exe = work / "harness"
         run([
             args.cxx, "-std=c++20", str(harness_cpp),
