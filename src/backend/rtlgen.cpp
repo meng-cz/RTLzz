@@ -151,6 +151,20 @@ static std::string svBinaryOp(beir::OpCode op) {
     }
 }
 
+static void emitLocList(std::ostream& os, const std::vector<DebugLoc>& locs) {
+    bool any = false;
+    for (const auto& loc : locs) {
+        if (!loc.valid()) continue;
+        if (any) os << ", ";
+        os << loc.file << ":" << loc.line << ":" << loc.column;
+        if (loc.end_line || loc.end_column) {
+            os << "-" << loc.end_line << ":" << loc.end_column;
+        }
+        any = true;
+    }
+    if (!any) os << "<none>";
+}
+
 class Emitter {
 public:
     explicit Emitter(const beir::Program& program) : program_(program) {
@@ -194,6 +208,85 @@ private:
                signal.name == signal.port_name;
     }
 
+    std::string debugComment(const beir::DebugInfo& debug) const {
+        std::ostringstream os;
+        if (debug.origin == beir::DebugOrigin::Source) {
+            os << " // src: ";
+            emitLocList(os, debug.source_locs);
+            if (!debug.reason.empty() && debug.reason != "direct source construct") {
+                os << "; note: " << debug.reason;
+            }
+            return os.str();
+        }
+
+        os << " // gen: ";
+        os << (debug.reason.empty() ? "intermediate generated value" : debug.reason);
+        if (!debug.derived_nodes.empty()) {
+            os << "; from signals ";
+            for (std::size_t i = 0; i < debug.derived_nodes.size(); ++i) {
+                if (i) os << ", ";
+                NodeId id = debug.derived_nodes[i];
+                os << "#" << id;
+                if (const auto* signal = program_.findSignal(id)) {
+                    os << ":" << sanitizeIdentifier(signal->name);
+                }
+            }
+        }
+        if (!debug.derived_names.empty()) {
+            os << "; from names ";
+            for (std::size_t i = 0; i < debug.derived_names.size(); ++i) {
+                if (i) os << ", ";
+                os << debug.derived_names[i];
+            }
+        }
+        if (!debug.source_locs.empty()) {
+            os << "; from src ";
+            emitLocList(os, debug.source_locs);
+        }
+        return os.str();
+    }
+
+    beir::DebugInfo signalDebug(const beir::Signal& signal) const {
+        if (!signal.debug.reason.empty() || signal.debug.hasSourceLoc()) return signal.debug;
+        if (signal.driver) return signal.driver->debug;
+        beir::DebugInfo debug;
+        debug.origin = beir::DebugOrigin::Generated;
+        debug.reason = "signal allocated without source location";
+        return debug;
+    }
+
+    beir::DebugInfo portDebug(const beir::Port& port) const {
+        beir::DebugInfo debug;
+        debug.origin = beir::DebugOrigin::Source;
+        debug.reason = "module port from source parameter '" + port.name + "'";
+        for (NodeId id : port.element_nodes) {
+            const auto& signal = program_.signal(id);
+            if (!signal.driver) continue;
+            debug.source_locs.insert(debug.source_locs.end(),
+                                     signal.driver->debug.source_locs.begin(),
+                                     signal.driver->debug.source_locs.end());
+        }
+        if (!debug.hasSourceLoc()) {
+            debug.origin = beir::DebugOrigin::Generated;
+            debug.reason = "module port generated from BEIR port '" + port.name + "'";
+        }
+        return debug;
+    }
+
+    beir::DebugInfo aggregateDebug(const beir::Aggregate& aggregate) const {
+        beir::DebugInfo debug;
+        debug.origin = beir::DebugOrigin::Generated;
+        debug.reason = "SystemVerilog array for aggregate '" + aggregate.name + "'";
+        for (NodeId id : aggregate.element_nodes) {
+            debug.derived_nodes.push_back(id);
+            const auto& signal = program_.signal(id);
+            debug.source_locs.insert(debug.source_locs.end(),
+                                     signal.debug.source_locs.begin(),
+                                     signal.debug.source_locs.end());
+        }
+        return debug;
+    }
+
     void emitModuleHeader(std::ostream& os) const {
         os << "module " << sanitizeIdentifier(program_.function_name) << "(\n";
         for (std::size_t i = 0; i < program_.ports.size(); ++i) {
@@ -208,6 +301,7 @@ private:
             os << logicType(port.type) << sanitizeIdentifier(port.name)
                << unpackedDims(port.type);
             if (i + 1 < program_.ports.size()) os << ",";
+            os << debugComment(portDebug(port));
             os << "\n";
         }
         os << ");\n\n";
@@ -223,7 +317,11 @@ private:
                 os << constExpr(parseSmallConst(table.values[i], 32));
             }
             if (table.values.empty()) os << "32'h0";
-            os << "};\n";
+            beir::DebugInfo debug;
+            debug.origin = beir::DebugOrigin::Generated;
+            debug.reason = "localparam lookup table '" + table.name + "'";
+            debug.derived_names.push_back(table.name);
+            os << "};" << debugComment(debug) << "\n";
         }
         if (!program_.lookup_tables.empty()) os << "\n";
     }
@@ -237,7 +335,8 @@ private:
             int count = flattenedArraySize(aggregate.type);
             if (count <= 0) continue;
             os << "    " << logicType(element_type) << sanitizeIdentifier(aggregate.name)
-               << " [0:" << (count - 1) << "];\n";
+               << " [0:" << (count - 1) << "];"
+               << debugComment(aggregateDebug(aggregate)) << "\n";
         }
         if (!program_.aggregates.empty()) os << "\n";
     }
@@ -245,7 +344,8 @@ private:
     void emitSignalDecls(std::ostream& os) const {
         for (const auto& signal : program_.signals) {
             if (isScalarPortSignal(signal)) continue;
-            os << "    " << logicType(signal.type) << sanitizeIdentifier(signal.name) << ";\n";
+            os << "    " << logicType(signal.type) << sanitizeIdentifier(signal.name) << ";"
+               << debugComment(signalDebug(signal)) << "\n";
         }
         if (!program_.signals.empty()) os << "\n";
     }
@@ -257,14 +357,16 @@ private:
                     const auto& signal = program_.signal(port.element_nodes[i]);
                     if (isScalarPortSignal(signal)) continue;
                     os << "    assign " << sanitizeIdentifier(port.name) << "[" << i << "] = "
-                       << sig(signal.id) << ";\n";
+                       << sig(signal.id) << ";" << debugComment(signalDebug(signal)) << "\n";
                 }
                 continue;
             }
             if (port.type.is_array) {
                 for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
+                    const auto& signal = program_.signal(port.element_nodes[i]);
                     os << "    assign " << sig(port.element_nodes[i]) << " = "
-                       << sanitizeIdentifier(port.name) << "[" << i << "];\n";
+                       << sanitizeIdentifier(port.name) << "[" << i << "];"
+                       << debugComment(signalDebug(signal)) << "\n";
                 }
             }
         }
@@ -312,17 +414,24 @@ private:
             auto table_it = lookup_tables_by_name_.find(aggregate.name);
             for (int i = 0; i < count; ++i) {
                 std::size_t index = static_cast<std::size_t>(i);
+                beir::DebugInfo debug;
+                debug.origin = beir::DebugOrigin::Generated;
+                debug.reason = "connect aggregate element '" + aggregate.name + "[" +
+                    std::to_string(i) + "]'";
                 os << "    assign " << sanitizeIdentifier(aggregate.name) << "[" << i << "] = ";
                 if (table_it != lookup_tables_by_name_.end() &&
                     index < table_it->second->values.size() &&
                     !hasVersionedElement(aggregate.name, index)) {
                     os << constExpr(parseSmallConst(table_it->second->values[index],
                                                     widthOf(element_type)));
+                    debug.reason += " from lookup table initializer";
+                    debug.derived_names.push_back(aggregate.name);
                 } else {
                     NodeId id = latestElementNode(aggregate.name, index);
+                    debug = signalDebug(program_.signal(id));
                     os << sig(id);
                 }
-                os << ";\n";
+                os << ";" << debugComment(debug) << "\n";
             }
         }
         if (!program_.aggregates.empty()) os << "\n";
@@ -340,7 +449,8 @@ private:
                     continue;
                 }
                 os << "    assign " << sig(signal.id) << " = "
-                   << expr(*signal.driver) << ";\n";
+                   << expr(*signal.driver) << ";"
+                   << debugComment(signal.driver->debug) << "\n";
                 continue;
             }
 
@@ -348,12 +458,17 @@ private:
             if (endsWithNumber(signal.name, base)) {
                 auto it = name_to_node_.find(base);
                 if (it != name_to_node_.end()) {
-                    os << "    assign " << sig(signal.id) << " = " << sig(it->second) << ";\n";
+                    os << "    assign " << sig(signal.id) << " = " << sig(it->second) << ";"
+                       << debugComment(signalDebug(program_.signal(it->second))) << "\n";
                     continue;
                 }
             }
             if (!isScalarPortSignal(signal)) {
-                os << "    assign " << sig(signal.id) << " = " << zeroFor(signal.type) << ";\n";
+                beir::DebugInfo debug;
+                debug.origin = beir::DebugOrigin::Generated;
+                debug.reason = "default zero for undriven intermediate signal '" + signal.name + "'";
+                os << "    assign " << sig(signal.id) << " = " << zeroFor(signal.type) << ";"
+                   << debugComment(debug) << "\n";
             }
         }
     }

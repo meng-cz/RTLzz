@@ -81,6 +81,21 @@ enum class PortDirection {
     Unknown,
 };
 
+enum class DebugOrigin {
+    Source,
+    Generated,
+};
+
+struct DebugInfo {
+    DebugOrigin origin = DebugOrigin::Generated;
+    std::vector<DebugLoc> source_locs;
+    std::string reason;
+    std::vector<NodeId> derived_nodes;
+    std::vector<std::string> derived_names;
+
+    bool hasSourceLoc() const;
+};
+
 struct Operand {
     OperandKind kind = OperandKind::Symbol;
     NodeId node = kInvalidNodeId;
@@ -112,6 +127,7 @@ struct Operation {
     int bit = -1;
     int times = 0;
     std::vector<DebugLoc> source_locs;
+    DebugInfo debug;
 };
 
 struct Signal {
@@ -120,6 +136,7 @@ struct Signal {
     TypeInfo type;
     std::string port_name;
     int port_element_index = -1;
+    DebugInfo debug;
     std::optional<Operation> driver;
 };
 

@@ -8,8 +8,16 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace pred::beir {
+
+bool DebugInfo::hasSourceLoc() const {
+    for (const auto& loc : source_locs) {
+        if (loc.valid()) return true;
+    }
+    return false;
+}
 
 bool Operand::Constant::isZero() const {
     for (std::uint64_t limb : limbs) {
@@ -370,6 +378,63 @@ static const char* portDirectionText(PortDirection direction) {
     return "Unknown";
 }
 
+static const char* debugOriginText(DebugOrigin origin) {
+    switch (origin) {
+    case DebugOrigin::Source: return "source";
+    case DebugOrigin::Generated: return "generated";
+    }
+    return "generated";
+}
+
+static void addValidLoc(DebugInfo& debug, const DebugLoc& loc) {
+    if (loc.valid()) debug.source_locs.push_back(loc);
+}
+
+static void addValidLocs(DebugInfo& debug, const std::vector<DebugLoc>& locs) {
+    for (const auto& loc : locs) addValidLoc(debug, loc);
+}
+
+static DebugInfo sourceDebug(const std::vector<DebugLoc>& locs) {
+    DebugInfo debug;
+    debug.origin = DebugOrigin::Source;
+    debug.reason = "direct source construct";
+    addValidLocs(debug, locs);
+    return debug;
+}
+
+static DebugInfo sourceDebug(const std::vector<DebugLoc>& locs, std::string reason) {
+    DebugInfo debug;
+    debug.origin = DebugOrigin::Source;
+    debug.reason = std::move(reason);
+    addValidLocs(debug, locs);
+    return debug;
+}
+
+static DebugInfo sourceDebug(const DebugLoc& loc, std::string reason = "direct source construct") {
+    DebugInfo debug;
+    debug.origin = DebugOrigin::Source;
+    debug.reason = std::move(reason);
+    addValidLoc(debug, loc);
+    return debug;
+}
+
+static DebugInfo generatedDebug(std::string reason,
+                                const std::vector<Operand>& operands = {},
+                                const std::vector<DebugLoc>& locs = {}) {
+    DebugInfo debug;
+    debug.origin = DebugOrigin::Generated;
+    debug.reason = std::move(reason);
+    addValidLocs(debug, locs);
+    for (const auto& operand : operands) {
+        if (operand.kind == OperandKind::Symbol && operand.node != kInvalidNodeId) {
+            debug.derived_nodes.push_back(operand.node);
+        } else if (!operand.text.empty()) {
+            debug.derived_names.push_back(operand.text);
+        }
+    }
+    return debug;
+}
+
 static OperationKind operationKindForExpr(const ExprPtr& e) {
     switch (e->kind) {
     case ExprKind::BinaryOp: return OperationKind::Binary;
@@ -556,6 +621,9 @@ public:
             for (const auto& assignment : assignments) {
                 if (assignment.debug_loc.valid()) op.source_locs.push_back(assignment.debug_loc);
             }
+            op.debug = op.source_locs.empty()
+                ? generatedDebug("assignment merged during predication", op.operands)
+                : sourceDebug(op.source_locs);
             setDriver(target_name, std::move(op), false);
         }
 
@@ -569,6 +637,9 @@ public:
             if (output.expr && output.expr->debug_loc.valid()) {
                 op.source_locs.push_back(output.expr->debug_loc);
             }
+            op.debug = op.source_locs.empty()
+                ? generatedDebug("output expression assignment", op.operands)
+                : sourceDebug(op.source_locs, "output expression from source");
             setDriver(output.name, std::move(op), false);
         }
 
@@ -597,6 +668,7 @@ private:
             signal.id = id;
             signal.name = name;
             signal.type = std::move(type);
+            signal.debug = generatedDebug("signal allocated by BEIR builder");
             program_.signals.push_back(std::move(signal));
             return program_.signals.back();
         }
@@ -685,6 +757,9 @@ private:
                 if (port.element_nodes.size() > 1) {
                     op.operands.push_back(literalOperand(std::to_string(i), TypeInfo{"int", 32, true}));
                 }
+                op.debug = op.source_locs.empty()
+                    ? generatedDebug("read from input port '" + port.name + "'", op.operands)
+                    : sourceDebug(op.source_locs, "read from source parameter '" + port.name + "'");
                 setDriver(element.name, std::move(op), true);
             }
         }
@@ -726,7 +801,12 @@ private:
         }
 
         std::string temp_name = makeTempName(tempStemForExpr(expr));
-        ensureSignal(temp_name, expr->type);
+        Signal& temp_signal = ensureSignal(temp_name, expr->type);
+        NodeId temp_id = temp_signal.id;
+        temp_signal.debug.origin = DebugOrigin::Generated;
+        temp_signal.debug.reason = "temporary for " +
+            std::string(operationKindText(operationKindForExpr(expr)));
+        addValidLoc(temp_signal.debug, expr->debug_loc);
 
         Operation op;
         op.kind = operationKindForExpr(expr);
@@ -817,6 +897,11 @@ private:
             break;
         }
 
+        op.debug = generatedDebug("lowered " + std::string(operationKindText(op.kind)) +
+                                      " expression into temporary '" + temp_name + "'",
+                                  op.operands,
+                                  op.source_locs);
+        signalById(temp_id).debug = op.debug;
         setDriver(temp_name, std::move(op), false);
         return symbolOperand(temp_name, expr->type);
     }
@@ -891,6 +976,12 @@ private:
             if (allow_existing_same_kind && signal.driver->kind == op.kind) return;
             throw std::runtime_error("beir signal has more than one driver: " + signal_name);
         }
+        if (op.debug.reason.empty()) {
+            op.debug = op.source_locs.empty()
+                ? generatedDebug("driver for signal '" + signal_name + "'", op.operands)
+                : sourceDebug(op.source_locs);
+        }
+        signal.debug = op.debug;
         signal.driver = std::move(op);
     }
 
@@ -974,6 +1065,27 @@ static void emitLocs(std::ostream& os, const std::vector<DebugLoc>& locs) {
     os << "]";
 }
 
+static void emitDebugInfo(std::ostream& os, const DebugInfo& debug) {
+    os << " debug_origin=" << debugOriginText(debug.origin);
+    if (!debug.reason.empty()) os << " debug_reason=\"" << debug.reason << "\"";
+    if (!debug.derived_nodes.empty()) {
+        os << " derived_nodes=[";
+        for (std::size_t i = 0; i < debug.derived_nodes.size(); ++i) {
+            if (i) os << ", ";
+            os << "#" << debug.derived_nodes[i];
+        }
+        os << "]";
+    }
+    if (!debug.derived_names.empty()) {
+        os << " derived_names=[";
+        for (std::size_t i = 0; i < debug.derived_names.size(); ++i) {
+            if (i) os << ", ";
+            os << debug.derived_names[i];
+        }
+        os << "]";
+    }
+}
+
 static void emitOperand(std::ostream& os, const Program& program, const Operand& operand) {
     switch (operand.kind) {
     case OperandKind::Symbol:
@@ -1005,6 +1117,7 @@ static void emitOperation(std::ostream& os, const Program& program, const Operat
     if (op.bit >= 0) os << " bit=" << op.bit;
     if (op.times) os << " times=" << op.times;
     emitLocs(os, op.source_locs);
+    emitDebugInfo(os, op.debug);
     os << "\n";
     for (std::size_t i = 0; i < op.operands.size(); ++i) {
         os << prefix << "  operand" << i << " = ";
@@ -1061,6 +1174,7 @@ std::string emitText(const Program& program) {
         if (!signal.port_name.empty()) {
             os << " port=" << signal.port_name << "[" << signal.port_element_index << "]";
         }
+        emitDebugInfo(os, signal.debug);
         os << "\n";
         if (signal.driver) emitOperation(os, program, *signal.driver, "    ");
         else os << "    driver <none>\n";
