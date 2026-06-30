@@ -36,7 +36,8 @@ def sanitize_identifier(text: str) -> str:
     keywords = {
         "module", "endmodule", "input", "output", "inout", "logic", "wire",
         "assign", "always", "if", "else", "case", "endcase", "function",
-        "endfunction", "signed", "unsigned", "localparam",
+        "endfunction", "signed", "unsigned", "localparam", "bit", "byte",
+        "shortint", "int", "longint", "reg", "integer", "time", "local",
     }
     if out in keywords:
         out += "_"
@@ -45,6 +46,11 @@ def sanitize_identifier(text: str) -> str:
 
 def verilator_class_name(top: str) -> str:
     return "V" + sanitize_identifier(top)
+
+
+def verilator_member_name(name: str) -> str:
+    # Verilator escapes double underscores in public C++ member names.
+    return sanitize_identifier(name).replace("__", "___05F")
 
 
 def rtl_cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
@@ -83,9 +89,9 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
         for flat, element in enumerate(port["element_symbols"]):
             input_order.append(element)
             if is_array:
-                expr = f"top->{sanitize_identifier(port['name'])}[{flat}]"
+                expr = f"top->{verilator_member_name(port['name'])}[{flat}]"
             else:
-                expr = f"top->{sanitize_identifier(port['name'])}"
+                expr = f"top->{verilator_member_name(port['name'])}"
             lines.append("  " + rtl_cpp_assign_from_argv(expr, port["type"], arg_index))
             arg_index += 1
 
@@ -98,9 +104,9 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
         is_array = bool(port["type"].get("is_array"))
         for flat, element in enumerate(port["element_symbols"]):
             if is_array:
-                expr = f"top->{sanitize_identifier(port['name'])}[{flat}]"
+                expr = f"top->{verilator_member_name(port['name'])}[{flat}]"
             else:
-                expr = f"top->{sanitize_identifier(port['name'])}"
+                expr = f"top->{verilator_member_name(port['name'])}"
             lines.append(
                 f'  std::cout << "{element}=" << {rtl_cpp_value_expr(expr, port["type"])} << "\\n";'
             )

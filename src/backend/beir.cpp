@@ -1,4 +1,5 @@
 #include "backend/beir.hpp"
+#include "predicate/PredicateIR.h"
 
 #include <algorithm>
 #include <cctype>
@@ -108,13 +109,18 @@ static std::vector<std::string> sortedKeys(const Map& map) {
     return keys;
 }
 
-static int flattenedArraySize(const TypeInfo& type) {
+static int flattenedArraySize(const ValueType& type) {
     if (!type.array_dims.empty()) {
         int size = 1;
         for (int dim : type.array_dims) size *= dim;
         return size;
     }
-    return type.array_size;
+    return 0;
+}
+
+static ValueType scalarElementType(ValueType type) {
+    type.array_dims.clear();
+    return type;
 }
 
 static TypeInfo scalarElementType(TypeInfo type) {
@@ -129,12 +135,23 @@ static bool hasStructType(const TypeInfo& type) {
     return !type.struct_name.empty();
 }
 
-static TypeInfo beirType(TypeInfo type) {
+static ValueType beirType(const TypeInfo& type) {
     if (hasStructType(type)) {
         throw std::runtime_error("beir requires flattened scalar data, got struct type: " +
                                  type.struct_name);
     }
-    return type;
+    ValueType out;
+    out.width = type.width;
+    if (!type.array_dims.empty()) {
+        out.array_dims = type.array_dims;
+    } else if (type.is_array && type.array_size > 0) {
+        out.array_dims = {type.array_size};
+    }
+    return out;
+}
+
+static bool isSignedViewType(const TypeInfo& type) {
+    return type.hw_kind == "signed_view";
 }
 
 static bool isTrueGuard(const ExprPtr& expr) {
@@ -150,7 +167,7 @@ static ExprPtr defaultValueFor(const TypeInfo& type) {
     return make_literal("0", out_type);
 }
 
-static int constantWidthFor(const TypeInfo& type, const std::string& text) {
+static int constantWidthFor(const ValueType& type, const std::string& text) {
     if (type.width > 0) return type.width;
     if (text == "true" || text == "false") return 1;
     return 64;
@@ -211,10 +228,10 @@ static int digitValue(char ch) {
     return -1;
 }
 
-static Operand::Constant parseConstant(std::string text, const TypeInfo& type) {
+static Operand::Constant parseConstant(std::string text, const ValueType& type, bool signed_view) {
     Operand::Constant constant;
     constant.width = constantWidthFor(type, text);
-    constant.is_signed = type.is_signed;
+    constant.signed_view = signed_view;
     constant.limbs.assign(limbCountForWidth(constant.width), 0);
 
     if (text == "true" || text == "false") {
@@ -596,9 +613,8 @@ public:
             Operand target = flattenTarget(assign.target);
             if (!by_target.count(target.text)) target_order.push_back(target.text);
 
-            TypeInfo type = target.type.width ? target.type : assign.type;
+            TypeInfo type = assign.type;
             if (type.width <= 0 && assign.value) type = assign.value->type;
-            type = beirType(type);
             target_types[target.text] = type;
             by_target[target.text].push_back({
                 assign.guard ? assign.guard : make_true_guard(),
@@ -617,7 +633,7 @@ public:
             Operation op;
             op.kind = OperationKind::Assign;
             op.operands.push_back(std::move(rhs));
-            op.type = type;
+            op.type = beirType(type);
             for (const auto& assignment : assignments) {
                 if (assignment.debug_loc.valid()) op.source_locs.push_back(assignment.debug_loc);
             }
@@ -633,7 +649,7 @@ public:
             Operation op;
             op.kind = OperationKind::Assign;
             op.operands.push_back(std::move(rhs));
-            op.type = signal.type.width ? signal.type : output.type;
+            op.type = signal.type.width ? signal.type : beirType(output.type);
             if (output.expr && output.expr->debug_loc.valid()) {
                 op.source_locs.push_back(output.expr->debug_loc);
             }
@@ -655,9 +671,12 @@ private:
     NodeId next_node_id_ = 0;
     std::size_t next_temp_ = 0;
 
-    Signal& ensureSignal(const std::string& name, TypeInfo type) {
-        type = beirType(std::move(type));
-        if (type.is_array) {
+    Signal& ensureSignal(const std::string& name, const TypeInfo& type) {
+        return ensureSignal(name, beirType(type));
+    }
+
+    Signal& ensureSignal(const std::string& name, ValueType type) {
+        if (type.isArray()) {
             throw std::runtime_error("beir scalar signal cannot use array type: " + name);
         }
         auto it = signal_id_by_name_.find(name);
@@ -685,8 +704,8 @@ private:
         return program_.signal(id);
     }
 
-    Port& ensurePort(const std::string& name, PortDirection direction, TypeInfo type) {
-        type = beirType(std::move(type));
+    Port& ensurePort(const std::string& name, PortDirection direction, TypeInfo source_type) {
+        ValueType type = beirType(source_type);
         auto it = port_index_.find(name);
         if (it != port_index_.end()) return program_.ports[it->second];
 
@@ -697,8 +716,8 @@ private:
         port.direction = direction;
         port.type = type;
 
-        TypeInfo element_type = scalarElementType(type);
-        if (type.is_array) {
+        ValueType element_type = scalarElementType(type);
+        if (type.isArray()) {
             int count = flattenedArraySize(type);
             for (int i = 0; i < count; ++i) {
                 std::string element_name = name + "_" + std::to_string(i);
@@ -718,8 +737,8 @@ private:
         return program_.ports.back();
     }
 
-    Aggregate& ensureAggregate(const std::string& name, TypeInfo type) {
-        type = beirType(std::move(type));
+    Aggregate& ensureAggregate(const std::string& name, TypeInfo source_type) {
+        ValueType type = beirType(source_type);
         auto it = aggregate_index_.find(name);
         if (it != aggregate_index_.end()) return program_.aggregates[it->second];
 
@@ -729,7 +748,7 @@ private:
         aggregate.name = name;
         aggregate.type = type;
 
-        TypeInfo element_type = scalarElementType(type);
+        ValueType element_type = scalarElementType(type);
         int count = flattenedArraySize(type);
         for (int i = 0; i < count; ++i) {
             std::string element_name = name + "_" + std::to_string(i);
@@ -810,7 +829,7 @@ private:
 
         Operation op;
         op.kind = operationKindForExpr(expr);
-        op.type = expr->type;
+        op.type = beirType(expr->type);
         if (expr->debug_loc.valid()) op.source_locs.push_back(expr->debug_loc);
 
         switch (expr->kind) {
@@ -922,13 +941,14 @@ private:
     }
 
     Operand symbolOperand(const std::string& name, TypeInfo type) {
-        type = beirType(std::move(type));
+        bool signed_view = isSignedViewType(type);
         if (type.is_array || aggregate_index_.count(name)) {
             ensureAggregate(name, type);
             Operand operand;
             operand.kind = OperandKind::Aggregate;
             operand.text = name;
-            operand.type = std::move(type);
+            operand.type = beirType(type);
+            operand.signed_view = signed_view;
             return operand;
         }
 
@@ -938,35 +958,38 @@ private:
         operand.node = signal.id;
         operand.text = signal.name;
         operand.type = signal.type;
+        operand.signed_view = signed_view;
         return operand;
     }
 
     Operand literalOperand(std::string value, TypeInfo type) {
-        type = beirType(std::move(type));
+        bool signed_view = isSignedViewType(type);
+        ValueType storage_type = beirType(type);
         if (lookup_table_names_.count(value) || type.is_array) {
-            return lookupTableOperand(std::move(value), std::move(type));
+            return lookupTableOperand(std::move(value), storage_type);
         }
         Operand operand;
         operand.kind = OperandKind::Literal;
-        operand.constant = parseConstant(value, type);
+        operand.constant = parseConstant(value, storage_type, signed_view);
+        operand.text = std::move(value);
+        operand.type = std::move(storage_type);
+        operand.signed_view = signed_view;
+        return operand;
+    }
+
+    Operand lookupTableOperand(std::string value, ValueType type) {
+        Operand operand;
+        operand.kind = OperandKind::LookupTable;
         operand.text = std::move(value);
         operand.type = std::move(type);
         return operand;
     }
 
-    Operand lookupTableOperand(std::string value, TypeInfo type) {
-        Operand operand;
-        operand.kind = OperandKind::LookupTable;
-        operand.text = std::move(value);
-        operand.type = beirType(std::move(type));
-        return operand;
-    }
-
-    Operand portOperand(std::string value, TypeInfo type) {
+    Operand portOperand(std::string value, ValueType type) {
         Operand operand;
         operand.kind = OperandKind::Port;
         operand.text = std::move(value);
-        operand.type = beirType(std::move(type));
+        operand.type = std::move(type);
         return operand;
     }
 
@@ -985,12 +1008,9 @@ private:
         signal.driver = std::move(op);
     }
 
-    void mergeType(TypeInfo& existing, const TypeInfo& incoming) {
-        if (existing.name.empty()) existing.name = incoming.name;
+    void mergeType(ValueType& existing, const ValueType& incoming) {
         if (existing.width == 0) existing.width = incoming.width;
-        if (!existing.is_signed) existing.is_signed = incoming.is_signed;
-        if (!existing.is_hw_int) existing.is_hw_int = incoming.is_hw_int;
-        if (existing.hw_kind.empty()) existing.hw_kind = incoming.hw_kind;
+        if (existing.array_dims.empty()) existing.array_dims = incoming.array_dims;
     }
 
     std::string makeTempName(const std::string& stem) {
@@ -1002,21 +1022,18 @@ private:
     }
 };
 
-static std::string typeText(const TypeInfo& type) {
+static std::string typeText(const ValueType& type) {
     std::ostringstream os;
-    os << type.name;
-    if (type.width > 0) os << " width=" << type.width;
-    if (type.is_signed) os << " signed";
-    if (type.is_array) {
+    os << "bits";
+    if (type.width > 0) os << "<" << type.width << ">";
+    if (!type.array_dims.empty()) {
         os << " array[";
         for (std::size_t i = 0; i < type.array_dims.size(); ++i) {
             if (i) os << "x";
             os << type.array_dims[i];
         }
-        if (type.array_dims.empty()) os << type.array_size;
         os << "]";
     }
-    if (!type.hw_kind.empty()) os << " kind=" << type.hw_kind;
     return os.str();
 }
 
@@ -1042,8 +1059,9 @@ static void emitNodeList(std::ostream& os, const Program& program, const std::ve
 }
 
 static void emitConstant(std::ostream& os, const Operand::Constant& constant) {
-    os << "const(width=" << constant.width << ", signed="
-       << (constant.is_signed ? "true" : "false") << ", limbs=[";
+    os << "const(width=" << constant.width
+       << ", signed_view=" << (constant.signed_view ? "true" : "false")
+       << ", limbs=[";
     for (std::size_t i = 0; i < constant.limbs.size(); ++i) {
         if (i) os << ", ";
         os << constant.limbs[i];
@@ -1093,17 +1111,21 @@ static void emitOperand(std::ostream& os, const Program& program, const Operand&
         if (const Signal* signal = program.findSignal(operand.node)) {
             os << " " << signal->name;
         }
-        os << " : " << typeText(operand.type) << ")";
+        os << " : " << typeText(operand.type);
+        if (operand.signed_view) os << " signed_view";
+        os << ")";
         return;
     case OperandKind::Literal:
         emitConstant(os, operand.constant);
         os << " : " << typeText(operand.type);
+        if (operand.signed_view) os << " signed_view";
         return;
     case OperandKind::Port:
     case OperandKind::Aggregate:
     case OperandKind::LookupTable:
         os << operandKindText(operand.kind) << "(" << operand.text << " : "
            << typeText(operand.type) << ")";
+        if (operand.signed_view) os << " signed_view";
         return;
     }
 }

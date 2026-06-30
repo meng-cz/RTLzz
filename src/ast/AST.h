@@ -1,5 +1,7 @@
 #pragma once
 
+#include "debug/DebugLoc.h"
+
 #include <memory>
 #include <optional>
 #include <string>
@@ -8,19 +10,6 @@
 #include <vector>
 
 namespace pred {
-
-struct DebugLoc {
-    std::string file;
-    int line = 0;
-    int column = 0;
-    int end_line = 0;
-    int end_column = 0;
-
-    bool valid() const {
-        return !file.empty() || line > 0 || column > 0 ||
-               end_line > 0 || end_column > 0;
-    }
-};
 
 // --- Type representation ---
 

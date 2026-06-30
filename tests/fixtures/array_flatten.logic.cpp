@@ -1,6 +1,6 @@
 #include <array>
 #include <cstdint>
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void hls_main(std::array<Int<8>, 4> in, Int<8> idx, std::array<Int<8>, 4>& out, Int<8>& selected) {
     std::array<Int<8>, 4> tmp{0};
@@ -8,5 +8,5 @@ void hls_main(std::array<Int<8>, 4> in, Int<8> idx, std::array<Int<8>, 4>& out, 
         tmp[i] = in[i];
         out[i] = tmp[i];
     }
-    selected = tmp[idx(1, 0)];
+    selected = tmp[idx.at<1, 0>()];
 }

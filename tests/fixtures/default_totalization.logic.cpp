@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 struct __ReqHelper__output {
     bool& vld_ports;
@@ -8,7 +8,7 @@ struct __ReqHelper__output {
 
     void call(Int<8> value) {
         vld_ports = true;
-        arg_data(7, 0) = value;
+        arg_data.at<7, 0>() = value;
     }
 };
 

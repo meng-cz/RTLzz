@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 struct __RegProxy_uint8_t__sum {
     const Int<8>& rdata;
@@ -11,7 +11,7 @@ struct __RegProxy_uint8_t__sum {
     template <uint32_t P = 0>
     void setnext(Int<8> value) {
         Int<8> packed;
-        packed(7, 0) = value;
+        packed.at<7, 0>() = value;
         wdata = packed;
         wen = true;
     }

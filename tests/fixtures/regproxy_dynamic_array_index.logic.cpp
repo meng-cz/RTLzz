@@ -1,5 +1,5 @@
 #include <array>
-#include <uint.hpp>
+#include <fixint.hpp>
 
 struct __RegProxy_uint8_t__D4__regs {
     const std::array<Int<8>, 4>& rdata;

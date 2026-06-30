@@ -1,5 +1,5 @@
 #include <array>
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void hls_main(bool sel, Int<8> a, std::array<Int<8>, 2>& out) {
     Int<8> base = a;

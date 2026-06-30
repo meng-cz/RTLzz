@@ -1,5 +1,5 @@
 #include <cstdint>
-#include <uint.hpp>
+#include <fixint.hpp>
 
 struct __RegProxy_uint8_t__state {
     const Int<8>& rdata;
@@ -12,7 +12,7 @@ struct __RegProxy_uint8_t__state {
     template <uint32_t P = 0>
     void setnext(const uint8_t& value) {
         Int<8> packed;
-        packed(7, 0) = value;
+        packed.at<7, 0>() = value;
         wdata = packed;
         wen = true;
     }

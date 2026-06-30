@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void helper(const Int<8>& input, bool& valid, Int<8>& payload) {
     valid = true;

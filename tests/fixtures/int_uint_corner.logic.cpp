@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void hls_main(Int<8> a,
               Int<8> b,
@@ -26,10 +26,10 @@ void hls_main(Int<8> a,
     sext_out = Int<16>(a.sint());
 
     Int<8> tmp = a;
-    tmp(3, 0) = b(7, 4);
-    tmp(7) = true;
+    tmp.at<3, 0>() = b.at<7, 4>();
+    tmp.at<7>() = true;
     range_nested = tmp;
 
-    cat_mix = a.cat(Int<4>(b(3, 0)));
-    repeat_mix = a.repeat<2>();
+    cat_mix = Cat(a, Int<4>(b.at<3, 0>()));
+    repeat_mix = Repeat<2>(a);
 }

@@ -1,9 +1,10 @@
 #pragma once
 
 #include "ast/AST.h"
+
 #include <string>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 namespace pred {
 
@@ -13,7 +14,7 @@ struct GuardedAssign {
     ExprPtr guard;      // predicate condition (nullptr or literal "1" means always)
     ExprPtr target;     // LHS (variable, array element, struct field)
     ExprPtr value;      // RHS expression (may contain ite)
-    TypeInfo type;      // type of the assignment
+    TypeInfo type;      // type of the assignment before backend lowering
     DebugLoc debug_loc; // best source location for this assignment
 };
 
@@ -43,7 +44,8 @@ struct PredicateProgram {
     std::vector<std::string> outputs;
     std::vector<OutputExpression> output_expressions;
     std::vector<std::string> diagnostics;
-    // Symbol table: variable name -> type info
+    // Symbol table: variable name -> type info. This is still frontend-facing;
+    // backend IR converts it to width/shape-only types at the boundary.
     std::unordered_map<std::string, TypeInfo> symbols;
     std::unordered_map<std::string, std::string> param_directions;
     std::unordered_map<std::string, DebugLoc> param_debug_locs;

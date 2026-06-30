@@ -1,5 +1,5 @@
 #include <cstdint>
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void hls_main(uint8_t a,
               uint16_t b,

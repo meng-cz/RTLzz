@@ -1,9 +1,12 @@
 #pragma once
 
 #include "backend/beir.hpp"
-#include "predicate/PredicateIR.h"
 
 #include <string>
+
+namespace pred {
+struct PredicateProgram;
+}
 
 namespace pred::rtlgen {
 

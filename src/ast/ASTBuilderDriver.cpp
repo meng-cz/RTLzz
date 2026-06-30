@@ -1056,7 +1056,8 @@ static int typeWidthFromText(const std::string& text,
 static std::vector<int> staticRangeArgsFromType(CXType type) {
     std::string spelling = cxToStr(clang_getTypeSpelling(type));
     if (spelling.find("StaticRangeProxy") == std::string::npos &&
-        spelling.find("VULStaticSliceRef") == std::string::npos) {
+        spelling.find("VULStaticSliceRef") == std::string::npos &&
+        spelling.find("IntStaticRangeProxy") == std::string::npos) {
         return {};
     }
     auto lt = spelling.find('<');
@@ -1080,6 +1081,46 @@ static std::vector<int> staticRangeArgsFromType(CXType type) {
     }
     if (values.size() != 3) return {};
     return {values[1], values[2]};
+}
+
+static std::vector<int> templateIntArgsFromTokens(CXCursor cursor, const std::string& name) {
+    CXTranslationUnit tu = clang_Cursor_getTranslationUnit(cursor);
+    CXToken* tokens = nullptr;
+    unsigned numTokens = 0;
+    clang_tokenize(tu, clang_getCursorExtent(cursor), &tokens, &numTokens);
+    std::vector<int> values;
+    bool in_template = false;
+    bool saw_at = false;
+    for (unsigned i = 0; i < numTokens; ++i) {
+        std::string tok = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
+        if (!saw_at) {
+            saw_at = tok == name;
+            continue;
+        }
+        if (!in_template) {
+            if (tok == "<") {
+                in_template = true;
+            } else if (tok == "(") {
+                break;
+            }
+            continue;
+        }
+        if (tok == ">") break;
+        if (tok == "," || tok == "U" || tok == "u") continue;
+        if (!tok.empty() && std::all_of(tok.begin(), tok.end(), [](unsigned char c) {
+                return std::isdigit(c);
+            })) {
+            try {
+                values.push_back(std::stoi(tok, nullptr, 0));
+            } catch (...) {
+                values.clear();
+                break;
+            }
+        }
+    }
+    clang_disposeTokens(tu, tokens, numTokens);
+    if (!values.empty()) return values;
+    return {};
 }
 
 static ExprPtr makeVulConcatCall(const std::vector<ExprPtr>& args) {
@@ -1743,6 +1784,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 field != "setnext" && field != "call" && field != "cat" &&
                 field != "repeat" && field != "reduce_or" && field != "reduce_and" &&
                 field != "reduce_xor" && field != "range_at" && field != "bit_at" &&
+                field != "at" && field != "pick" &&
                 field != "sint" &&
                 field != "get" && field != "operator()" &&
                 field.rfind("operator", 0) != 0) {
@@ -2166,6 +2208,12 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             result->kind = ExprKind::Call;
             result->callee = "__slice";
             std::vector<int> range_args = vul_call.template_values;
+            if (range_args.empty()) {
+                range_args = templateIntArgsFromTokens(cursor, "at");
+            }
+            if (range_args.size() == 1) {
+                range_args.push_back(range_args.front());
+            }
             if (range_args.size() != 2) {
                 range_args = staticRangeArgsFromType(type);
             }
@@ -2307,16 +2355,28 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             }
             return make_array_access(base, idx, elem_type);
         }
-        if (vul_call.kind == VulCallKind::RangeAt || vul_call.kind == VulCallKind::BitAt ||
+        if (vul_call.kind == VulCallKind::Pick ||
+            vul_call.kind == VulCallKind::RangeAt || vul_call.kind == VulCallKind::BitAt ||
             spelling.find("range_at") != std::string::npos ||
             spelling.find("bit_at") != std::string::npos) {
             auto result = std::make_shared<Expr>();
             result->kind = ExprKind::Call;
             bool is_bit_at = vul_call.kind == VulCallKind::BitAt ||
+                (vul_call.kind == VulCallKind::Pick && !vul_call.template_value.has_value()) ||
                 spelling.find("bit_at") != std::string::npos;
             result->callee = is_bit_at ? "__dynamic_bit_at" : "__dynamic_range_at";
             result->intrinsic = is_bit_at ? IntrinsicKind::DynamicBitAt : IntrinsicKind::DynamicRangeAt;
             result->type = is_bit_at ? make_hw_type("bool", 1, false) : convertType(type);
+            if (vul_call.kind == VulCallKind::Pick && !vul_call.template_value.has_value()) {
+                auto pick_args = templateIntArgsFromTokens(cursor, "pick");
+                if (!pick_args.empty()) {
+                    vul_call.template_value = pick_args.front();
+                    is_bit_at = false;
+                    result->callee = "__dynamic_range_at";
+                    result->intrinsic = IntrinsicKind::DynamicRangeAt;
+                    result->type = convertType(type);
+                }
+            }
             if (!is_bit_at && vul_call.template_value.has_value()) {
                 result->to_width = *vul_call.template_value;
             }
@@ -2382,7 +2442,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
         if (vul_call.kind == VulCallKind::Cat && children.size() > 1) {
             std::vector<ExprPtr> args;
             size_t start = 1;
-            if (spelling == "Cat") start = children.size() > 0 ? 1 : 0;
+            if (spelling == "Cat" || vul_call.method_name == "Cat") start = 1;
             for (size_t i = start; i < children.size(); ++i) {
                 args.push_back(convertExpr(children[i]));
             }
@@ -2412,18 +2472,21 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             if (receiver && receiver->kind == ExprKind::FieldAccess && receiver->field_name == "reduce_or") {
                 return make_reduce(ExprKind::ReduceOr, receiver->struct_base);
             }
+            return make_reduce(ExprKind::ReduceOr, convertExpr(children.back()));
         }
         if (vul_call.kind == VulCallKind::ReduceAnd && !children.empty()) {
             auto receiver = convertExpr(children.front());
             if (receiver && receiver->kind == ExprKind::FieldAccess && receiver->field_name == "reduce_and") {
                 return make_reduce(ExprKind::ReduceAnd, receiver->struct_base);
             }
+            return make_reduce(ExprKind::ReduceAnd, convertExpr(children.back()));
         }
         if (vul_call.kind == VulCallKind::ReduceXor && !children.empty()) {
             auto receiver = convertExpr(children.front());
             if (receiver && receiver->kind == ExprKind::FieldAccess && receiver->field_name == "reduce_xor") {
                 return make_reduce(ExprKind::ReduceXor, receiver->struct_base);
             }
+            return make_reduce(ExprKind::ReduceXor, convertExpr(children.back()));
         }
         if (spelling.rfind("operator", 0) == 0) {
             std::string compact_text = compactText(text);

@@ -24,6 +24,7 @@ struct Operand {
     std::string kind = "symbol";
     std::string text;
     TypeInfo type;
+    bool signed_view = false;
 };
 
 struct Operation {
@@ -129,6 +130,20 @@ static TypeInfo scalarElementType(TypeInfo type) {
     type.is_array = false;
     type.array_size = 0;
     type.array_dims.clear();
+    return type;
+}
+
+static bool isSignedViewType(const TypeInfo& type) {
+    return type.hw_kind == "signed_view";
+}
+
+static TypeInfo storageType(TypeInfo type) {
+    if (type.hw_kind == "signed_view") {
+        type.hw_kind = "Int";
+        type.name = type.width > 0 ? "Int<" + std::to_string(type.width) + ">" : "Int";
+        type.is_signed = false;
+        type.is_hw_int = true;
+    }
     return type;
 }
 
@@ -323,7 +338,7 @@ public:
             Operation op;
             op.kind = "assign";
             op.operands.push_back(std::move(rhs));
-            op.type = signal.type.width ? signal.type : output.type;
+            op.type = signal.type.width ? signal.type : storageType(output.type);
             if (output.expr && output.expr->debug_loc.valid()) {
                 op.source_locs.push_back(output.expr->debug_loc);
             }
@@ -338,6 +353,7 @@ private:
     std::size_t next_temp_ = 0;
 
     Signal& ensureSignal(const std::string& name, TypeInfo type) {
+        type = storageType(std::move(type));
         if (type.is_array) {
             throw std::runtime_error("listjson scalar signal cannot use array type: " + name);
         }
@@ -357,6 +373,7 @@ private:
     }
 
     Port& ensurePort(const std::string& name, const std::string& direction, TypeInfo type) {
+        type = storageType(std::move(type));
         auto it = program_.port_index.find(name);
         if (it != program_.port_index.end()) return program_.ports[it->second];
 
@@ -464,7 +481,7 @@ private:
 
         Operation op;
         op.kind = exprKindName(expr);
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         if (expr->debug_loc.valid()) op.source_locs.push_back(expr->debug_loc);
 
         switch (expr->kind) {
@@ -573,12 +590,15 @@ private:
     }
 
     Operand symbolOperand(const std::string& name, TypeInfo type) {
+        bool signed_view = isSignedViewType(type);
+        type = storageType(std::move(type));
         if (type.is_array || program_.aggregate_index.count(name)) {
             ensureAggregate(name, type);
             Operand operand;
             operand.kind = "aggregate";
             operand.text = name;
             operand.type = std::move(type);
+            operand.signed_view = signed_view;
             return operand;
         }
 
@@ -587,14 +607,17 @@ private:
         operand.kind = "symbol";
         operand.text = signal.name;
         operand.type = signal.type;
+        operand.signed_view = signed_view;
         return operand;
     }
 
     Operand literalOperand(std::string value, TypeInfo type) {
+        bool signed_view = isSignedViewType(type);
         Operand operand;
         operand.kind = "literal";
         operand.text = std::move(value);
-        operand.type = std::move(type);
+        operand.type = storageType(std::move(type));
+        operand.signed_view = signed_view;
         return operand;
     }
 
@@ -664,6 +687,8 @@ static void emitOperand(std::ostream& os, const Operand& operand, int indent) {
     os << "{\n";
     os << ind(indent + 1) << "\"kind\": \"" << jsonEscape(operand.kind) << "\",\n";
     os << ind(indent + 1) << "\"text\": \"" << jsonEscape(operand.text) << "\",\n";
+    os << ind(indent + 1) << "\"signed_view\": "
+       << (operand.signed_view ? "true" : "false") << ",\n";
     os << ind(indent + 1) << "\"type\": ";
     emitType(os, operand.type);
     os << "\n" << ind(indent) << "}";

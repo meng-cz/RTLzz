@@ -1,5 +1,5 @@
 #include <cstdint>
-#include <uint.hpp>
+#include <fixint.hpp>
 
 struct __ReqHelper__output {
     bool& vld_ports;
@@ -9,7 +9,7 @@ struct __ReqHelper__output {
 
     void call(uint8_t value) {
         vld_ports = true;
-        arg_s(7, 0) = value;
+        arg_s.at<7, 0>() = value;
     }
 };
 

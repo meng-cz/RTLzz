@@ -59,7 +59,11 @@ def type_width(t: dict[str, Any]) -> int:
 
 
 def type_signed(t: dict[str, Any]) -> bool:
-    return bool(t.get("signed"))
+    return t.get("hw_kind", "") == "builtin" and bool(t.get("signed"))
+
+
+def operand_signed(op: dict[str, Any]) -> bool:
+    return bool(op.get("signed_view")) or type_signed(op.get("type", {}))
 
 
 def type_mask(t: dict[str, Any]) -> int:
@@ -132,7 +136,7 @@ class ListJsonEvaluator:
         if kind == "binary":
             a, b = int(ops[0]), int(ops[1])
             op = driver.get("op", "")
-            signed = any(type_signed(o["type"]) for o in driver["operands"][:2])
+            signed = any(operand_signed(o) for o in driver["operands"][:2])
             sa = to_signed(a, type_width(driver["operands"][0]["type"]))
             sb = to_signed(b, type_width(driver["operands"][1]["type"]))
             if op == "+": return (a + b) & out_mask
@@ -152,7 +156,9 @@ class ListJsonEvaluator:
             if op == ">": return 1 if (sa > sb if signed else a > b) else 0
             if op == ">=": return 1 if (sa >= sb if signed else a >= b) else 0
             if op == "<<": return (a << b) & out_mask
-            if op == ">>": return ((sa >> b) if type_signed(driver["operands"][0]["type"]) else (a >> b)) & out_mask
+            if op == ">>":
+                arithmetic = operand_signed(driver["operands"][0])
+                return ((sa >> b) if arithmetic else (a >> b)) & out_mask
             raise RuntimeError(f"unsupported binary op: {op}")
         if kind == "unary":
             a = int(ops[0])
@@ -352,6 +358,42 @@ def extract_top_param_order(source: Path, top: str, known_ports: set[str]) -> li
     return order
 
 
+def extract_top_pointer_params(source: Path, top: str, known_ports: set[str]) -> set[str]:
+    text = source.read_text()
+    match = re.search(rf"\b{re.escape(top)}\s*\(", text)
+    if not match:
+        return set()
+
+    open_paren = text.find("(", match.start())
+    depth = 0
+    close_paren = -1
+    for i in range(open_paren, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                close_paren = i
+                break
+    if close_paren < 0:
+        return set()
+
+    pointers: set[str] = set()
+    for param in split_cpp_params(text[open_paren + 1:close_paren]):
+        if param == "void":
+            continue
+        param = param.split("=", 1)[0].strip()
+        ids = re.findall(r"[A-Za-z_]\w*", param)
+        if not ids:
+            continue
+        name = ids[-1]
+        if name in known_ports:
+            before_name = param.rsplit(name, 1)[0]
+            if "*" in before_name:
+                pointers.add(name)
+    return pointers
+
+
 def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path) -> list[str]:
     input_elements: list[tuple[str, dict[str, Any]]] = []
     output_elements: list[tuple[str, dict[str, Any]]] = []
@@ -396,10 +438,13 @@ def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path
 
     port_names = {port["name"] for port in program["ports"]}
     param_order = extract_top_param_order(source, top, port_names)
+    pointer_params = extract_top_pointer_params(source, top, port_names)
     if param_order and set(param_order) == port_names and len(param_order) == len(port_names):
-        call_args = ", ".join(param_order)
+        call_args = ", ".join(("&" + name) if name in pointer_params else name
+                              for name in param_order)
     else:
-        call_args = ", ".join(port["name"] for port in program["ports"])
+        call_args = ", ".join(("&" + port["name"]) if port["name"] in pointer_params else port["name"]
+                              for port in program["ports"])
     lines.append(f"  {top}({call_args});")
 
     for port in program["ports"]:

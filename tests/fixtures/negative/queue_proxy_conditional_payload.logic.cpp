@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 struct QueueProxy_q__ {
     bool& q__enqvalid__;

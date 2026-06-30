@@ -151,16 +151,17 @@ VulCallInfo recognizeVulCall(CXCursor cursor,
     else if (isExactName(name, "call")) out.kind = VulCallKind::ReqHelperCall;
     else if (isExactName(name, "output")) out.kind = VulCallKind::Output;
     else if (isExactName(name, "cat") || isExactName(name, "concat") || isExactName(name, "Cat")) out.kind = VulCallKind::Cat;
-    else if (isExactName(name, "repeat")) out.kind = VulCallKind::Repeat;
-    else if (isExactName(name, "reduce_or")) out.kind = VulCallKind::ReduceOr;
-    else if (isExactName(name, "reduce_and")) out.kind = VulCallKind::ReduceAnd;
-    else if (isExactName(name, "reduce_xor")) out.kind = VulCallKind::ReduceXor;
+    else if (isExactName(name, "repeat") || isExactName(name, "Repeat")) out.kind = VulCallKind::Repeat;
+    else if (isExactName(name, "reduce_or") || isExactName(name, "ReduceOr")) out.kind = VulCallKind::ReduceOr;
+    else if (isExactName(name, "reduce_and") || isExactName(name, "ReduceAnd")) out.kind = VulCallKind::ReduceAnd;
+    else if (isExactName(name, "reduce_xor") || isExactName(name, "ReduceXor")) out.kind = VulCallKind::ReduceXor;
     else if (isExactName(name, "zext")) out.kind = VulCallKind::ZExt;
     else if (isExactName(name, "trunc")) out.kind = VulCallKind::Trunc;
     else if (isExactName(name, "get")) out.kind = VulCallKind::RegProxyGet;
     else if (isExactName(name, "sint")) out.kind = VulCallKind::SignedView;
     else if (isExactName(name, "operator()")) out.kind = VulCallKind::OperatorCall;
     else if (isExactName(name, "at")) out.kind = VulCallKind::At;
+    else if (isExactName(name, "pick")) out.kind = VulCallKind::Pick;
     else if (isExactName(name, "range_at")) out.kind = VulCallKind::RangeAt;
     else if (isExactName(name, "bit_at")) out.kind = VulCallKind::BitAt;
     const bool needs_template_args =
@@ -170,6 +171,7 @@ VulCallInfo recognizeVulCall(CXCursor cursor,
         out.kind == VulCallKind::ZExt ||
         out.kind == VulCallKind::Trunc ||
         out.kind == VulCallKind::At ||
+        out.kind == VulCallKind::Pick ||
         out.kind == VulCallKind::RangeAt;
     if (needs_template_args) {
         appendTemplateIntsFromReferences(cursor, out.template_values);

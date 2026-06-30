@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void hls_main(Int<8> a, Int<8>& out) {
     const Int<8> local_const = Int<8>(3);

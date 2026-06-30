@@ -1,5 +1,5 @@
 #include <array>
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void choose_pair(bool sel, Int<8>& x, Int<8>& y) {
     if (sel) {

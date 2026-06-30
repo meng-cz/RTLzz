@@ -1,4 +1,5 @@
 #include "backend/rtlgen.hpp"
+#include "predicate/PredicateIR.h"
 
 #include <algorithm>
 #include <cctype>
@@ -14,22 +15,21 @@ namespace {
 
 using pred::beir::NodeId;
 
-static int widthOf(const TypeInfo& type) {
+static int widthOf(const beir::ValueType& type) {
     return type.width > 0 ? type.width : 1;
 }
 
-static int flattenedArraySize(const TypeInfo& type) {
+static int flattenedArraySize(const beir::ValueType& type) {
     if (!type.array_dims.empty()) {
         int size = 1;
         for (int dim : type.array_dims) size *= dim;
         return size;
     }
-    return type.array_size > 0 ? type.array_size : 0;
+    return 0;
 }
 
-static std::vector<int> arrayDims(const TypeInfo& type) {
+static std::vector<int> arrayDims(const beir::ValueType& type) {
     if (!type.array_dims.empty()) return type.array_dims;
-    if (type.array_size > 0) return {type.array_size};
     return {};
 }
 
@@ -46,23 +46,20 @@ static std::string sanitizeIdentifier(const std::string& text) {
     static const std::unordered_set<std::string> keywords = {
         "module", "endmodule", "input", "output", "inout", "logic", "wire",
         "assign", "always", "if", "else", "case", "endcase", "function",
-        "endfunction", "signed", "unsigned", "localparam"
+        "endfunction", "signed", "unsigned", "localparam", "bit", "byte",
+        "shortint", "int", "longint", "reg", "integer", "time", "local"
     };
     if (keywords.count(out)) out += "_";
     return out;
 }
 
-static std::string packedRange(const TypeInfo& type) {
+static std::string packedRange(const beir::ValueType& type) {
     int width = widthOf(type);
     if (width <= 1) return "";
     return "[" + std::to_string(width - 1) + ":0] ";
 }
 
-static std::string signedText(const TypeInfo& type) {
-    return type.is_signed ? "signed " : "";
-}
-
-static std::string unpackedDims(const TypeInfo& type) {
+static std::string unpackedDims(const beir::ValueType& type) {
     std::ostringstream os;
     for (int dim : arrayDims(type)) {
         os << " [0:" << (dim - 1) << "]";
@@ -70,8 +67,8 @@ static std::string unpackedDims(const TypeInfo& type) {
     return os.str();
 }
 
-static std::string logicType(const TypeInfo& type) {
-    return "logic " + signedText(type) + packedRange(type);
+static std::string logicType(const beir::ValueType& type) {
+    return "logic " + packedRange(type);
 }
 
 static std::string constExpr(const beir::Operand::Constant& constant) {
@@ -112,7 +109,7 @@ static beir::Operand::Constant parseSmallConst(const std::string& text, int widt
     return constant;
 }
 
-static std::string zeroFor(const TypeInfo& type) {
+static std::string zeroFor(const beir::ValueType& type) {
     return std::to_string(widthOf(type)) + "'h0";
 }
 
@@ -328,9 +325,7 @@ private:
 
     void emitAggregateArrays(std::ostream& os) const {
         for (const auto& aggregate : program_.aggregates) {
-            TypeInfo element_type = aggregate.type;
-            element_type.is_array = false;
-            element_type.array_size = 0;
+            beir::ValueType element_type = aggregate.type;
             element_type.array_dims.clear();
             int count = flattenedArraySize(aggregate.type);
             if (count <= 0) continue;
@@ -361,7 +356,7 @@ private:
                 }
                 continue;
             }
-            if (port.type.is_array) {
+            if (port.type.isArray()) {
                 for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
                     const auto& signal = program_.signal(port.element_nodes[i]);
                     os << "    assign " << sig(port.element_nodes[i]) << " = "
@@ -407,9 +402,7 @@ private:
     void emitAggregateConnections(std::ostream& os) const {
         for (const auto& aggregate : program_.aggregates) {
             int count = flattenedArraySize(aggregate.type);
-            TypeInfo element_type = aggregate.type;
-            element_type.is_array = false;
-            element_type.array_size = 0;
+            beir::ValueType element_type = aggregate.type;
             element_type.array_dims.clear();
             auto table_it = lookup_tables_by_name_.find(aggregate.name);
             for (int i = 0; i < count; ++i) {
@@ -500,6 +493,14 @@ private:
         return "({" + std::to_string(pad) + "'h0, " + value + "})";
     }
 
+    std::string binaryOperand(const beir::Operand& op, bool signed_context) const {
+        std::string value = operand(op);
+        bool operand_is_signed = op.signed_view ||
+                                 op.constant.signed_view;
+        if (signed_context && operand_is_signed) return "$signed(" + value + ")";
+        return value;
+    }
+
     std::string expr(const beir::Operation& op) const {
         const auto& ops = op.operands;
         auto need = [&](std::size_t count) {
@@ -516,7 +517,18 @@ private:
             return operand(ops[0]) + "[" + operand(ops[1]) + "]";
         case beir::OperationKind::Binary:
             need(2);
-            return "(" + operand(ops[0]) + " " + svBinaryOp(op.op) + " " + operand(ops[1]) + ")";
+            {
+                bool signed_context =
+                    ops[0].signed_view || ops[1].signed_view ||
+                    ops[0].constant.signed_view || ops[1].constant.signed_view;
+                if (op.op == beir::OpCode::Shr) {
+                    signed_context = ops[0].signed_view || ops[0].constant.signed_view;
+                }
+                std::string sv_op = svBinaryOp(op.op);
+                if (op.op == beir::OpCode::Shr && signed_context) sv_op = ">>>";
+                return "(" + binaryOperand(ops[0], signed_context) + " " + sv_op + " " +
+                       binaryOperand(ops[1], signed_context) + ")";
+            }
         case beir::OperationKind::Unary:
             need(1);
             if (op.op == beir::OpCode::LogicNot) return "(!" + operand(ops[0]) + ")";
@@ -533,7 +545,11 @@ private:
             return resizeExpr(operand(ops[0]), widthOf(ops[0].type), widthOf(op.type), true);
         case beir::OperationKind::Ite:
             need(3);
-            return "(" + operand(ops[0]) + " ? " + operand(ops[1]) + " : " + operand(ops[2]) + ")";
+            return "(" + operand(ops[0]) + " ? " +
+                   resizeExpr(operand(ops[1]), widthOf(ops[1].type), widthOf(op.type), false) +
+                   " : " +
+                   resizeExpr(operand(ops[2]), widthOf(ops[2].type), widthOf(op.type), false) +
+                   ")";
         case beir::OperationKind::Slice:
             need(1);
             return "(" + operand(ops[0]) + "[" + std::to_string(op.hi) + ":" +
@@ -551,7 +567,7 @@ private:
                                   op.bit, 1, widthOf(ops[1].type));
         case beir::OperationKind::DynamicBitSelect:
             need(2);
-            return "((" + operand(ops[0]) + " >> " + operand(ops[1]) + ") & 1'b1)";
+            return "1'(" + operand(ops[0]) + " >> " + operand(ops[1]) + ")";
         case beir::OperationKind::DynamicSlice:
             need(2);
             return "(" + operand(ops[0]) + " >> " + operand(ops[1]) + ")";
@@ -580,7 +596,7 @@ private:
         case beir::OperationKind::Lookup:
         case beir::OperationKind::ArrayAccess:
             need(2);
-            return operand(ops[0]) + "[" + operand(ops[1]) + "]";
+            return operand(ops[0]) + "[" + arrayIndexExpr(ops[0], ops[1]) + "]";
         case beir::OperationKind::Call:
             throw std::runtime_error("rtlgen cannot lower call operation");
         }
@@ -596,6 +612,34 @@ private:
         }
         os << "}";
         return os.str();
+    }
+
+    static int indexWidthForCount(std::size_t count) {
+        if (count <= 1) return 1;
+        int width = 0;
+        std::size_t value = count - 1;
+        while (value) {
+            ++width;
+            value >>= 1;
+        }
+        return std::max(width, 1);
+    }
+
+    std::string arrayIndexExpr(const beir::Operand& array_op, const beir::Operand& index_op) const {
+        std::size_t count = static_cast<std::size_t>(flattenedArraySize(array_op.type));
+        if (count == 0 && array_op.kind == beir::OperandKind::LookupTable) {
+            auto it = lookup_tables_by_name_.find(array_op.text);
+            if (it != lookup_tables_by_name_.end()) count = it->second->values.size();
+        } else if (count == 0 && array_op.kind == beir::OperandKind::Aggregate) {
+            auto it = aggregates_by_name_.find(array_op.text);
+            if (it != aggregates_by_name_.end()) {
+                count = static_cast<std::size_t>(flattenedArraySize(it->second->type));
+            }
+        }
+        if (count == 0) return operand(index_op);
+        int index_width = indexWidthForCount(count);
+        if (widthOf(index_op.type) == index_width) return operand(index_op);
+        return std::to_string(index_width) + "'(" + operand(index_op) + ")";
     }
 
     std::string maskConst(int base_width, int write_width) const {

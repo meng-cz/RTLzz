@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void hls_main(Int<8> a, Int<16> b, bool sel, Int<17>& out, bool& cmp) {
     Int<8> narrowed = b;

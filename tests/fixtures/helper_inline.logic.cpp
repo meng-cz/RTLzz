@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 Int<8> choose(bool sel, Int<8> a, Int<8> b) {
     Int<8> base = sel ? a : b;

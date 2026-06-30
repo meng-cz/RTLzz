@@ -1,4 +1,4 @@
-#include <uint.hpp>
+#include <fixint.hpp>
 
 void hls_main(Int<8> a, uint8_t mode, bool s0, bool s1, Int<8>& out) {
     Int<8> acc = Int<8>(0);

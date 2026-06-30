@@ -1,12 +1,15 @@
 #pragma once
 
-#include "ast/AST.h"
-#include "predicate/PredicateIR.h"
+#include "debug/DebugLoc.h"
 
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
+
+namespace pred {
+struct PredicateProgram;
+}
 
 namespace pred::beir {
 
@@ -96,6 +99,13 @@ struct DebugInfo {
     bool hasSourceLoc() const;
 };
 
+struct ValueType {
+    int width = 0;
+    std::vector<int> array_dims;
+
+    bool isArray() const { return !array_dims.empty(); }
+};
+
 struct Operand {
     OperandKind kind = OperandKind::Symbol;
     NodeId node = kInvalidNodeId;
@@ -103,7 +113,7 @@ struct Operand {
     struct Constant {
         std::vector<std::uint64_t> limbs;
         int width = 0;
-        bool is_signed = false;
+        bool signed_view = false;
 
         bool isZero() const;
         bool isOne() const;
@@ -113,14 +123,15 @@ struct Operand {
         bool fitsU64() const;
         std::uint64_t toU64() const;
     } constant;
-    TypeInfo type;
+    ValueType type;
+    bool signed_view = false;
 };
 
 struct Operation {
     OperationKind kind = OperationKind::Assign;
     OpCode op = OpCode::None;
     std::vector<Operand> operands;
-    TypeInfo type;
+    ValueType type;
     int to_width = 0;
     int hi = -1;
     int lo = -1;
@@ -133,7 +144,7 @@ struct Operation {
 struct Signal {
     NodeId id = kInvalidNodeId;
     std::string name;
-    TypeInfo type;
+    ValueType type;
     std::string port_name;
     int port_element_index = -1;
     DebugInfo debug;
@@ -143,13 +154,13 @@ struct Signal {
 struct Port {
     std::string name;
     PortDirection direction = PortDirection::Unknown;
-    TypeInfo type;
+    ValueType type;
     std::vector<NodeId> element_nodes;
 };
 
 struct Aggregate {
     std::string name;
-    TypeInfo type;
+    ValueType type;
     std::vector<NodeId> element_nodes;
 };
 

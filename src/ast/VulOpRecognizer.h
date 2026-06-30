@@ -23,6 +23,7 @@ enum class VulCallKind {
     SignedView,
     OperatorCall,
     At,
+    Pick,
     RangeAt,
     BitAt,
 };
