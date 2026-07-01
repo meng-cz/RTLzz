@@ -394,7 +394,7 @@ ExprPtr controlExprForOutput(const PredicateProgram& program,
 
     auto dir_it = program.param_directions.find(control_name);
     if (dir_it != program.param_directions.end() &&
-        (dir_it->second == "Input" || dir_it->second == "InOut")) {
+        dir_it->second == "Input") {
         return make_var(control_name + "_0", control_type);
     }
     return make_var(control_name, control_type);
@@ -842,17 +842,6 @@ void buildOutputExpressionMap(PredicateProgram& program) {
                 disabled_data_totalized = true;
             }
         }
-        const bool preserves_incoming_value =
-            exprContainsVar(expr, output_name + "_0");
-        auto direction_it = program.param_directions.find(output_name);
-        if (preserves_incoming_value &&
-            direction_it != program.param_directions.end() &&
-            direction_it->second == "Output" &&
-            semanticReasonFor(program, output_name).empty()) {
-            direction_it->second = "InOut";
-            program.diagnostics.push_back(
-                "partial_mutable_reference_promoted_to_inout: " + output_name);
-        }
         bool has_undefined_phi =
             exprContainsVarPrefix(expr, "__undefined_phi_");
         bool fully_covered = guard_coverage.count(source_name) && isTrueGuard(guard_coverage[source_name]);
@@ -917,9 +906,8 @@ void buildOutputExpressionMap(PredicateProgram& program) {
     if (program.inputs.empty()) {
         if (!program.param_directions.empty()) {
             for (const auto& item : program.param_directions) {
-                if (item.second == "InOut" ||
-                    (item.second == "Input" &&
-                     !containsName(program.outputs, item.first))) {
+                if (item.second == "Input" &&
+                    !containsName(program.outputs, item.first)) {
                     program.inputs.push_back(item.first);
                 }
             }

@@ -571,6 +571,11 @@ public:
     Program build(const PredicateProgram& source) {
         program_.function_name = source.function_name;
         program_.outputs = source.outputs;
+        for (const auto& [name, direction] : source.param_directions) {
+            if (parsePortDirection(direction) == PortDirection::InOut) {
+                throw std::runtime_error("beir rejects InOut port direction: " + name);
+            }
+        }
         for (const auto& name : sortedKeys(source.lookup_tables)) {
             lookup_table_names_.insert(name);
             LookupTable table;

@@ -300,7 +300,8 @@ static TypeInfo builtinIntegerPromotion(const TypeInfo& type) {
 
 static ParamPassingKind classifyParamPassing(CXType type) {
     if (type.kind == CXType_Pointer) return ParamPassingKind::Pointer;
-    if (type.kind == CXType_LValueReference || type.kind == CXType_RValueReference) {
+    if (type.kind == CXType_RValueReference) return ParamPassingKind::RValueRef;
+    if (type.kind == CXType_LValueReference) {
         CXType pointee = clang_getPointeeType(type);
         return clang_isConstQualifiedType(pointee)
             ? ParamPassingKind::ConstRef
@@ -386,6 +387,7 @@ static constexpr bool allowUnsafeTextFallback = false;
 static std::unordered_map<std::string, std::string> lambda_operator_usr_to_name;
 static std::unordered_map<std::string, std::string> lambda_operator_location_to_name;
 static std::unordered_map<std::string, std::string> lambda_operator_signature_to_name;
+static std::unordered_map<std::string, long long> global_const_int_values;
 
 static std::string cursorText(CXCursor cursor, bool allow_large = false) { // UNSAFE_TEXT_FALLBACK_ALLOW: disabled helper only, guarded by allowUnsafeTextFallback=false
     CXSourceRange range = clang_getCursorExtent(cursor);
@@ -624,6 +626,58 @@ static int templateArgInt(CXCursor cursor, int index = 0, int fallback = -1) {
     long long value = clang_Cursor_getTemplateArgumentValue(cursor, index);
     if (value < 0 || value > static_cast<long long>(std::numeric_limits<int>::max())) return fallback;
     return static_cast<int>(value);
+}
+
+static std::optional<long long> parseIntegerToken(const std::string& tok) {
+    if (tok.empty()) return std::nullopt;
+    std::string value = tok;
+    while (!value.empty()) {
+        char ch = value.back();
+        if (ch == 'u' || ch == 'U' || ch == 'l' || ch == 'L') value.pop_back();
+        else break;
+    }
+    if (value.empty()) return std::nullopt;
+    try {
+        std::size_t pos = 0;
+        long long parsed = std::stoll(value, &pos, 0);
+        if (pos == value.size()) return parsed;
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+
+static std::optional<int> evalTemplateIntTokens(const std::vector<std::string>& tokens) {
+    long long result = 0;
+    int sign = 1;
+    bool saw_value = false;
+    bool expect_value = true;
+    for (const auto& tok : tokens) {
+        if (tok == "+" || tok == "-") {
+            if (expect_value && tok == "-") {
+                sign *= -1;
+            } else {
+                sign = tok == "-" ? -1 : 1;
+                expect_value = true;
+            }
+            continue;
+        }
+        if (tok == "U" || tok == "u" || tok == "L" || tok == "l") continue;
+        std::optional<long long> value = parseIntegerToken(tok);
+        if (!value) {
+            auto it = global_const_int_values.find(tok);
+            if (it != global_const_int_values.end()) value = it->second;
+        }
+        if (!value) return std::nullopt;
+        result += sign * *value;
+        sign = 1;
+        saw_value = true;
+        expect_value = false;
+    }
+    if (!saw_value || result < 0 ||
+        result > static_cast<long long>(std::numeric_limits<int>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<int>(result);
 }
 
 static std::string simpleMemberGetReceiver(CXCursor cursor) {
@@ -1148,8 +1202,18 @@ static std::vector<int> templateIntArgsFromTokens(CXCursor cursor, const std::st
     unsigned numTokens = 0;
     clang_tokenize(tu, clang_getCursorExtent(cursor), &tokens, &numTokens);
     std::vector<int> values;
+    std::vector<std::string> current_arg;
     bool in_template = false;
     bool saw_at = false;
+    int nested_angle = 0;
+    auto flush_arg = [&]() -> bool {
+        if (current_arg.empty()) return true;
+        auto value = evalTemplateIntTokens(current_arg);
+        current_arg.clear();
+        if (!value) return false;
+        values.push_back(*value);
+        return true;
+    };
     for (unsigned i = 0; i < numTokens; ++i) {
         std::string tok = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
         if (!saw_at) {
@@ -1164,18 +1228,28 @@ static std::vector<int> templateIntArgsFromTokens(CXCursor cursor, const std::st
             }
             continue;
         }
-        if (tok == ">") break;
-        if (tok == "," || tok == "U" || tok == "u") continue;
-        if (!tok.empty() && std::all_of(tok.begin(), tok.end(), [](unsigned char c) {
-                return std::isdigit(c);
-            })) {
-            try {
-                values.push_back(std::stoi(tok, nullptr, 0));
-            } catch (...) {
+        if (tok == "<") {
+            ++nested_angle;
+            current_arg.push_back(tok);
+            continue;
+        }
+        if (tok == ">" && nested_angle > 0) {
+            --nested_angle;
+            current_arg.push_back(tok);
+            continue;
+        }
+        if (tok == ">" && nested_angle == 0) {
+            if (!flush_arg()) values.clear();
+            break;
+        }
+        if (tok == "," && nested_angle == 0) {
+            if (!flush_arg()) {
                 values.clear();
                 break;
             }
+            continue;
         }
+        current_arg.push_back(tok);
     }
     clang_disposeTokens(tu, tokens, numTokens);
     if (!values.empty()) return values;
@@ -1463,19 +1537,26 @@ static void collectReadBases(const std::vector<StmtPtr>& stmts,
     }
 }
 
-static ParamDirection inferParamDirection(const ParamDecl& p,
-                                          const std::unordered_set<std::string>& read,
-                                          const std::unordered_set<std::string>& written) {
-    if (p.passing == ParamPassingKind::Value || p.passing == ParamPassingKind::ConstRef ||
-        p.is_const) {
+static ParamDirection inferParamDirection(const ParamDecl& p) {
+    if (p.passing == ParamPassingKind::Value || p.passing == ParamPassingKind::ConstRef) {
         return ParamDirection::Input;
     }
-    bool is_read = read.count(p.name) > 0;
-    bool is_written = written.count(p.name) > 0;
-    if (is_written && is_read) return ParamDirection::InOut;
-    if (is_written) return ParamDirection::Output;
-    if (!is_read && isMutableParamPassing(p.passing)) return ParamDirection::Output;
+    if (p.passing == ParamPassingKind::MutableRef) {
+        return ParamDirection::Output;
+    }
     return ParamDirection::Input;
+}
+
+static std::string invalidTopParamReason(const ParamDecl& p) {
+    if (p.passing == ParamPassingKind::Pointer) {
+        return "unsupported pointer parameter '" + p.name +
+               "': top-level ports must be value/const-reference inputs or non-const-reference outputs";
+    }
+    if (p.passing == ParamPassingKind::RValueRef) {
+        return "unsupported rvalue-reference parameter '" + p.name +
+               "': top-level ports must be value/const-reference inputs or non-const-reference outputs";
+    }
+    return "";
 }
 
 static bool astBodyEndsWithSwitchTerminator(const std::vector<StmtPtr>& body) {
@@ -3336,12 +3417,8 @@ static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name)
         }
     }
 
-    std::unordered_set<std::string> written;
-    std::unordered_set<std::string> read;
-    collectReadBases(func.body, read);
-    collectWrittenBases(func.body, written);
     for (auto& p : func.params) {
-        p.direction = inferParamDirection(p, read, written);
+        p.direction = inferParamDirection(p);
         p.is_output = p.direction != ParamDirection::Input;
     }
 
@@ -3662,6 +3739,32 @@ static void collectStructFieldLayouts(CXCursor root, FunctionAST& func) {
     }, &func);
 }
 
+static void collectGlobalConstInts(CXCursor root, const std::string& source_file) {
+    std::string wanted = normalizedPath(source_file);
+    clang_visitChildren(root, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
+        auto* wanted = static_cast<std::string*>(data);
+        if (clang_getCursorKind(c) != CXCursor_VarDecl) return CXChildVisit_Continue;
+        if (normalizedPath(cursorFileName(c)) != *wanted) return CXChildVisit_Continue;
+        CXType cursor_type = clang_getCursorType(c);
+        if (!clang_isConstQualifiedType(cursor_type)) return CXChildVisit_Continue;
+        TypeInfo type = convertType(cursor_type);
+        if (type.is_array) return CXChildVisit_Continue;
+        CXEvalResult eval = clang_Cursor_Evaluate(c);
+        if (!eval) return CXChildVisit_Continue;
+        CXEvalResultKind kind = clang_EvalResult_getKind(eval);
+        if (kind == CXEval_Int) {
+            std::string name = cxToStr(clang_getCursorSpelling(c));
+            if (!name.empty()) {
+                global_const_int_values[name] = type.is_signed
+                    ? clang_EvalResult_getAsLongLong(eval)
+                    : static_cast<long long>(clang_EvalResult_getAsUnsigned(eval));
+            }
+        }
+        clang_EvalResult_dispose(eval);
+        return CXChildVisit_Continue;
+    }, &wanted);
+}
+
 // --- Public API ---
 
 BuildResult buildASTFromSource(const std::string& source_file,
@@ -3671,6 +3774,7 @@ BuildResult buildASTFromSource(const std::string& source_file,
     lambda_operator_usr_to_name.clear();
     lambda_operator_location_to_name.clear();
     lambda_operator_signature_to_name.clear();
+    global_const_int_values.clear();
 
     CXIndex index = clang_createIndex(0, 0);
 
@@ -3725,6 +3829,7 @@ BuildResult buildASTFromSource(const std::string& source_file,
 
     // Find the target function
     CXCursor root = clang_getTranslationUnitCursor(tu);
+    collectGlobalConstInts(root, source_file);
     struct FindCtx {
         std::string target;
         std::string source_file;
@@ -3798,6 +3903,15 @@ BuildResult buildASTFromSource(const std::string& source_file,
     }
 
     FunctionAST func = convertFunctionDecl(found, resolved_top_function);
+    for (const auto& param : func.params) {
+        std::string invalid = invalidTopParamReason(param);
+        if (!invalid.empty()) {
+            result.error = invalid;
+            clang_disposeTranslationUnit(tu);
+            clang_disposeIndex(index);
+            return result;
+        }
+    }
     collectStructFieldLayouts(root, func);
     collectLocalLambdas(found, func);
     for (auto& [name, lambda] : func.lambdas) {

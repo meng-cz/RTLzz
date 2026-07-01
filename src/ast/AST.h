@@ -35,6 +35,7 @@ enum class ParamPassingKind {
     Value,
     ConstRef,
     MutableRef,
+    RValueRef,
     Pointer,
 };
 

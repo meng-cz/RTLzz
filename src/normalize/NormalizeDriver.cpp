@@ -81,10 +81,13 @@ struct Env {
 void markFormalWrite(Env& env, const std::string& name) {
     if (name.empty()) return;
     env.formal_writes->insert(name);
-    addOutputParam(env.output_params, name);
+    auto dir = env.param_directions.find(name);
+    const bool is_output_formal = dir != env.param_directions.end() && dir->second == "Output";
+    if (is_output_formal) addOutputParam(env.output_params, name);
     auto sym = env.symbols.find(name);
     const bool reads_input_value = env.formal_reads->count(name) != 0;
-    if (sym != env.symbols.end() && reads_input_value) {
+    if (sym != env.symbols.end() && reads_input_value && dir != env.param_directions.end() &&
+        (dir->second == "Input" || dir->second == "Output")) {
         env.ssa_seed_symbols[name] = sym->second;
     } else {
         env.ssa_seed_symbols.erase(name);
@@ -94,16 +97,11 @@ void markFormalWrite(Env& env, const std::string& name) {
             env.formal_write_reset_done.insert(name);
         }
     }
-    auto it = env.param_directions.find(name);
-    if (it != env.param_directions.end()) {
-        it->second = reads_input_value ? "InOut" : "Output";
-    }
 }
 
 bool isFormalOutput(const Env& env, const std::string& name) {
     auto it = env.param_directions.find(name);
-    return it != env.param_directions.end() &&
-           (it->second == "Output" || it->second == "InOut");
+    return it != env.param_directions.end() && it->second == "Output";
 }
 
 std::string handshakeDataPrefix(const std::string& name) {
@@ -116,7 +114,7 @@ std::string handshakeDataPrefix(const std::string& name) {
 void registerHandshakePayloadDefaults(Env& env) {
     for (const auto& item : env.param_directions) {
         const std::string& data = item.first;
-        if (item.second != "Output" && item.second != "InOut") continue;
+        if (item.second != "Output") continue;
         std::string prefix = handshakeDataPrefix(data);
         if (prefix.empty()) continue;
         std::string ready = prefix + "__rdy__";
@@ -127,8 +125,8 @@ void registerHandshakePayloadDefaults(Env& env) {
             valid_it == env.param_directions.end()) {
             continue;
         }
-        bool ready_is_output = ready_it->second == "Output" || ready_it->second == "InOut";
-        bool valid_is_input = valid_it->second == "Input" || valid_it->second == "InOut";
+        bool ready_is_output = ready_it->second == "Output";
+        bool valid_is_input = valid_it->second == "Input";
         if (!ready_is_output || !valid_is_input) continue;
         env.output_default_reasons[data] = "handshake_payload_default_zero_when_not_ready_valid";
         env.output_paired_controls[data] = ready;
@@ -145,7 +143,7 @@ std::string childServiceResponsePrefix(const std::string& name) {
 void registerChildServiceResponseDefaults(Env& env) {
     for (const auto& item : env.param_directions) {
         const std::string& payload = item.first;
-        if (item.second != "Output" && item.second != "InOut") continue;
+        if (item.second != "Output") continue;
         if (env.output_paired_controls.count(payload) != 0) continue;
 
         std::string prefix = childServiceResponsePrefix(payload);
@@ -153,7 +151,7 @@ void registerChildServiceResponseDefaults(Env& env) {
         std::string valid = prefix + "__vld__";
         auto valid_it = env.param_directions.find(valid);
         if (valid_it == env.param_directions.end()) continue;
-        bool valid_is_input = valid_it->second == "Input" || valid_it->second == "InOut";
+        bool valid_is_input = valid_it->second == "Input";
         if (!valid_is_input) continue;
 
         env.output_default_reasons[payload] = "payload_default_zero_when_valid_false";
@@ -4205,15 +4203,12 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
         env.param_directions[pname] = paramDirectionName(p.direction);
         bool is_output = isOutputParam(p);
         bool is_input = isInputParam(p);
-        bool mutable_formal =
-            (p.passing == ParamPassingKind::MutableRef ||
-             p.passing == ParamPassingKind::Pointer) &&
-            !p.is_const;
+        bool mutable_formal = p.passing == ParamPassingKind::MutableRef && !p.is_const;
         if (is_output) addOutputParam(env.output_params, pname);
-        if (is_input || mutable_formal) {
+        if (is_input || is_output) {
             markScalarFullyInitialized(env, pname, p.type);
-            env.input_arrays.insert(pname);
             addSeedSymbol(env, pname, p.type);
+            if (is_input) env.input_arrays.insert(pname);
         }
         TypeInfo param_type = p.type;
         if (param_type.is_array && param_type.array_dims.empty() && param_type.array_size > 0) {
@@ -4224,17 +4219,17 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
             std::vector<int> prefix;
             bool input_array_by_value = p.passing == ParamPassingKind::Value ||
                                         p.passing == ParamPassingKind::ConstRef;
-            bool initialized_array = is_input || mutable_formal || input_array_by_value;
+            bool initialized_array = is_input || is_output || input_array_by_value;
             addFlattenedArraySymbols(env, pname, param_type, initialized_array, prefix, 0);
             if (initialized_array) {
-                env.input_arrays.insert(pname);
+                if (is_input || input_array_by_value) env.input_arrays.insert(pname);
                 env.initialized.insert(pname);
                 addSeedSymbolsWithPrefix(env, pname);
             }
         }
         if (!param_type.struct_name.empty()) {
-            addStructFieldSymbols(pname, param_type, env, is_input || mutable_formal);
-            if (is_input || mutable_formal) addSeedSymbolsWithPrefix(env, pname);
+            addStructFieldSymbols(pname, param_type, env, is_input || is_output);
+            if (is_input || is_output) addSeedSymbolsWithPrefix(env, pname);
         }
     }
     registerHandshakePayloadDefaults(env);
@@ -4246,30 +4241,12 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
     env.output_params.clear();
     for (const auto& p : func.params) {
         const std::string& name = p.name;
-        const bool explicitly_output =
-            p.direction == ParamDirection::Output ||
-            p.direction == ParamDirection::InOut;
-        const bool mutable_formal =
-            explicitly_output ||
-            (p.passing != ParamPassingKind::Value &&
-             p.passing != ParamPassingKind::ConstRef &&
-             !p.is_const);
-        const bool read = env.formal_reads->count(name) != 0;
-        const bool written = env.formal_writes->count(name) != 0;
         std::string direction = paramDirectionName(p.direction);
-        if (!mutable_formal) {
-            direction = "Input";
-        } else if (written && read) {
-            direction = "InOut";
-        } else if (written) {
-            direction = "Output";
-        }
         env.param_directions[name] = direction;
-        if (direction == "Output" || direction == "InOut") {
+        if (direction == "Output") {
             addOutputParam(env.output_params, name);
         }
-        if (direction == "Input" || direction == "InOut" ||
-            direction == "Output") {
+        if (direction == "Input" || direction == "Output") {
             addSeedSymbol(env, name, env.symbols[name]);
             addSeedSymbolsWithPrefix(env, name);
         } else {

@@ -442,7 +442,10 @@ private:
                     continue;
                 }
                 os << "    assign " << sig(signal.id) << " = "
-                   << expr(*signal.driver) << ";"
+                   << resizeExpr(expr(*signal.driver),
+                                 widthOf(signal.driver->type),
+                                 widthOf(signal.type),
+                                 false) << ";"
                    << debugComment(signal.driver->debug) << "\n";
                 continue;
             }
@@ -510,7 +513,7 @@ private:
         switch (op.kind) {
         case beir::OperationKind::Assign:
             need(1);
-            return operand(ops[0]);
+            return resizeExpr(operand(ops[0]), widthOf(ops[0].type), widthOf(op.type), false);
         case beir::OperationKind::PortRead:
             need(1);
             if (ops.size() == 1) return operand(ops[0]);

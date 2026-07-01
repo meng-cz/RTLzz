@@ -170,11 +170,11 @@ PredicateVerifyResult verifyClosedExpr(const ExprPtr& e,
         bool seed = hasSsaZeroSuffix(e->var_name);
         std::string direction = directionForBaseName(program, base);
         if (seed && !direction.empty()) {
-            if (direction == "Input" || direction == "InOut") return {};
+            if (direction == "Input") return {};
             return fail("PredicateVerifier: output expression depends on unseeded Output initial value '" +
                         e->var_name + "'");
         }
-        if (!direction.empty() && (direction == "Input" || direction == "InOut")) {
+        if (!direction.empty() && direction == "Input") {
             return {};
         }
         return fail("PredicateVerifier: output expression has unresolved variable '" +
@@ -430,6 +430,12 @@ PredicateVerifyResult verifyExpr(const ExprPtr& e, VerifyState& state) {
 } // namespace
 
 PredicateVerifyResult verifyPredicateProgram(const PredicateProgram& program) {
+    for (const auto& [name, direction] : program.param_directions) {
+        if (direction == "InOut") {
+            return fail("PredicateVerifier: InOut parameter direction is illegal for '" +
+                        name + "'");
+        }
+    }
     for (const auto& diagnostic : program.diagnostics) {
         if (diagnostic.rfind("missing_assignment_for_non_defaultable_output:", 0) == 0) {
             return fail("PredicateVerifier: " + diagnostic);

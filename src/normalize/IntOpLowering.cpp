@@ -30,18 +30,15 @@ int explicitHwWidthFromName(const std::string& name) {
 }
 
 bool isMutableParam(const ParamDecl& p) {
-    return p.passing == ParamPassingKind::MutableRef ||
-           p.passing == ParamPassingKind::Pointer;
+    return p.passing == ParamPassingKind::MutableRef;
 }
 
 bool isOutputParam(const ParamDecl& p) {
-    return p.direction == ParamDirection::Output ||
-           p.direction == ParamDirection::InOut;
+    return p.direction == ParamDirection::Output;
 }
 
 bool isInputParam(const ParamDecl& p) {
-    if (p.direction == ParamDirection::Input || p.direction == ParamDirection::InOut) return true;
-    return false;
+    return p.direction == ParamDirection::Input;
 }
 
 std::string baseName(const ExprPtr& e) {
