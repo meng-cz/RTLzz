@@ -381,7 +381,6 @@ static OpCode parseUnaryOpCode(const std::string& op) {
 static PortDirection parsePortDirection(const std::string& text) {
     if (text == "Input") return PortDirection::Input;
     if (text == "Output") return PortDirection::Output;
-    if (text == "InOut") return PortDirection::InOut;
     return PortDirection::Unknown;
 }
 
@@ -389,7 +388,6 @@ static const char* portDirectionText(PortDirection direction) {
     switch (direction) {
     case PortDirection::Input: return "Input";
     case PortDirection::Output: return "Output";
-    case PortDirection::InOut: return "InOut";
     case PortDirection::Unknown: return "Unknown";
     }
     return "Unknown";
@@ -572,7 +570,7 @@ public:
         program_.function_name = source.function_name;
         program_.outputs = source.outputs;
         for (const auto& [name, direction] : source.param_directions) {
-            if (parsePortDirection(direction) == PortDirection::InOut) {
+            if (direction == "InOut") {
                 throw std::runtime_error("beir rejects InOut port direction: " + name);
             }
         }

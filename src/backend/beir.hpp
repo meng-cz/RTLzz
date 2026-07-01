@@ -80,7 +80,6 @@ enum class OpCode {
 enum class PortDirection {
     Input,
     Output,
-    InOut,
     Unknown,
 };
 

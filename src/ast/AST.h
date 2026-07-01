@@ -42,14 +42,12 @@ enum class ParamPassingKind {
 enum class ParamDirection {
     Input,
     Output,
-    InOut,
 };
 
 inline std::string paramDirectionName(ParamDirection direction) {
     switch (direction) {
     case ParamDirection::Input: return "Input";
     case ParamDirection::Output: return "Output";
-    case ParamDirection::InOut: return "InOut";
     }
     return "Input";
 }

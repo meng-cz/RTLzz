@@ -2676,6 +2676,14 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
             env.error = "Unknown variable '" + e->var_name + "'";
             return nullptr;
         }
+        auto dir_it = env.param_directions.find(e->var_name);
+        if (dir_it != env.param_directions.end() && dir_it->second == "Output" &&
+            !env.initialized.count(e->var_name) &&
+            !hasAnyBitInitialized(env, e->var_name)) {
+            env.error = "Read of output port initial value '" + e->var_name +
+                "' is not supported; output ports are write-only";
+            return nullptr;
+        }
         if (env.param_directions.count(e->var_name) &&
             env.ssa_seed_symbols.count(e->var_name)) {
             env.formal_reads->insert(e->var_name);
@@ -4205,10 +4213,12 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
         bool is_input = isInputParam(p);
         bool mutable_formal = p.passing == ParamPassingKind::MutableRef && !p.is_const;
         if (is_output) addOutputParam(env.output_params, pname);
-        if (is_input || is_output) {
+        if (is_input) {
             markScalarFullyInitialized(env, pname, p.type);
+            env.input_arrays.insert(pname);
+        }
+        if (is_input || is_output) {
             addSeedSymbol(env, pname, p.type);
-            if (is_input) env.input_arrays.insert(pname);
         }
         TypeInfo param_type = p.type;
         if (param_type.is_array && param_type.array_dims.empty() && param_type.array_size > 0) {
@@ -4219,16 +4229,18 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
             std::vector<int> prefix;
             bool input_array_by_value = p.passing == ParamPassingKind::Value ||
                                         p.passing == ParamPassingKind::ConstRef;
-            bool initialized_array = is_input || is_output || input_array_by_value;
+            bool initialized_array = is_input || input_array_by_value;
             addFlattenedArraySymbols(env, pname, param_type, initialized_array, prefix, 0);
             if (initialized_array) {
-                if (is_input || input_array_by_value) env.input_arrays.insert(pname);
+                env.input_arrays.insert(pname);
                 env.initialized.insert(pname);
+            }
+            if (is_input || is_output || input_array_by_value) {
                 addSeedSymbolsWithPrefix(env, pname);
             }
         }
         if (!param_type.struct_name.empty()) {
-            addStructFieldSymbols(pname, param_type, env, is_input || is_output);
+            addStructFieldSymbols(pname, param_type, env, is_input);
             if (is_input || is_output) addSeedSymbolsWithPrefix(env, pname);
         }
     }

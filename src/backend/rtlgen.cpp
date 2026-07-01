@@ -292,7 +292,6 @@ private:
             switch (port.direction) {
             case beir::PortDirection::Input: os << "input "; break;
             case beir::PortDirection::Output: os << "output "; break;
-            case beir::PortDirection::InOut: os << "inout "; break;
             case beir::PortDirection::Unknown: os << "input "; break;
             }
             os << logicType(port.type) << sanitizeIdentifier(port.name)
