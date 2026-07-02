@@ -85,64 +85,49 @@ if(WIN32)
     endif()
 endif()
 
-add_executable(predicate-expand
-    src/main.cpp
-    src/ast/ASTBuilderDriver.cpp
-    src/ast/ASTBuilder.cpp
-    src/ast/VulOpRecognizer.cpp
-    src/ast/VulTypeRecognizer.cpp
-    src/eval/PredicateEvaluator.cpp
-    src/ir/CanonicalIR.cpp
-    src/ir/CFG.cpp
-    src/ir/SSA.cpp
-    src/ir/TypedDAG.cpp
-    src/semantics/AliasGraph.cpp
-    src/semantics/IntSemantics.cpp
-    src/transform/LoopUnroll.cpp
-    src/transform/Normalize.cpp
-    src/transform/Predicate.cpp
-    src/normalize/NormalizeDriver.cpp
-    src/normalize/AliasLowering.cpp
-    src/normalize/FunctionInline.cpp
-    src/normalize/LambdaInline.cpp
-    src/normalize/ArrayScalarize.cpp
-    src/normalize/StructFlatten.cpp
-    src/normalize/IntOpLowering.cpp
-    src/normalize/LookupLowering.cpp
-    src/normalize/AssignmentLowering.cpp
-    src/normalize/DefaultTotalizationPass.cpp
-    src/predicate/DefaultTotalizationPass.cpp
-    src/predicate/OutputExpressionMap.cpp
-    src/predicate/PredicateVerifier.cpp
-    src/backend/beir.cpp
-    src/backend/rtlgen.cpp
-    src/emitter/ListJsonEmitter.cpp
+file(GLOB_RECURSE PREDICATE_EXPAND_SOURCES CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/src/*.cpp"
 )
 
-target_include_directories(predicate-expand PRIVATE
+add_library(predicate-expand-objects OBJECT ${PREDICATE_EXPAND_SOURCES})
+add_library(predicate-expand::objects ALIAS predicate-expand-objects)
+
+target_include_directories(predicate-expand-objects PUBLIC
     ${PROJECT_SOURCE_DIR}/src
     ${LIBCLANG_INCLUDE_DIR}
 )
 
-target_link_libraries(predicate-expand PRIVATE ${LIBCLANG_LIBRARY})
+target_link_libraries(predicate-expand-objects PUBLIC ${LIBCLANG_LIBRARY})
 
-target_compile_definitions(predicate-expand PRIVATE
+target_compile_definitions(predicate-expand-objects PRIVATE
     PREDICATE_EXPAND_BUILD_COMMIT="${PREDICATE_EXPAND_BUILD_COMMIT}"
 )
 
 if(MSVC)
-    set_property(TARGET predicate-expand PROPERTY VS_GLOBAL_TrackFileAccess false)
-    set_property(TARGET predicate-expand PROPERTY
+    set_property(TARGET predicate-expand-objects PROPERTY VS_GLOBAL_TrackFileAccess false)
+    set_property(TARGET predicate-expand-objects PROPERTY
         MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
     )
 endif()
 
-if(WIN32 AND LIBCLANG_RUNTIME)
-    add_custom_command(TARGET predicate-expand POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${LIBCLANG_RUNTIME}
-            $<TARGET_FILE_DIR:predicate-expand>
-        COMMENT "Copying libclang runtime DLL"
-        VERBATIM
-    )
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    add_executable(predicate-expand main/main.cpp)
+    target_link_libraries(predicate-expand PRIVATE predicate-expand-objects)
+
+    if(MSVC)
+        set_property(TARGET predicate-expand PROPERTY VS_GLOBAL_TrackFileAccess false)
+        set_property(TARGET predicate-expand PROPERTY
+            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
+        )
+    endif()
+
+    if(WIN32 AND LIBCLANG_RUNTIME)
+        add_custom_command(TARGET predicate-expand POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${LIBCLANG_RUNTIME}
+                $<TARGET_FILE_DIR:predicate-expand>
+            COMMENT "Copying libclang runtime DLL"
+            VERBATIM
+        )
+    endif()
 endif()
