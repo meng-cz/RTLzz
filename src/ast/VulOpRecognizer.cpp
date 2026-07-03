@@ -161,6 +161,7 @@ VulCallInfo recognizeVulCall(CXCursor cursor,
     else if (isExactName(name, "sint")) out.kind = VulCallKind::SignedView;
     else if (isExactName(name, "operator()")) out.kind = VulCallKind::OperatorCall;
     else if (isExactName(name, "at")) out.kind = VulCallKind::At;
+    else if (isExactName(name, "to")) out.kind = VulCallKind::To;
     else if (isExactName(name, "pick")) out.kind = VulCallKind::Pick;
     else if (isExactName(name, "range_at")) out.kind = VulCallKind::RangeAt;
     else if (isExactName(name, "bit_at")) out.kind = VulCallKind::BitAt;

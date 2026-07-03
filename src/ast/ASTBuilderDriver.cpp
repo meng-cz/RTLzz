@@ -261,6 +261,31 @@ static bool isBuiltinIntegerType(const TypeInfo& type) {
            type.name == "bool";
 }
 
+static bool isStandardIntegerToTarget(const TypeInfo& type) {
+    if (type.is_array || type.is_pointer || type.is_reference ||
+        !type.struct_name.empty() || type.width <= 0) {
+        return false;
+    }
+    if (type.name == "bool" || type.hw_kind == "bool") return false;
+    return type.hw_kind == "builtin" ||
+           type.name == "char" || type.name == "signed char" ||
+           type.name == "unsigned char" || type.name == "short" ||
+           type.name == "unsigned short" || type.name == "int" ||
+           type.name == "unsigned int" || type.name == "long" ||
+           type.name == "unsigned long" || type.name == "long long" ||
+           type.name == "unsigned long long" || type.name == "uint8_t" ||
+           type.name == "uint16_t" || type.name == "uint32_t" ||
+           type.name == "uint64_t" || type.name == "int8_t" ||
+           type.name == "int16_t" || type.name == "int32_t" ||
+           type.name == "int64_t";
+}
+
+static TypeInfo hardwareIntegerTypeForStandardTarget(const TypeInfo& type) {
+    return make_hw_type(type.is_signed ? "Int" : "UInt",
+                        type.width,
+                        type.is_signed);
+}
+
 static bool sameIntegerType(const TypeInfo& lhs, const TypeInfo& rhs) {
     return lhs.width == rhs.width &&
            lhs.is_signed == rhs.is_signed &&
@@ -2390,6 +2415,56 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             result->args.push_back(make_literal(std::to_string(hi), TypeInfo{"int", 32, true}));
             result->args.push_back(make_literal(std::to_string(lo), TypeInfo{"int", 32, true}));
             return result;
+        }
+        if (vul_call.kind == VulCallKind::To) {
+            TypeInfo target = convertType(type);
+            if (!isStandardIntegerToTarget(target)) {
+                auto result = std::make_shared<Expr>();
+                result->kind = ExprKind::Call;
+                result->callee = "__unsupported_to";
+                result->type = target;
+                return result;
+            }
+            ExprPtr receiver;
+            if (vul_call.has_receiver) {
+                receiver = convertExpr(vul_call.receiver_cursor);
+            } else if (!children.empty()) {
+                receiver = convertExpr(children.front());
+                if (receiver && receiver->kind == ExprKind::FieldAccess &&
+                    receiver->field_name == "to" && receiver->struct_base) {
+                    receiver = receiver->struct_base;
+                } else if (receiver && receiver->kind == ExprKind::FieldAccess &&
+                           receiver->field_name == "to" && !receiver->struct_base) {
+                    std::string receiver_name = memberReceiverFromTokens(cursor); // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden member receiver recovery, not source lowering
+                    if (!receiver_name.empty()) receiver = make_var(receiver_name);
+                }
+            }
+            if (!receiver) {
+                auto result = std::make_shared<Expr>();
+                result->kind = ExprKind::Call;
+                result->callee = "__unsupported_to_receiver";
+                result->type = target;
+                return result;
+            }
+            TypeInfo hw_target = hardwareIntegerTypeForStandardTarget(target);
+            if (receiver->type.width > 0 && hw_target.width > receiver->type.width) {
+                auto widened = hw_target.is_signed
+                    ? make_sext(receiver, hw_target.width)
+                    : make_zext(receiver, hw_target.width);
+                widened->type = hw_target;
+                return widened;
+            }
+            if (receiver->type.width > 0 && hw_target.width < receiver->type.width) {
+                auto narrowed = make_trunc(receiver, hw_target.width, hw_target.is_signed);
+                narrowed->type = hw_target;
+                return narrowed;
+            }
+            auto cast = std::make_shared<Expr>();
+            cast->kind = ExprKind::Cast;
+            cast->cast_type = hw_target;
+            cast->type = hw_target;
+            cast->cast_expr = receiver;
+            return cast;
         }
         if (vul_call.kind == VulCallKind::Output || vul_call.kind == VulCallKind::ReqHelperCall) {
             bool is_req_output = vul_call.kind == VulCallKind::Output;
