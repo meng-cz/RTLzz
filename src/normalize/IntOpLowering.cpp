@@ -90,7 +90,7 @@ bool isConstantContextBinaryOp(const std::string& op) {
 }
 
 bool isBoolType(const TypeInfo& type) {
-    return type.hw_kind == "bool" || type.name == "bool";
+    return is_bool_type_info(type);
 }
 
 TypeInfo resultTypeForBinary(const std::string& op, const TypeInfo& a, const TypeInfo& b) {

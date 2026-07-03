@@ -247,8 +247,7 @@ bool isBuiltinScalarType(const TypeInfo& type) {
 
 bool isBuiltinExpressionType(const TypeInfo& type) {
     return isBuiltinScalarType(type) ||
-           type.hw_kind == "bool" ||
-           type.name == "bool";
+           is_bool_type_info(type);
 }
 
 bool isBuiltinBinaryExpression(const ExprPtr& original,
@@ -265,12 +264,12 @@ bool builtinOperandsHaveCanonicalCommonType(const ExprPtr& lhs,
     return lhs && rhs &&
            lhs->type.width == rhs->type.width &&
            lhs->type.is_signed == rhs->type.is_signed &&
-           (lhs->type.hw_kind == "bool") == (rhs->type.hw_kind == "bool");
+           is_bool_type_info(lhs->type) == is_bool_type_info(rhs->type);
 }
 
 TypeInfo promotedBuiltinType(const TypeInfo& type) {
     if (!isBuiltinExpressionType(type)) return type;
-    if (type.hw_kind == "bool" || type.name == "bool" || type.width < 32) {
+    if (is_bool_type_info(type) || type.width < 32) {
         return TypeInfo{"int", 32, true, true, "builtin"};
     }
     return type;
@@ -307,8 +306,9 @@ TypeInfo usualArithmeticBuiltinType(const TypeInfo& lhs,
 
 void canonicalizeBuiltinBinaryOperands(ExprPtr& lhs, ExprPtr& rhs) {
     if (!lhs || !rhs) return;
-    if ((lhs->type.hw_kind == "bool" || lhs->type.name == "bool") &&
-        (rhs->type.hw_kind == "bool" || rhs->type.name == "bool")) {
+    lhs->type = canonicalize_bool_type(std::move(lhs->type));
+    rhs->type = canonicalize_bool_type(std::move(rhs->type));
+    if (is_bool_type_info(lhs->type) && is_bool_type_info(rhs->type)) {
         return;
     }
     TypeInfo common = usualArithmeticBuiltinType(lhs->type, rhs->type);

@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -30,6 +31,32 @@ struct TypeInfo {
     bool is_static = false;
     std::vector<std::string> init_values; // static/constant aggregate initializer values
 };
+
+inline bool is_bool_type_info(const TypeInfo& type) {
+    return (type.name == "bool" || type.hw_kind == "bool") &&
+           !type.is_pointer && !type.is_reference && !type.is_array &&
+           type.struct_name.empty();
+}
+
+inline TypeInfo canonical_bool_type() {
+    TypeInfo t;
+    t.name = "bool";
+    t.width = 1;
+    t.is_signed = false;
+    t.is_hw_int = true;
+    t.hw_kind = "bool";
+    return t;
+}
+
+inline TypeInfo canonicalize_bool_type(TypeInfo type) {
+    if (!is_bool_type_info(type)) return type;
+    TypeInfo out = canonical_bool_type();
+    out.is_const = type.is_const;
+    out.is_mutable = type.is_mutable;
+    out.is_static = type.is_static;
+    out.init_values = std::move(type.init_values);
+    return out;
+}
 
 enum class ParamPassingKind {
     Value,
@@ -251,7 +278,7 @@ inline ExprPtr make_literal(const std::string& val, TypeInfo type = {}) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::Literal;
     e->literal_value = val;
-    e->type = type;
+    e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
 
@@ -259,7 +286,7 @@ inline ExprPtr make_var(const std::string& name, TypeInfo type = {}) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::VarRef;
     e->var_name = name;
-    e->type = type;
+    e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
 
@@ -269,7 +296,7 @@ inline ExprPtr make_binary(const std::string& op, ExprPtr lhs, ExprPtr rhs, Type
     e->op = op;
     e->left = std::move(lhs);
     e->right = std::move(rhs);
-    e->type = type;
+    e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
 
@@ -278,7 +305,7 @@ inline ExprPtr make_unary(const std::string& op, ExprPtr operand, TypeInfo type 
     e->kind = ExprKind::UnaryOp;
     e->op = op;
     e->operand = std::move(operand);
-    e->type = type;
+    e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
 
@@ -288,7 +315,7 @@ inline ExprPtr make_ternary(ExprPtr cond, ExprPtr t, ExprPtr f, TypeInfo type = 
     e->cond = std::move(cond);
     e->then_expr = std::move(t);
     e->else_expr = std::move(f);
-    e->type = type;
+    e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
 
@@ -297,7 +324,7 @@ inline ExprPtr make_array_access(ExprPtr base, ExprPtr idx, TypeInfo type = {}) 
     e->kind = ExprKind::ArrayAccess;
     e->array_base = std::move(base);
     e->index = std::move(idx);
-    e->type = type;
+    e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
 
@@ -306,7 +333,7 @@ inline ExprPtr make_field_access(ExprPtr base, const std::string& field, TypeInf
     e->kind = ExprKind::FieldAccess;
     e->struct_base = std::move(base);
     e->field_name = field;
-    e->type = type;
+    e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
 
@@ -321,12 +348,7 @@ inline TypeInfo make_hw_type(const std::string& kind, int width, bool is_signed 
 }
 
 inline TypeInfo make_bool_type() {
-    TypeInfo t;
-    t.name = "bool";
-    t.width = 1;
-    t.is_signed = false;
-    t.hw_kind = "bool";
-    return t;
+    return canonical_bool_type();
 }
 
 inline TypeInfo make_bits_type(int width, bool is_signed = false) {
@@ -379,8 +401,9 @@ inline ExprPtr make_slice(ExprPtr base, int hi, int lo, TypeInfo type = {}) {
     e->hi = hi;
     e->lo = lo;
     if (type.width <= 0) type = make_hw_type("UInt", hi >= lo ? hi - lo + 1 : 0, false);
-    e->type = type;
-    e->type.width = hi >= lo ? hi - lo + 1 : type.width;
+    int slice_width = hi >= lo ? hi - lo + 1 : type.width;
+    e->type = canonicalize_bool_type(std::move(type));
+    e->type.width = slice_width;
     return e;
 }
 
@@ -400,7 +423,8 @@ inline ExprPtr make_write_slice(ExprPtr base, int hi, int lo, ExprPtr value, Typ
     e->hi = hi;
     e->lo = lo;
     e->value = std::move(value);
-    e->type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    e->type = canonicalize_bool_type(std::move(out_type));
     return e;
 }
 
@@ -410,7 +434,8 @@ inline ExprPtr make_write_bit(ExprPtr base, int bit, ExprPtr value, TypeInfo typ
     e->base = std::move(base);
     e->bit = bit;
     e->value = std::move(value);
-    e->type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    e->type = canonicalize_bool_type(std::move(out_type));
     return e;
 }
 
@@ -420,7 +445,8 @@ inline ExprPtr make_dynamic_write_slice(ExprPtr base, ExprPtr index, ExprPtr val
     e->base = std::move(base);
     e->index = std::move(index);
     e->value = std::move(value);
-    e->type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    e->type = canonicalize_bool_type(std::move(out_type));
     return e;
 }
 
@@ -430,7 +456,8 @@ inline ExprPtr make_dynamic_write_bit(ExprPtr base, ExprPtr index, ExprPtr value
     e->base = std::move(base);
     e->index = std::move(index);
     e->value = std::move(value);
-    e->type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
+    e->type = canonicalize_bool_type(std::move(out_type));
     return e;
 }
 
