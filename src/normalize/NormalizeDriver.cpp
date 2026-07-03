@@ -726,21 +726,41 @@ std::optional<std::pair<std::string, TypeInfo>>
 inlineLocalFieldTarget(const ExprPtr& target,
                        const InlineExpressionFlow& flow,
                        Env& env) {
-    if (!target || target->kind != ExprKind::FieldAccess ||
-        !target->struct_base || target->struct_base->kind != ExprKind::VarRef) {
+    if (!target || target->kind != ExprKind::FieldAccess) {
         return std::nullopt;
     }
-    const std::string base = target->struct_base->var_name;
+
+    std::vector<std::string> field_path;
+    ExprPtr cursor = target;
+    while (cursor && cursor->kind == ExprKind::FieldAccess) {
+        field_path.push_back(cursor->field_name);
+        cursor = cursor->struct_base;
+    }
+    if (!cursor || cursor->kind != ExprKind::VarRef || field_path.empty()) {
+        return std::nullopt;
+    }
+    std::reverse(field_path.begin(), field_path.end());
+
+    const std::string base = cursor->var_name;
     auto type_it = flow.types.find(base);
     if (type_it == flow.types.end()) return std::nullopt;
-    const auto* fields = findStructFields(type_it->second, env);
-    if (!fields) return std::nullopt;
-    for (const auto& field : *fields) {
-        if (field.name == target->field_name) {
-            return std::make_pair(base + "_" + field.name, field.type);
+    TypeInfo type = type_it->second;
+    std::string flat = base;
+    for (const auto& field_name : field_path) {
+        const auto* fields = findStructFields(type, env);
+        if (!fields) return std::nullopt;
+        bool found = false;
+        for (const auto& field : *fields) {
+            if (field.name == field_name) {
+                flat += "_" + field.name;
+                type = field.type;
+                found = true;
+                break;
+            }
         }
+        if (!found) return std::nullopt;
     }
-    return std::nullopt;
+    return std::make_pair(flat, type);
 }
 
 ExprPtr packInlineStructLocal(const std::string& name,
@@ -1840,7 +1860,11 @@ std::vector<StmtPtr> inlineProcedureCall(const ExprPtr& call, Env& env) {
     auto lambda_it = env.lambdas.find(call_callee);
     if (!helper_ptr && lambda_it != env.lambdas.end()) helper_ptr = &lambda_it->second;
     if (!helper_ptr) {
-        env.error = "Unsupported function call '" + call_callee + "'";
+        env.error = "Unsupported function call '" + call_callee + "' args=" +
+                    std::to_string(call->args.size()) +
+                    " return_width=" + std::to_string(call->type.width) +
+                    " return_type='" + call->type.name + "/" + call->type.hw_kind +
+                    "/" + call->type.struct_name + "'";
         return out;
     }
 
@@ -1861,6 +1885,76 @@ std::vector<StmtPtr> inlineProcedureCall(const ExprPtr& call, Env& env) {
     collectInlineLocalRenames(helper.body, param_names, inline_id, arg_map);
     out = substituteInlineStmts(helper.body, arg_map);
     out = localizeProcedureReturns(out, call_callee, env.error);
+    return out;
+}
+
+std::vector<StmtPtr> rewriteReturnsToSlot(const std::vector<StmtPtr>& stmts,
+                                          const std::string& slot_name,
+                                          const TypeInfo& slot_type) {
+    std::vector<StmtPtr> out;
+    for (const auto& stmt : stmts) {
+        if (!stmt) continue;
+        if (stmt->kind == StmtKind::Return) {
+            if (stmt->return_value.has_value()) {
+                out.push_back(makeAssignStmt(make_var(slot_name, slot_type),
+                                             castIfWidthChanges(cloneExpr(stmt->return_value.value()),
+                                                                slot_type)));
+            }
+            auto ret = std::make_shared<Stmt>();
+            ret->kind = StmtKind::Return;
+            out.push_back(std::move(ret));
+            continue;
+        }
+        auto copy = substituteInlineStmt(stmt, {});
+        copy->if_then = rewriteReturnsToSlot(copy->if_then, slot_name, slot_type);
+        copy->if_else = rewriteReturnsToSlot(copy->if_else, slot_name, slot_type);
+        copy->block_stmts = rewriteReturnsToSlot(copy->block_stmts, slot_name, slot_type);
+        copy->for_body = rewriteReturnsToSlot(copy->for_body, slot_name, slot_type);
+        copy->while_body = rewriteReturnsToSlot(copy->while_body, slot_name, slot_type);
+        for (auto& clause : copy->switch_cases) {
+            clause.body = rewriteReturnsToSlot(clause.body, slot_name, slot_type);
+        }
+        out.push_back(std::move(copy));
+    }
+    return out;
+}
+
+std::vector<StmtPtr> inlineProcedureCallToReturnSlot(const ExprPtr& call,
+                                                     const std::string& slot_name,
+                                                     TypeInfo slot_type,
+                                                     Env& env) {
+    std::vector<StmtPtr> out;
+    if (!call || call->kind != ExprKind::Call) return out;
+
+    const FunctionAST* helper_ptr = nullptr;
+    auto helper_it = env.helpers.find(call->callee);
+    if (helper_it != env.helpers.end()) helper_ptr = &helper_it->second;
+    auto lambda_it = env.lambdas.find(call->callee);
+    if (!helper_ptr && lambda_it != env.lambdas.end()) helper_ptr = &lambda_it->second;
+    if (!helper_ptr) {
+        env.error = "Unsupported return-slot inline call '" + call->callee + "'";
+        return out;
+    }
+
+    const auto& helper = *helper_ptr;
+    std::vector<std::string> param_names;
+    for (auto& p : helper.params) param_names.push_back(p.name);
+    size_t arg_offset = call->args.size() == param_names.size() + 1 ? 1 : 0;
+    if (param_names.size() != call->args.size() - arg_offset) {
+        env.error = "Helper function '" + call->callee + "' argument count mismatch";
+        return out;
+    }
+
+    std::unordered_map<std::string, ExprPtr> arg_map;
+    for (size_t i = 0; i < param_names.size(); ++i) {
+        arg_map[param_names[i]] = cloneExpr(call->args[i + arg_offset]);
+    }
+    int inline_id = (*env.inline_counter)++;
+    collectInlineLocalRenames(helper.body, param_names, inline_id, arg_map);
+    out = substituteInlineStmts(helper.body, arg_map);
+    if (slot_type.width <= 0) slot_type = call->type;
+    out = rewriteReturnsToSlot(out, slot_name, slot_type);
+    out = localizeProcedureReturns(out, call->callee, env.error);
     return out;
 }
 
@@ -4137,6 +4231,36 @@ std::vector<StmtPtr> rewriteStmts(const std::vector<StmtPtr>& stmts, Env& env) {
             lowered_if->if_cond = make_var(alias->rdy,
                                            symbolType(env, alias->rdy,
                                                       TypeInfo{"bool", 1, false, true, "bool"}));
+            auto rewritten_if = rewriteStmt(lowered_if, env);
+            if (!env.error.empty()) break;
+            if (rewritten_if) out.push_back(rewritten_if);
+            continue;
+        }
+        if (s && s->kind == StmtKind::If && s->if_cond &&
+            s->if_cond->kind == ExprKind::Call &&
+            (env.lambdas.count(s->if_cond->callee) || env.helpers.count(s->if_cond->callee)) &&
+            (s->if_cond->type.width == 1 || s->if_cond->type.hw_kind == "bool" ||
+             s->if_cond->type.name == "bool")) {
+            TypeInfo cond_type = s->if_cond->type.width > 0
+                ? s->if_cond->type
+                : TypeInfo{"bool", 1, false, true, "bool"};
+            std::string result_name = "__vul_if_call_result_" + std::to_string((*env.inline_counter)++);
+            auto decl = std::make_shared<Stmt>();
+            decl->kind = StmtKind::Decl;
+            decl->decl_type = cond_type;
+            decl->decl_name = result_name;
+            decl->decl_init = make_literal("false", cond_type);
+            out.push_back(rewriteStmt(decl, env));
+            if (!env.error.empty()) break;
+
+            auto effects = inlineProcedureCallToReturnSlot(s->if_cond, result_name, cond_type, env);
+            if (!env.error.empty()) break;
+            auto rewritten_effects = rewriteStmts(effects, env);
+            if (!env.error.empty()) break;
+            out.insert(out.end(), rewritten_effects.begin(), rewritten_effects.end());
+
+            auto lowered_if = std::make_shared<Stmt>(*s);
+            lowered_if->if_cond = make_var(result_name, cond_type);
             auto rewritten_if = rewriteStmt(lowered_if, env);
             if (!env.error.empty()) break;
             if (rewritten_if) out.push_back(rewritten_if);

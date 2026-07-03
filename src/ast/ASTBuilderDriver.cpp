@@ -453,6 +453,22 @@ static std::string cursorLocation(CXCursor cursor) {
     return file_name + ":" + std::to_string(line) + ":" + std::to_string(column);
 }
 
+static std::string identifierSuffix(std::string text) {
+    for (char& ch : text) {
+        unsigned char c = static_cast<unsigned char>(ch);
+        if (!std::isalnum(c) && ch != '_') ch = '_';
+    }
+    while (!text.empty() && text.front() == '_') {
+        text.erase(text.begin());
+    }
+    if (text.empty()) text = "anon";
+    return text;
+}
+
+static std::string anonymousLambdaName(CXCursor lambda_cursor) {
+    return "__vul_lambda_" + identifierSuffix(cursorLocation(lambda_cursor));
+}
+
 static DebugLoc debugLocFromCursor(CXCursor cursor) {
     DebugLoc out;
     CXSourceRange range = clang_getCursorExtent(cursor);
@@ -558,6 +574,37 @@ static bool containsUnsupportedOperatorReceiverCall(const ExprPtr& e) {
     if (e->kind == ExprKind::Cast) return containsUnsupportedOperatorReceiverCall(e->cast_expr);
     if (e->kind == ExprKind::UnaryOp) return containsUnsupportedOperatorReceiverCall(e->operand);
     return false;
+}
+
+static bool cursorContainsLambdaExpr(CXCursor cursor) {
+    if (clang_getCursorKind(cursor) == CXCursor_LambdaExpr) return true;
+    for (auto& child : getChildren(cursor)) {
+        if (cursorContainsLambdaExpr(child)) return true;
+    }
+    return false;
+}
+
+static ExprPtr makeRecoveredLambdaOperatorCall(CXCursor cursor,
+                                               const std::string& callee,
+                                               CXType result_type) {
+    auto result = std::make_shared<Expr>();
+    result->kind = ExprKind::Call;
+    result->callee = callee;
+    result->type = convertType(result_type);
+
+    int explicit_arg_count = clang_Cursor_getNumArguments(cursor);
+    for (int i = 0; i < explicit_arg_count; ++i) {
+        CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+        if (cursorContainsLambdaExpr(arg_cursor)) continue;
+        if (firstSpellingDeep(arg_cursor) == "operator()") continue;
+        auto arg = convertExpr(arg_cursor);
+        if (!arg || isOperatorOnlyExpr(arg) || containsUnsupportedOperatorReceiverCall(arg)) {
+            continue;
+        }
+        if (astBaseName(arg) == callee) continue;
+        result->args.push_back(std::move(arg));
+    }
+    return result;
 }
 
 static std::string noArgCallNameFromText(std::string text) { // UNSAFE_TEXT_FALLBACK_ALLOW: libclang hidden operator receiver recovery, not source lowering
@@ -877,7 +924,18 @@ static void collectLambdaOperatorNames(CXCursor cursor) {
         CXCursor lambda = findLambdaExpr(cursor);
         if (!clang_equalCursors(lambda, clang_getNullCursor())) {
             registerLambdaOperatorName(lambda, name);
+            for (auto& child : getChildren(lambda)) {
+                collectLambdaOperatorNames(child);
+            }
+            return;
         }
+    }
+    if (clang_getCursorKind(cursor) == CXCursor_LambdaExpr) {
+        registerLambdaOperatorName(cursor, anonymousLambdaName(cursor));
+        for (auto& child : getChildren(cursor)) {
+            collectLambdaOperatorNames(child);
+        }
+        return;
     }
     for (auto& child : getChildren(cursor)) {
         collectLambdaOperatorNames(child);
@@ -2083,6 +2141,24 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             }
         }
         VulCallInfo vul_call = recognizeVulCall(cursor, children, spelling, first_child_spelling);
+        if (spelling == "operator()" || vul_call.kind == VulCallKind::OperatorCall) {
+            std::string lambda_callee;
+            CXCursor inline_lambda = findLambdaExpr(cursor);
+            if (!clang_equalCursors(inline_lambda, clang_getNullCursor())) {
+                lambda_callee = anonymousLambdaName(inline_lambda);
+            }
+            if (lambda_callee.empty()) lambda_callee = lambdaNameForOperatorCursor(cursor);
+            if (lambda_callee.empty()) {
+                for (auto& child : children) {
+                    lambda_callee = lambdaNameForOperatorCursor(child);
+                    if (!lambda_callee.empty()) break;
+                }
+            }
+            if (lambda_callee.empty()) lambda_callee = lambdaNameForOperatorCallType(cursor);
+            if (!lambda_callee.empty()) {
+                return makeRecoveredLambdaOperatorCall(cursor, lambda_callee, type);
+            }
+        }
         ExprPtr first_call_child;
         auto get_first_call_child = [&]() -> ExprPtr {
             if (!first_call_child && !children.empty()) first_call_child = convertExpr(children.front());
@@ -3561,27 +3637,42 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
 }
 
 static void collectLocalLambdas(CXCursor cursor, FunctionAST& func) {
-    for (auto& fn_child : getChildren(cursor)) {
-        if (clang_getCursorKind(fn_child) != CXCursor_CompoundStmt) continue;
-        for (auto& stmt_child : getChildren(fn_child)) {
-            if (clang_getCursorKind(stmt_child) != CXCursor_DeclStmt) continue;
-            for (auto& decl_child : getChildren(stmt_child)) {
-                if (clang_getCursorKind(decl_child) != CXCursor_VarDecl) continue;
-                std::string name = cxToStr(clang_getCursorSpelling(decl_child));
-                for (auto& init_child : getChildren(decl_child)) {
-                    if (clang_getCursorKind(init_child) == CXCursor_LambdaExpr) {
-                        auto lambda = convertLambdaExpr(init_child, name);
-                        if (lambda) {
-                            for (auto& [nested_name, nested_lambda] : lambda->lambdas) {
-                                func.lambdas[nested_name] = nested_lambda;
-                            }
-                            func.lambdas[name] = lambda;
-                        }
-                        break;
-                    }
+    auto add_lambda = [&](const std::string& name, CXCursor lambda_cursor) {
+        auto lambda = convertLambdaExpr(lambda_cursor, name);
+        if (!lambda) return;
+        for (auto& [nested_name, nested_lambda] : lambda->lambdas) {
+            func.lambdas[nested_name] = nested_lambda;
+        }
+        func.lambdas[name] = lambda;
+    };
+
+    std::function<void(CXCursor)> visit = [&](CXCursor current) {
+        if (clang_getCursorKind(current) == CXCursor_VarDecl) {
+            std::string name = cxToStr(clang_getCursorSpelling(current));
+            CXCursor lambda = findLambdaExpr(current);
+            if (!clang_equalCursors(lambda, clang_getNullCursor())) {
+                add_lambda(name, lambda);
+                for (auto& child : getChildren(lambda)) {
+                    visit(child);
                 }
+                return;
             }
         }
+        if (clang_getCursorKind(current) == CXCursor_LambdaExpr) {
+            add_lambda(anonymousLambdaName(current), current);
+            for (auto& child : getChildren(current)) {
+                visit(child);
+            }
+            return;
+        }
+        for (auto& child : getChildren(current)) {
+            visit(child);
+        }
+    };
+
+    for (auto& fn_child : getChildren(cursor)) {
+        if (clang_getCursorKind(fn_child) != CXCursor_CompoundStmt) continue;
+        visit(fn_child);
         break;
     }
 }

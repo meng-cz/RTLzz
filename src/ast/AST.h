@@ -251,6 +251,13 @@ inline ExprPtr make_literal(const std::string& val, TypeInfo type = {}) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::Literal;
     e->literal_value = val;
+    if ((val == "true" || val == "false") && (type.name.empty() || type.name == "bool")) {
+        type.name = "bool";
+        type.width = 1;
+        type.is_signed = false;
+        type.is_hw_int = true;
+        type.hw_kind = "bool";
+    }
     e->type = type;
     return e;
 }
