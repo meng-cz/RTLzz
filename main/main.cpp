@@ -166,24 +166,31 @@ static int runMain(int argc, char* argv[]) {
         return 1;
     }
 
-    // Step 3: Subset/type checks and predicate-friendly normalization
-    auto norm_result = pred::normalizeFunction(func, unroll_result.body);
+    // Step 3: Inline user helpers/lambdas before array/struct flattening.
+    auto inline_result = pred::inlineHelpersAndLambdas(func, unroll_result.body);
+    if (!inline_result.error.empty()) {
+        std::cerr << "Error during helper/lambda inlining: " << inline_result.error << "\n";
+        return 1;
+    }
+
+    // Step 4: Subset/type checks and predicate-friendly normalization
+    auto norm_result = pred::normalizeFunction(func, inline_result.body);
     if (!norm_result.error.empty()) {
         std::cerr << "Error during subset/type checking: " << norm_result.error << "\n";
         return 1;
     }
 
-    // Step 4: Build CFG from normalized body
+    // Step 5: Build CFG from normalized body
     auto cfg = pred::buildCFG(norm_result.body);
 
-    // Step 5: Build SSA
+    // Step 6: Build SSA
     auto ssa = pred::buildSSA(cfg, norm_result.ssa_seed_symbols);
     if (!ssa.error.empty()) {
         std::cerr << "Error during SSA construction: " << ssa.error << "\n";
         return 1;
     }
 
-    // Step 6: Predication (if-conversion)
+    // Step 7: Predication (if-conversion)
     auto pred_prog = pred::predicate(ssa);
     pred_prog.function_name = func.name;
 

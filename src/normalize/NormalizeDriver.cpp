@@ -4198,12 +4198,6 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
     Env env;
     env.struct_fields = func.struct_fields;
     env.struct_constructors = func.struct_constructors;
-    for (auto& h : func.helpers) {
-        if (h) env.helpers[h->name] = *h;
-    }
-    for (auto& [name, lambda] : func.lambdas) {
-        if (lambda) env.lambdas[name] = *lambda;
-    }
 
     for (auto& p : func.params) {
         std::string pname = p.name;

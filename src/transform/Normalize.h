@@ -21,6 +21,17 @@ struct NormalizeResult {
     std::string error;
 };
 
+struct InlineResult {
+    std::vector<StmtPtr> body;
+    std::string error;
+};
+
+// Expands lambda/helper calls at the AST statement/expression level. This pass
+// intentionally runs before the predicate-friendly normalization that flattens
+// arrays and structs.
+InlineResult inlineHelpersAndLambdas(const FunctionAST& func,
+                                     const std::vector<StmtPtr>& body);
+
 // Checks the supported C++ subset, validates bit widths and assignment
 // coverage, then rewrites field accesses and dynamic array accesses into
 // flat predicate-friendly expressions.
