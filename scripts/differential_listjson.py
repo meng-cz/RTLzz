@@ -521,8 +521,8 @@ def main() -> int:
         run([
             str(predicate), str(source), "--top", args.top, "--format", "listjson",
             "--unroll-limit", "4096",
+            "--vullib", str(ROOT / "third_party/vulsim/vullib"),
             "--clang-arg", f"-I{ROOT}",
-            "--clang-arg", f"-I{ROOT / 'third_party/vulsim/vullib'}",
             "--clang-arg", "-std=c++20",
             "-o", str(listjson),
         ], cwd=ROOT)

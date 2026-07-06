@@ -183,8 +183,8 @@ def main() -> int:
         common_args = [
             str(predicate), str(source), "--top", args.top,
             "--unroll-limit", "4096",
+            "--vullib", str(ROOT / "third_party/vulsim/vullib"),
             "--clang-arg", f"-I{ROOT}",
-            "--clang-arg", f"-I{ROOT / 'third_party/vulsim/vullib'}",
             "--clang-arg", "-std=c++20",
         ]
         lj.run(common_args + ["--format", "listjson", "-o", str(listjson)], cwd=ROOT)

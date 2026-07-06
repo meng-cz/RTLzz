@@ -13,7 +13,8 @@
 namespace pred::pipeline {
 
 struct ParseConfig {
-    std::string source_file;
+    std::string source_name;
+    std::optional<std::string> source_text;
     std::string top_function;
     std::vector<std::string> clang_args;
 };

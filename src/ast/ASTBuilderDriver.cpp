@@ -32,12 +32,11 @@ static bool sourceContainsFixintInclude(const std::string& source_file) {
     return ss.str().find("fixint.hpp") != std::string::npos;
 }
 
-static std::string includePathForSource(const std::string& source_file) {
-    std::string path = source_file;
-    try {
-        path = std::filesystem::absolute(source_file).string();
-    } catch (const std::exception&) {
-    }
+static bool sourceTextContainsFixintInclude(const std::string& source_text) {
+    return source_text.find("fixint.hpp") != std::string::npos;
+}
+
+static std::string escapeForQuotedPath(const std::string& path) {
     std::string escaped;
     escaped.reserve(path.size());
     for (char ch : path) {
@@ -45,6 +44,15 @@ static std::string includePathForSource(const std::string& source_file) {
         escaped.push_back(ch);
     }
     return escaped;
+}
+
+static std::string includePathForSource(const std::string& source_file) {
+    std::string path = source_file;
+    try {
+        path = std::filesystem::absolute(source_file).string();
+    } catch (const std::exception&) {
+    }
+    return escapeForQuotedPath(path);
 }
 
 static std::string normalizedPath(const std::string& path) {
@@ -3839,11 +3847,10 @@ static void collectGlobalConstInts(CXCursor root, const std::string& source_file
     }, &wanted);
 }
 
-// --- Public API ---
-
-BuildResult buildASTFromSource(const std::string& source_file,
-                               const std::string& top_function,
-                               const std::vector<std::string>& extra_args) {
+static BuildResult buildASTFromSourceImpl(const std::string& source_file,
+                                          const std::string* source_text,
+                                          const std::string& top_function,
+                                          const std::vector<std::string>& extra_args) {
     BuildResult result;
     lambda_operator_usr_to_name.clear();
     lambda_operator_location_to_name.clear();
@@ -3858,20 +3865,38 @@ BuildResult buildASTFromSource(const std::string& source_file,
     for (auto& a : extra_args) args.push_back(a.c_str());
 
     std::string parse_file = source_file;
+    std::string source_buffer;
     std::string wrapper_source;
-    CXUnsavedFile unsaved_file{};
-    CXUnsavedFile* unsaved_files = nullptr;
+    std::vector<CXUnsavedFile> unsaved_storage;
     unsigned unsaved_count = 0;
-    if (!sourceContainsFixintInclude(source_file)) {
+    if (source_text) {
+        source_buffer = *source_text;
+        if (!sourceTextContainsFixintInclude(source_buffer)) {
+            source_buffer = "#include <fixint.hpp>\n#line 1 \"" +
+                            escapeForQuotedPath(source_file) + "\"\n" +
+                            source_buffer;
+        }
+        CXUnsavedFile source_unsaved{};
+        source_unsaved.Filename = source_file.c_str();
+        source_unsaved.Contents = source_buffer.c_str();
+        source_unsaved.Length = static_cast<unsigned long>(source_buffer.size());
+        unsaved_storage.push_back(source_unsaved);
+    }
+    const bool has_fixint_include = source_text
+        ? sourceTextContainsFixintInclude(*source_text)
+        : sourceContainsFixintInclude(source_file);
+    if (!source_text && !has_fixint_include) {
         parse_file = "/tmp/rtlzz_fixint_include_wrapper.cpp";
         wrapper_source = "#include <fixint.hpp>\n#include \"" +
                          includePathForSource(source_file) + "\"\n";
-        unsaved_file.Filename = parse_file.c_str();
-        unsaved_file.Contents = wrapper_source.c_str();
-        unsaved_file.Length = static_cast<unsigned long>(wrapper_source.size());
-        unsaved_files = &unsaved_file;
-        unsaved_count = 1;
+        CXUnsavedFile wrapper_unsaved{};
+        wrapper_unsaved.Filename = parse_file.c_str();
+        wrapper_unsaved.Contents = wrapper_source.c_str();
+        wrapper_unsaved.Length = static_cast<unsigned long>(wrapper_source.size());
+        unsaved_storage.push_back(wrapper_unsaved);
     }
+    CXUnsavedFile* unsaved_files = unsaved_storage.empty() ? nullptr : unsaved_storage.data();
+    unsaved_count = static_cast<unsigned>(unsaved_storage.size());
 
     CXTranslationUnit tu = clang_parseTranslationUnit(
         index, parse_file.c_str(),
@@ -4014,6 +4039,22 @@ BuildResult buildASTFromSource(const std::string& source_file,
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);
     return result;
+}
+
+// --- Public API ---
+
+BuildResult buildASTFromSource(const std::string& source_file,
+                               const std::string& top_function,
+                               const std::vector<std::string>& extra_args) {
+    return buildASTFromSourceImpl(source_file, nullptr, top_function, extra_args);
+}
+
+BuildResult buildASTFromSourceText(const std::string& source_name,
+                                   const std::string& source_text,
+                                   const std::string& top_function,
+                                   const std::vector<std::string>& extra_args) {
+    std::string name = source_name.empty() ? "/tmp/rtlzz_input.logic.cpp" : source_name;
+    return buildASTFromSourceImpl(name, &source_text, top_function, extra_args);
 }
 
 } // namespace pred

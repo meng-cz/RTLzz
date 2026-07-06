@@ -7,9 +7,17 @@
 namespace pred::pipeline {
 
 ParseResult parseSource(const ParseConfig& config) {
-    auto build = pred::buildASTFromSource(config.source_file,
-                                          config.top_function,
-                                          config.clang_args);
+    pred::BuildResult build;
+    if (config.source_text.has_value()) {
+        build = pred::buildASTFromSourceText(config.source_name,
+                                             config.source_text.value(),
+                                             config.top_function,
+                                             config.clang_args);
+    } else {
+        build = pred::buildASTFromSource(config.source_name,
+                                         config.top_function,
+                                         config.clang_args);
+    }
     ParseResult result;
     result.function = std::move(build.function);
     result.error = std::move(build.error);

@@ -103,8 +103,8 @@ for fixture in "${fixtures[@]}"; do
     --top "$TOP" \
     --format listjson \
     --unroll-limit 4096 \
+    --vullib "$ROOT/third_party/vulsim/vullib" \
     --clang-arg "-I$ROOT" \
-    --clang-arg "-I$ROOT/third_party/vulsim/vullib" \
     --clang-arg "-std=c++20" \
     -o "$out"
 done

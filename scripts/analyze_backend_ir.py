@@ -261,7 +261,6 @@ def analyze_fixture(
     backend_path = case_dir / "backend.txt"
     report_path = case_dir / "analysis.md"
 
-    include_arg = f"-I{root / 'third_party' / 'vulsim' / 'vullib'}"
     run(
         [
             str(predicate_expand),
@@ -272,8 +271,8 @@ def analyze_fixture(
             "json",
             "-o",
             str(json_path),
-            "--clang-arg",
-            include_arg,
+            "--vullib",
+            str(root / "third_party" / "vulsim" / "vullib"),
             "--clang-arg",
             "-std=c++20",
         ],

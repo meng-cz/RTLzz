@@ -1,10 +1,4 @@
-#include "transform/Predicate.h"
-#include "pipeline/Stages.h"
-#include "predicate/OutputExpressionMap.h"
-#include "predicate/PredicateVerifier.h"
-#include "backend/beir.hpp"
-#include "backend/rtlgen.hpp"
-#include "emitter/ListJsonEmitter.h"
+#include "rtlzz.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -18,7 +12,8 @@
 static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <source.cpp> --top <function_name> [--format listjson|beir|rtl]"
-              << " [--input source.cpp] [--unroll-limit N] [--clang-arg ARG ...] [-o output_file]\n";
+              << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
+              << " [--clang-arg ARG ...] [-o output_file]\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -51,6 +46,25 @@ static std::vector<std::string> splitArgs(const std::string& text) {
 }
 
 static constexpr int kMaxUnrollLimit = 1000000;
+
+static bool readSourceUnits(const std::string& path,
+                            std::vector<std::string>& units,
+                            std::string& error) {
+    std::ifstream in(path);
+    if (!in) {
+        error = "Cannot open input file: " + path;
+        return false;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        units.push_back(line + "\n");
+    }
+    if (!in.eof()) {
+        error = "Failed to read input file: " + path;
+        return false;
+    }
+    return true;
+}
 
 static bool parseUnrollLimit(const std::string& text, int& value, std::string& error) {
     if (text.empty()) {
@@ -87,6 +101,7 @@ static int runMain(int argc, char* argv[]) {
     std::string top_function;
     std::string format = "listjson";
     std::string output_file;
+    std::string vullib_dir;
     int unroll_limit = 1024;
     std::vector<std::string> clang_args;
 
@@ -103,6 +118,8 @@ static int runMain(int argc, char* argv[]) {
             top_function = argv[++i];
         } else if (arg == "--format" && i + 1 < argc) {
             format = argv[++i];
+        } else if ((arg == "--vullib" || arg == "--vullib-dir") && i + 1 < argc) {
+            vullib_dir = argv[++i];
         } else if (arg == "-o" && i + 1 < argc) {
             output_file = argv[++i];
         } else if (arg == "--unroll-limit" && i + 1 < argc) {
@@ -140,110 +157,32 @@ static int runMain(int argc, char* argv[]) {
         return 1;
     }
 
-    // Step 1: Parse source with Clang into frontend AST.
-    pred::pipeline::ParseConfig parse_cfg;
-    parse_cfg.source_file = source_file;
-    parse_cfg.top_function = top_function;
-    parse_cfg.clang_args = clang_args;
-    auto parse_result = pred::pipeline::parseSource(parse_cfg);
-    if (!parse_result.error.empty()) {
-        std::cerr << "Error during parse: " << parse_result.error << "\n";
+    rtlzz::CompileOptions options;
+    std::string read_error;
+    if (!readSourceUnits(source_file, options.source_codelines, read_error)) {
+        std::cerr << read_error << "\n";
         return 1;
     }
-    if (!parse_result.function.has_value()) {
-        std::cerr << "Error: failed to extract function\n";
-        return 1;
+    options.top_function = top_function;
+    options.unroll_limit = unroll_limit;
+    options.clang_args = std::move(clang_args);
+    options.vullib_dir = vullib_dir;
+
+    rtlzz::CompileResult result;
+    if (format == "listjson") {
+        result = rtlzz::compileToListJson(std::move(options));
+    } else if (format == "beir") {
+        result = rtlzz::compileToBeir(std::move(options));
+    } else {
+        result = rtlzz::compileToRtl(std::move(options));
     }
-
-    auto func = std::move(parse_result.function.value());
-
-    // Step 2: Unroll statically bounded loops in top/helper/lambda bodies.
-    pred::UnrollConfig unroll_cfg;
-    unroll_cfg.max_iterations = unroll_limit;
-    auto unroll_result = pred::pipeline::unrollFunction(std::move(func), unroll_cfg);
-    if (!unroll_result.error.empty()) {
-        std::cerr << "Error during loop unrolling: " << unroll_result.error << "\n";
-        return 1;
-    }
-    if (!unroll_result.function.has_value()) {
-        std::cerr << "Error during loop unrolling: stage produced no function\n";
-        return 1;
-    }
-
-    // Step 3: Inline user helpers/lambdas before array/struct flattening.
-    auto inline_result = pred::pipeline::inlineHelpersAndLambdas(
-        std::move(unroll_result.function.value()));
-    if (!inline_result.error.empty()) {
-        std::cerr << "Error during helper/lambda inlining: " << inline_result.error << "\n";
-        return 1;
-    }
-    if (!inline_result.function.has_value()) {
-        std::cerr << "Error during helper/lambda inlining: stage produced no function\n";
-        return 1;
-    }
-
-    const auto& lowered_func = inline_result.function.value();
-
-    // Step 4: Normalize, flatten arrays/structs, and lower frontend operations.
-    auto norm_result = pred::pipeline::normalizeFunction(lowered_func);
-    if (!norm_result.error.empty()) {
-        std::cerr << "Error during normalization/lowering: " << norm_result.error << "\n";
-        return 1;
-    }
-
-    // Step 5: Build CFG from normalized body.
-    auto cfg_result = pred::pipeline::buildControlFlow(norm_result);
-    if (!cfg_result.error.empty()) {
-        std::cerr << "Error during CFG construction: " << cfg_result.error << "\n";
-        return 1;
-    }
-
-    // Step 6: Build SSA.
-    auto ssa_result = pred::pipeline::buildSSAForm(cfg_result, norm_result);
-    if (!ssa_result.error.empty()) {
-        std::cerr << "Error during SSA construction: " << ssa_result.error << "\n";
-        return 1;
-    }
-
-    // Step 7: Predication (if-conversion)
-    auto pred_prog = pred::predicate(ssa_result.program);
-    pred_prog.function_name = lowered_func.name;
-
-    for (auto& [name, type] : norm_result.symbols) pred_prog.symbols[name] = type;
-    pred_prog.param_directions = norm_result.param_directions;
-    for (const auto& param : lowered_func.params) {
-        if (param.debug_loc.valid()) pred_prog.param_debug_locs[param.name] = param.debug_loc;
-    }
-    pred_prog.output_default_reasons = norm_result.output_default_reasons;
-    pred_prog.output_paired_controls = norm_result.output_paired_controls;
-    pred_prog.lookup_tables = norm_result.lookup_tables;
-    pred_prog.outputs = norm_result.output_params;
-    buildOutputExpressionMap(pred_prog);
-
-    auto verify_result = pred::verifyPredicateProgram(pred_prog);
-    if (!verify_result.ok) {
-        std::cerr << "Error during Predicate IR verification: "
-                  << verify_result.error << "\n";
-        return 1;
-    }
-
-    // Step 7: Emit output
-    std::string output;
-    try {
-        if (format == "listjson") {
-            output = pred::emitListJson(pred_prog);
-        } else if (format == "beir") {
-            output = pred::beir::emitText(pred_prog);
-        } else {
-            output = pred::rtlgen::emitSystemVerilog(pred_prog);
-        }
-    } catch (const std::exception& ex) {
-        std::cerr << "Error during " << format << " emission: " << ex.what() << "\n";
+    if (!result.ok()) {
+        std::cerr << "Error: " << result.error << "\n";
         return 1;
     }
 
     if (output_file.empty()) {
-        std::cout << output;
+        for (const auto& line : result.output_codelines) std::cout << line;
     } else {
         std::filesystem::path out_path(output_file);
         if (out_path.has_parent_path()) {
@@ -261,7 +200,7 @@ static int runMain(int argc, char* argv[]) {
             std::cerr << "Cannot open output file: " << output_file << "\n";
             return 1;
         }
-        ofs << output;
+        for (const auto& line : result.output_codelines) ofs << line;
     }
 
     return 0;
