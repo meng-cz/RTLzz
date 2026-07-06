@@ -1579,6 +1579,22 @@ static ParamDirection inferParamDirection(const ParamDecl& p) {
     return ParamDirection::Input;
 }
 
+static ParamDecl makeParamDeclFromCursor(CXCursor cursor) {
+    ParamDecl p;
+    p.name = cxToStr(clang_getCursorSpelling(cursor));
+    p.debug_loc = debugLocFromCursor(cursor);
+    CXType type = clang_getCursorType(cursor);
+    p.type = convertType(type);
+    p.passing = classifyParamPassing(type);
+    p.is_const = p.type.is_const;
+    p.is_pointer = p.passing == ParamPassingKind::Pointer;
+    p.is_reference = p.passing == ParamPassingKind::ConstRef ||
+                     p.passing == ParamPassingKind::MutableRef;
+    p.direction = inferParamDirection(p);
+    p.is_output = p.direction != ParamDirection::Input;
+    return p;
+}
+
 static std::string invalidTopParamReason(const ParamDecl& p) {
     if (p.passing == ParamPassingKind::Pointer) {
         return "unsupported pointer parameter '" + p.name +
@@ -3465,16 +3481,7 @@ static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name)
     int numParams = clang_Cursor_getNumArguments(cursor);
     for (int i = 0; i < numParams; ++i) {
         CXCursor param = clang_Cursor_getArgument(cursor, i);
-        ParamDecl pd;
-        pd.name = cxToStr(clang_getCursorSpelling(param));
-        pd.debug_loc = debugLocFromCursor(param);
-        CXType pt = clang_getCursorType(param);
-        pd.type = convertType(pt);
-        pd.passing = classifyParamPassing(pt);
-        pd.is_const = pd.type.is_const;
-        pd.is_pointer = pd.passing == ParamPassingKind::Pointer;
-        pd.is_reference = pd.passing == ParamPassingKind::ConstRef ||
-                          pd.passing == ParamPassingKind::MutableRef;
+        ParamDecl pd = makeParamDeclFromCursor(param);
         auto param_dims = arrayDimsAfterName(cursorText(param), pd.name); // UNSAFE_TEXT_FALLBACK_ALLOW: C array parameter dimension recovery.
         if (!param_dims.empty()) {
             pd.type.is_array = true;
@@ -3487,7 +3494,6 @@ static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name)
                 pd.type.is_mutable = !pd.type.is_const;
             }
         }
-        pd.is_output = false;
         func.params.push_back(pd);
     }
 
@@ -3532,12 +3538,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
     for (auto& c : lambda_children) {
         auto kind = clang_getCursorKind(c);
         if (kind == CXCursor_ParmDecl) {
-            ParamDecl p;
-            p.name = cxToStr(clang_getCursorSpelling(c));
-            p.debug_loc = debugLocFromCursor(c);
-            p.type = convertType(clang_getCursorType(c));
-            p.is_output = false;
-            fn->params.push_back(p);
+            fn->params.push_back(makeParamDeclFromCursor(c));
         } else if (kind == CXCursor_CompoundStmt && fn->body.empty()) {
             fn->body = convertBlock(c);
             collect_nested_lambdas(c);
@@ -3555,12 +3556,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
             auto* ctx = static_cast<LambdaMethodCtx*>(data);
             auto mk = clang_getCursorKind(mc);
             if (mk == CXCursor_ParmDecl) {
-                ParamDecl p;
-                p.name = cxToStr(clang_getCursorSpelling(mc));
-                p.debug_loc = debugLocFromCursor(mc);
-                p.type = convertType(clang_getCursorType(mc));
-                p.is_output = false;
-                ctx->fn->params.push_back(p);
+                ctx->fn->params.push_back(makeParamDeclFromCursor(mc));
             } else if (mk == CXCursor_CompoundStmt && ctx->fn->body.empty()) {
                 ctx->fn->body = convertBlock(mc);
             }
@@ -3588,12 +3584,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         for (auto& c : lambda_children) {
             auto kind = clang_getCursorKind(c);
             if (kind == CXCursor_ParmDecl) {
-                ParamDecl p;
-                p.name = cxToStr(clang_getCursorSpelling(c));
-                p.debug_loc = debugLocFromCursor(c);
-                p.type = convertType(clang_getCursorType(c));
-                p.is_output = false;
-                fn->params.push_back(p);
+                fn->params.push_back(makeParamDeclFromCursor(c));
             } else if (kind == CXCursor_CompoundStmt && fn->body.empty()) {
                 fn->body = convertBlock(c);
                 collect_nested_lambdas(c);

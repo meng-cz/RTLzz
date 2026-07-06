@@ -2,6 +2,8 @@
 #include "normalize/NormalizeUtils.h"
 
 #include <algorithm>
+#include <optional>
+#include <sstream>
 #include <unordered_set>
 #include <utility>
 
@@ -215,6 +217,7 @@ public:
         for (const auto& item : func.lambdas) {
             if (item.second) lambdas_[item.first] = item.second.get();
         }
+        struct_fields_ = func.struct_fields;
     }
 
     InlineResult run(const std::vector<StmtPtr>& body) {
@@ -235,8 +238,139 @@ private:
 
     std::unordered_map<std::string, const FunctionAST*> helpers_;
     std::unordered_map<std::string, const FunctionAST*> lambdas_;
+    std::unordered_map<std::string, std::vector<StructFieldInfo>> struct_fields_;
     int inline_counter_ = 0;
     std::string error_;
+
+    const std::vector<StructFieldInfo>* findStructFields(const TypeInfo& type) const {
+        std::string canonical = canonicalStructName(
+            type.struct_name.empty() ? type.name : type.struct_name);
+        for (const auto& key : {type.struct_name, type.name, canonical,
+                                std::string("struct ") + canonical}) {
+            if (key.empty()) continue;
+            auto it = struct_fields_.find(key);
+            if (it != struct_fields_.end()) return &it->second;
+        }
+        return nullptr;
+    }
+
+    int flattenedWidth(const TypeInfo& type) const {
+        if (type.width > 0) return type.width;
+        const auto* fields = findStructFields(type);
+        if (!fields || fields->empty()) return 0;
+        int width = 0;
+        for (const auto& field : *fields) {
+            int field_width = flattenedWidth(field.type);
+            if (field_width <= 0) return 0;
+            width += field_width;
+        }
+        return width;
+    }
+
+    std::optional<std::pair<std::string, TypeInfo>>
+    inlineLocalFieldTarget(const ExprPtr& target, const ExprFlow& flow) const {
+        if (!target || target->kind != ExprKind::FieldAccess || !target->struct_base) {
+            return std::nullopt;
+        }
+        const std::string base = baseName(target->struct_base);
+        if (base.empty()) return std::nullopt;
+        auto type_it = flow.types.find(base);
+        if (type_it == flow.types.end()) return std::nullopt;
+        const auto* fields = findStructFields(type_it->second);
+        if (!fields) return std::nullopt;
+        for (const auto& field : *fields) {
+            if (field.name == target->field_name) {
+                return std::make_pair(base + "_" + field.name, field.type);
+            }
+        }
+        return std::nullopt;
+    }
+
+    ExprPtr packInlineStructLocal(const std::string& name,
+                                  const TypeInfo& type,
+                                  const ExprFlow& flow,
+                                  const std::string& callee) {
+        const auto* fields = findStructFields(type);
+        if (!fields || fields->empty()) return nullptr;
+        std::vector<ExprPtr> parts;
+        for (const auto& field : *fields) {
+            const std::string flat = name + "_" + field.name;
+            ExprPtr part;
+            if (findStructFields(field.type)) {
+                part = packInlineStructLocal(flat, field.type, flow, callee);
+            } else {
+                auto value_it = flow.values.find(flat);
+                if (value_it == flow.values.end()) {
+                    error_ = "Helper function '" + callee +
+                             "' returns struct local '" + name +
+                             "' with uninitialized field '" + field.name + "'";
+                    return nullptr;
+                }
+                part = castIfWidthChanges(cloneExpr(value_it->second), field.type);
+            }
+            if (!part || !error_.empty()) return nullptr;
+            parts.push_back(std::move(part));
+        }
+        std::reverse(parts.begin(), parts.end());
+        return make_concat(std::move(parts));
+    }
+
+    bool storeInlineStructLocal(const std::string& name,
+                                const TypeInfo& type,
+                                const ExprPtr& packed,
+                                ExprFlow& flow,
+                                const std::string& callee,
+                                int& offset) {
+        const auto* fields = findStructFields(type);
+        if (!fields || fields->empty()) return false;
+        for (const auto& field : *fields) {
+            const std::string flat = name + "_" + field.name;
+            if (findStructFields(field.type)) {
+                flow.types[flat] = field.type;
+                if (!storeInlineStructLocal(flat, field.type, packed, flow, callee, offset)) {
+                    return false;
+                }
+                continue;
+            }
+            int field_width = flattenedWidth(field.type);
+            if (field_width <= 0) {
+                error_ = "Helper function '" + callee +
+                         "' assigns struct field with unknown width '" + flat + "'";
+                return false;
+            }
+            TypeInfo leaf_type = field.type;
+            leaf_type.width = field_width;
+            flow.types[flat] = leaf_type;
+            flow.values[flat] = make_slice(cloneExpr(packed),
+                                           offset + field_width - 1,
+                                           offset,
+                                           leaf_type);
+            offset += field_width;
+        }
+        return true;
+    }
+
+    std::string returnedStructLocalName(const ExprPtr& expr, const ExprFlow& flow) const {
+        if (!expr) return "";
+        if (expr->kind == ExprKind::VarRef) {
+            auto type_it = flow.types.find(expr->var_name);
+            if (type_it != flow.types.end() && findStructFields(type_it->second)) {
+                return expr->var_name;
+            }
+            return "";
+        }
+        if (expr->kind == ExprKind::Cast) {
+            return returnedStructLocalName(expr->cast_expr, flow);
+        }
+        if ((expr->kind == ExprKind::ZExt || expr->kind == ExprKind::SExt ||
+             expr->kind == ExprKind::Trunc) && expr->base) {
+            return returnedStructLocalName(expr->base, flow);
+        }
+        if (expr->kind == ExprKind::Call && expr->args.size() == 1) {
+            return returnedStructLocalName(expr->args.front(), flow);
+        }
+        return "";
+    }
 
     const FunctionAST* resolveCallee(std::string& callee,
                                      const TypeInfo& call_type,
@@ -328,8 +462,49 @@ private:
         flow.return_guard = orInlineExpr(std::move(flow.return_guard), std::move(guard));
     }
 
+    ExprPtr substituteFlowExpr(const ExprPtr& expr, const ExprFlow& flow) {
+        if (!expr) return nullptr;
+        if (expr->kind == ExprKind::VarRef) {
+            auto it = flow.values.find(expr->var_name);
+            if (it != flow.values.end()) return cloneExpr(it->second);
+        }
+        if (expr->kind == ExprKind::FieldAccess &&
+            expr->struct_base) {
+            const std::string base = baseName(expr->struct_base);
+            if (!base.empty()) {
+                const std::string flat = base + "_" + expr->field_name;
+                auto it = flow.values.find(flat);
+                if (it != flow.values.end()) return cloneExpr(it->second);
+                auto base_it = flow.values.find(base);
+                if (base_it != flow.values.end()) {
+                    return make_field_access(cloneExpr(base_it->second),
+                                             expr->field_name,
+                                             expr->type);
+                }
+            }
+        }
+        auto r = std::make_shared<Expr>(*expr);
+        if (expr->left) r->left = substituteFlowExpr(expr->left, flow);
+        if (expr->right) r->right = substituteFlowExpr(expr->right, flow);
+        if (expr->operand) r->operand = substituteFlowExpr(expr->operand, flow);
+        if (expr->array_base) r->array_base = substituteFlowExpr(expr->array_base, flow);
+        if (expr->index) r->index = substituteFlowExpr(expr->index, flow);
+        if (expr->struct_base) r->struct_base = substituteFlowExpr(expr->struct_base, flow);
+        if (expr->cast_expr) r->cast_expr = substituteFlowExpr(expr->cast_expr, flow);
+        if (expr->cond) r->cond = substituteFlowExpr(expr->cond, flow);
+        if (expr->then_expr) r->then_expr = substituteFlowExpr(expr->then_expr, flow);
+        if (expr->else_expr) r->else_expr = substituteFlowExpr(expr->else_expr, flow);
+        if (expr->base) r->base = substituteFlowExpr(expr->base, flow);
+        if (expr->value) r->value = substituteFlowExpr(expr->value, flow);
+        r->args.clear();
+        for (const auto& arg : expr->args) r->args.push_back(substituteFlowExpr(arg, flow));
+        r->parts.clear();
+        for (const auto& part : expr->parts) r->parts.push_back(substituteFlowExpr(part, flow));
+        return r;
+    }
+
     ExprPtr rewriteInlineExpr(const ExprPtr& expr, const ExprFlow& flow) {
-        return rewriteExpr(substituteInlineExpr(expr, flow.values));
+        return rewriteExpr(substituteFlowExpr(expr, flow));
     }
 
     bool lowerExprSequence(const std::vector<StmtPtr>& statements,
@@ -341,33 +516,92 @@ private:
             case StmtKind::Decl: {
                 flow.types[stmt->decl_name] = stmt->decl_type;
                 if (!stmt->decl_init.has_value()) {
+                    if (const auto* fields = findStructFields(stmt->decl_type)) {
+                        for (const auto& field : *fields) {
+                            flow.types[stmt->decl_name + "_" + field.name] = field.type;
+                        }
+                        break;
+                    }
                     error_ = "Helper function '" + callee +
                              "' declares uninitialized local '" + stmt->decl_name + "'";
                     return false;
                 }
                 auto value = rewriteInlineExpr(stmt->decl_init.value(), flow);
                 if (!value || !error_.empty()) return false;
+                if (findStructFields(stmt->decl_type)) {
+                    int packed_width = flattenedWidth(stmt->decl_type);
+                    if (packed_width <= 0) {
+                        error_ = "Helper function '" + callee +
+                                 "' declares struct local with unknown flattened width '" +
+                                 stmt->decl_name + "'";
+                        return false;
+                    }
+                    ExprPtr packed = value;
+                    if (packed->type.width != packed_width) {
+                        packed = castIfWidthChanges(packed,
+                                                    make_hw_type("UInt", packed_width, false));
+                    }
+                    int offset = 0;
+                    if (!storeInlineStructLocal(stmt->decl_name, stmt->decl_type,
+                                                packed, flow, callee, offset)) {
+                        return false;
+                    }
+                    break;
+                }
                 flow.values[stmt->decl_name] = castIfWidthChanges(value, stmt->decl_type);
                 break;
             }
             case StmtKind::Assign: {
-                if (!stmt->assign_target || stmt->assign_target->kind != ExprKind::VarRef) {
+                std::string name;
+                TypeInfo type;
+                bool require_existing = true;
+                if (stmt->assign_target && stmt->assign_target->kind == ExprKind::VarRef) {
+                    name = stmt->assign_target->var_name;
+                    auto type_it = flow.types.find(name);
+                    if (type_it != flow.types.end()) type = type_it->second;
+                } else if (auto field = inlineLocalFieldTarget(stmt->assign_target, flow)) {
+                    name = field->first;
+                    type = field->second;
+                    flow.types[name] = type;
+                    require_existing = false;
+                } else {
                     error_ = "Helper function '" + callee +
                              "' expression inline supports assignments only to local/value variables";
                     return false;
                 }
-                const std::string name = stmt->assign_target->var_name;
                 auto old_it = flow.values.find(name);
-                if (old_it == flow.values.end()) {
+                if (require_existing && old_it == flow.values.end()) {
                     error_ = "Helper function '" + callee +
                              "' assigns unknown local/value variable '" + name + "'";
                     return false;
                 }
                 auto value = rewriteInlineExpr(stmt->assign_value, flow);
                 if (!value || !error_.empty()) return false;
-                TypeInfo type = flow.types.count(name) ? flow.types[name] : old_it->second->type;
+                if (type.width <= 0) {
+                    type = flow.types.count(name) ? flow.types[name] :
+                           (old_it != flow.values.end() ? old_it->second->type : value->type);
+                }
+                if (findStructFields(type)) {
+                    int packed_width = flattenedWidth(type);
+                    if (packed_width <= 0) {
+                        error_ = "Helper function '" + callee +
+                                 "' assigns struct local with unknown flattened width '" +
+                                 name + "'";
+                        return false;
+                    }
+                    ExprPtr packed = value;
+                    if (packed->type.width != packed_width) {
+                        packed = castIfWidthChanges(packed,
+                                                    make_hw_type("UInt", packed_width, false));
+                    }
+                    int offset = 0;
+                    if (!storeInlineStructLocal(name, type, packed, flow, callee, offset)) {
+                        return false;
+                    }
+                    break;
+                }
                 value = castIfWidthChanges(value, type);
-                if (isTrueLiteral(flow.active)) {
+                if (isTrueLiteral(flow.active) || old_it == flow.values.end()) {
                     flow.values[name] = std::move(value);
                 } else {
                     flow.values[name] = make_ternary(cloneExpr(flow.active), std::move(value),
@@ -404,6 +638,18 @@ private:
                                                      cloneExpr(else_it->second),
                                                      type);
                 }
+                for (const auto& [name, then_value] : then_flow.values) {
+                    if (flow.values.count(name)) continue;
+                    auto else_it = else_flow.values.find(name);
+                    if (else_it == else_flow.values.end()) continue;
+                    TypeInfo type = then_value && then_value->type.width > 0
+                        ? then_value->type
+                        : flow.types[name];
+                    flow.values[name] = make_ternary(cloneExpr(condition),
+                                                     cloneExpr(then_value),
+                                                     cloneExpr(else_it->second),
+                                                     type);
+                }
                 if (then_flow.return_value) {
                     appendReturn(flow, cloneExpr(then_flow.return_guard),
                                  cloneExpr(then_flow.return_value));
@@ -437,7 +683,19 @@ private:
                              "' used as expression contains a void return";
                     return false;
                 }
-                auto value = rewriteInlineExpr(stmt->return_value.value(), flow);
+                ExprPtr value;
+                auto returned = stmt->return_value.value();
+                std::string returned_local = returnedStructLocalName(returned, flow);
+                if (!returned_local.empty()) {
+                    auto type_it = flow.types.find(returned_local);
+                    if (type_it != flow.types.end() && findStructFields(type_it->second)) {
+                        value = packInlineStructLocal(returned_local,
+                                                      type_it->second,
+                                                      flow,
+                                                      callee);
+                    }
+                }
+                if (!value) value = rewriteInlineExpr(returned, flow);
                 if (!value || !error_.empty()) return false;
                 appendReturn(flow, cloneExpr(flow.active), std::move(value));
                 flow.active = make_literal("false", boolType());
@@ -469,10 +727,22 @@ private:
 
         ExprFlow flow;
         for (std::size_t i = 0; i < helper.params.size(); ++i) {
-            flow.types[helper.params[i].name] = helper.params[i].type;
+            const auto& param = helper.params[i];
+            flow.types[param.name] = param.type;
             auto arg = rewriteExpr(call->args[i + arg_offset]);
             if (!arg || !error_.empty()) return nullptr;
-            flow.values[helper.params[i].name] = arg;
+            if (const auto* fields = findStructFields(param.type)) {
+                flow.values[param.name] = cloneExpr(arg);
+                for (const auto& field : *fields) {
+                    const std::string flat = param.name + "_" + field.name;
+                    flow.types[flat] = field.type;
+                    flow.values[flat] = make_field_access(cloneExpr(arg),
+                                                          field.name,
+                                                          field.type);
+                }
+            } else {
+                flow.values[param.name] = arg;
+            }
         }
 
         if (!lowerExprSequence(helper.body, callee, flow)) return nullptr;
@@ -534,15 +804,35 @@ private:
             return out;
         }
 
+        int inline_id = inline_counter_++;
         std::unordered_map<std::string, ExprPtr> arg_map;
+        std::vector<StmtPtr> value_param_decls;
         for (std::size_t i = 0; i < param_names.size(); ++i) {
             auto arg = rewriteExpr(call->args[i + arg_offset]);
             if (!arg || !error_.empty()) return out;
-            arg_map[param_names[i]] = arg;
+            const auto& param = helper->params[i];
+            if (param.passing == ParamPassingKind::Value &&
+                param.type.width > 0 &&
+                !param.type.is_array &&
+                arg->kind != ExprKind::VarRef &&
+                arg->kind != ExprKind::Literal) {
+                std::ostringstream name;
+                name << param.name << "__arg_" << inline_id << "_" << i;
+                auto temp = make_var(name.str(), param.type);
+                auto decl = std::make_shared<Stmt>();
+                decl->kind = StmtKind::Decl;
+                decl->decl_name = name.str();
+                decl->decl_type = param.type;
+                decl->decl_init = castIfWidthChanges(arg, param.type);
+                value_param_decls.push_back(std::move(decl));
+                arg_map[param.name] = std::move(temp);
+            } else {
+                arg_map[param.name] = arg;
+            }
         }
-        int inline_id = inline_counter_++;
         collectLocalRenames(helper->body, param_names, inline_id, arg_map);
         out = substituteInlineStmts(helper->body, arg_map);
+        out.insert(out.begin(), value_param_decls.begin(), value_param_decls.end());
         out = localizeProcedureReturns(out, callee, error_);
         if (!error_.empty()) return {};
         return rewriteStmts(out);
