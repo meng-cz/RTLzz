@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <unordered_set>
 #include <utility>
 
@@ -15,6 +16,29 @@ ExprPtr substituteInlineExpr(const ExprPtr& e,
     if (e->kind == ExprKind::VarRef) {
         auto it = args.find(e->var_name);
         if (it != args.end()) return cloneExpr(it->second);
+    }
+    if (e->kind == ExprKind::ArrayAccess) {
+        ExprPtr base;
+        std::vector<ExprPtr> indices;
+        if (collectArrayAccess(e, base, indices) && base) {
+            const std::string name = baseName(base);
+            if (!name.empty()) {
+                std::vector<int> literal_prefix;
+                bool all_literal = true;
+                for (const auto& idx : indices) {
+                    auto lit = literalIndex(idx);
+                    if (!lit.has_value()) {
+                        all_literal = false;
+                        break;
+                    }
+                    literal_prefix.push_back(*lit);
+                }
+                if (all_literal) {
+                    auto it = args.find(joinIndexName(name, literal_prefix));
+                    if (it != args.end()) return cloneExpr(it->second);
+                }
+            }
+        }
     }
     auto r = std::make_shared<Expr>(*e);
     if (e->left) r->left = substituteInlineExpr(e->left, args);
@@ -254,7 +278,23 @@ private:
         return nullptr;
     }
 
+    TypeInfo normalizeArrayType(TypeInfo type) const {
+        if (type.is_array && type.array_dims.empty() && type.array_size > 0) {
+            type.array_dims = {type.array_size};
+        }
+        return type;
+    }
+
     int flattenedWidth(const TypeInfo& type) const {
+        TypeInfo array_type = normalizeArrayType(type);
+        if (array_type.is_array && !array_type.array_dims.empty()) {
+            TypeInfo elem_type = scalarTypeFromArray(array_type);
+            int elem_width = flattenedWidth(elem_type);
+            if (elem_width <= 0) return 0;
+            int count = 1;
+            for (int dim : array_type.array_dims) count *= std::max(1, dim);
+            return elem_width * count;
+        }
         if (type.width > 0) return type.width;
         const auto* fields = findStructFields(type);
         if (!fields || fields->empty()) return 0;
@@ -284,6 +324,28 @@ private:
             }
         }
         return std::nullopt;
+    }
+
+    std::optional<std::pair<std::string, TypeInfo>>
+    inlineLocalArrayTarget(const ExprPtr& target, const ExprFlow& flow) const {
+        ExprPtr base;
+        std::vector<ExprPtr> indices;
+        if (!collectArrayAccess(target, base, indices) || !base) return std::nullopt;
+        const std::string name = baseName(base);
+        if (name.empty()) return std::nullopt;
+        auto type_it = flow.types.find(name);
+        if (type_it == flow.types.end()) return std::nullopt;
+        TypeInfo arr_type = normalizeArrayType(type_it->second);
+        if (!arr_type.is_array || arr_type.array_dims.empty()) return std::nullopt;
+        if (indices.size() != arr_type.array_dims.size()) return std::nullopt;
+        std::vector<int> literal_prefix;
+        for (const auto& idx : indices) {
+            auto lit = literalIndex(idx);
+            if (!lit.has_value()) return std::nullopt;
+            literal_prefix.push_back(*lit);
+        }
+        TypeInfo elem_type = scalarTypeFromArray(arr_type);
+        return std::make_pair(joinIndexName(name, literal_prefix), elem_type);
     }
 
     ExprPtr packInlineStructLocal(const std::string& name,
@@ -316,6 +378,49 @@ private:
         TypeInfo packed_type = type;
         packed_type.width = packed->type.width;
         packed->type = packed_type;
+        return packed;
+    }
+
+    ExprPtr packInlineArrayLocal(const std::string& name,
+                                 const TypeInfo& type,
+                                 const ExprFlow& flow,
+                                 const std::string& callee) {
+        TypeInfo arr_type = normalizeArrayType(type);
+        if (!arr_type.is_array || arr_type.array_dims.empty()) return nullptr;
+        TypeInfo elem_type = scalarTypeFromArray(arr_type);
+        std::vector<ExprPtr> parts;
+        std::vector<int> prefix;
+        auto collect = [&](auto&& self, std::size_t depth) -> bool {
+            if (depth >= arr_type.array_dims.size()) {
+                const std::string flat = joinIndexName(name, prefix);
+                ExprPtr part;
+                if (findStructFields(elem_type)) {
+                    part = packInlineStructLocal(flat, elem_type, flow, callee);
+                } else {
+                    auto value_it = flow.values.find(flat);
+                    if (value_it == flow.values.end()) {
+                        error_ = "Helper function '" + callee +
+                                 "' returns array local '" + name +
+                                 "' with uninitialized element '" + flat + "'";
+                        return false;
+                    }
+                    part = castIfWidthChanges(cloneExpr(value_it->second), elem_type);
+                }
+                if (!part || !error_.empty()) return false;
+                parts.push_back(std::move(part));
+                return true;
+            }
+            for (int i = 0; i < arr_type.array_dims[depth]; ++i) {
+                prefix.push_back(i);
+                if (!self(self, depth + 1)) return false;
+                prefix.pop_back();
+            }
+            return true;
+        };
+        if (!collect(collect, 0)) return nullptr;
+        std::reverse(parts.begin(), parts.end());
+        auto packed = make_concat(std::move(parts));
+        packed->type = make_hw_type("UInt", packed->type.width, false);
         return packed;
     }
 
@@ -354,6 +459,49 @@ private:
         return true;
     }
 
+    bool storeInlineArrayLocal(const std::string& name,
+                               const TypeInfo& type,
+                               const ExprPtr& packed,
+                               ExprFlow& flow,
+                               const std::string& callee,
+                               int& offset) {
+        TypeInfo arr_type = normalizeArrayType(type);
+        if (!arr_type.is_array || arr_type.array_dims.empty()) return false;
+        TypeInfo elem_type = scalarTypeFromArray(arr_type);
+        std::vector<int> prefix;
+        auto store = [&](auto&& self, std::size_t depth) -> bool {
+            if (depth >= arr_type.array_dims.size()) {
+                const std::string flat = joinIndexName(name, prefix);
+                flow.types[flat] = elem_type;
+                if (findStructFields(elem_type)) {
+                    return storeInlineStructLocal(flat, elem_type, packed, flow, callee, offset);
+                }
+                int elem_width = flattenedWidth(elem_type);
+                if (elem_width <= 0) {
+                    error_ = "Helper function '" + callee +
+                             "' assigns array element with unknown width '" + flat + "'";
+                    return false;
+                }
+                TypeInfo leaf_type = elem_type;
+                leaf_type.width = elem_width;
+                flow.types[flat] = leaf_type;
+                flow.values[flat] = make_slice(cloneExpr(packed),
+                                               offset + elem_width - 1,
+                                               offset,
+                                               leaf_type);
+                offset += elem_width;
+                return true;
+            }
+            for (int i = 0; i < arr_type.array_dims[depth]; ++i) {
+                prefix.push_back(i);
+                if (!self(self, depth + 1)) return false;
+                prefix.pop_back();
+            }
+            return true;
+        };
+        return store(store, 0);
+    }
+
     std::string returnedStructLocalName(const ExprPtr& expr, const ExprFlow& flow) const {
         if (!expr) return "";
         if (expr->kind == ExprKind::VarRef) {
@@ -374,6 +522,39 @@ private:
             return returnedStructLocalName(expr->args.front(), flow);
         }
         return "";
+    }
+
+    std::string returnedArrayLocalName(const ExprPtr& expr, const ExprFlow& flow) const {
+        if (!expr) return "";
+        if (expr->kind == ExprKind::VarRef) {
+            auto type_it = flow.types.find(expr->var_name);
+            if (type_it != flow.types.end()) {
+                TypeInfo arr_type = normalizeArrayType(type_it->second);
+                if (arr_type.is_array && !arr_type.array_dims.empty()) return expr->var_name;
+            }
+            return "";
+        }
+        if (expr->kind == ExprKind::Cast) {
+            return returnedArrayLocalName(expr->cast_expr, flow);
+        }
+        if ((expr->kind == ExprKind::ZExt || expr->kind == ExprKind::SExt ||
+             expr->kind == ExprKind::Trunc) && expr->base) {
+            return returnedArrayLocalName(expr->base, flow);
+        }
+        if (expr->kind == ExprKind::Call && expr->args.size() == 1) {
+            return returnedArrayLocalName(expr->args.front(), flow);
+        }
+        return "";
+    }
+
+    ExprPtr zeroAggregateValue(const TypeInfo& type, const std::string& callee) {
+        int width = flattenedWidth(type);
+        if (width <= 0) {
+            error_ = "Helper function '" + callee +
+                     "' default-initializes aggregate with unknown flattened width";
+            return nullptr;
+        }
+        return make_literal("0", make_hw_type("UInt", width, false));
     }
 
     const FunctionAST* resolveCallee(std::string& callee,
@@ -487,6 +668,34 @@ private:
                 }
             }
         }
+        if (expr->kind == ExprKind::ArrayAccess) {
+            ExprPtr base;
+            std::vector<ExprPtr> indices;
+            if (collectArrayAccess(expr, base, indices) && base) {
+                const std::string name = baseName(base);
+                auto type_it = flow.types.find(name);
+                if (!name.empty() && type_it != flow.types.end()) {
+                    TypeInfo arr_type = normalizeArrayType(type_it->second);
+                    if (arr_type.is_array && indices.size() == arr_type.array_dims.size()) {
+                        std::vector<int> literal_prefix;
+                        bool all_literal = true;
+                        for (const auto& idx : indices) {
+                            auto lit = literalIndex(idx);
+                            if (!lit.has_value()) {
+                                all_literal = false;
+                                break;
+                            }
+                            literal_prefix.push_back(*lit);
+                        }
+                        if (all_literal) {
+                            const std::string flat = joinIndexName(name, literal_prefix);
+                            auto it = flow.values.find(flat);
+                            if (it != flow.values.end()) return cloneExpr(it->second);
+                        }
+                    }
+                }
+            }
+        }
         auto r = std::make_shared<Expr>(*expr);
         if (expr->left) r->left = substituteFlowExpr(expr->left, flow);
         if (expr->right) r->right = substituteFlowExpr(expr->right, flow);
@@ -519,6 +728,7 @@ private:
             switch (stmt->kind) {
             case StmtKind::Decl: {
                 flow.types[stmt->decl_name] = stmt->decl_type;
+                TypeInfo decl_array_type = normalizeArrayType(stmt->decl_type);
                 if (!stmt->decl_init.has_value()) {
                     if (const auto* fields = findStructFields(stmt->decl_type)) {
                         for (const auto& field : *fields) {
@@ -526,11 +736,37 @@ private:
                         }
                         break;
                     }
+                    if (decl_array_type.is_array && !decl_array_type.array_dims.empty()) {
+                        std::vector<int> prefix;
+                        auto add_types = [&](auto&& self, std::size_t depth) -> void {
+                            if (depth >= decl_array_type.array_dims.size()) {
+                                flow.types[joinIndexName(stmt->decl_name, prefix)] =
+                                    scalarTypeFromArray(decl_array_type);
+                                return;
+                            }
+                            for (int i = 0; i < decl_array_type.array_dims[depth]; ++i) {
+                                prefix.push_back(i);
+                                self(self, depth + 1);
+                                prefix.pop_back();
+                            }
+                        };
+                        add_types(add_types, 0);
+                        break;
+                    }
                     error_ = "Helper function '" + callee +
                              "' declares uninitialized local '" + stmt->decl_name + "'";
                     return false;
                 }
-                auto value = rewriteInlineExpr(stmt->decl_init.value(), flow);
+                ExprPtr value;
+                if ((findStructFields(stmt->decl_type) ||
+                     (decl_array_type.is_array && !decl_array_type.array_dims.empty())) &&
+                    stmt->decl_init.value() &&
+                    stmt->decl_init.value()->kind == ExprKind::Call &&
+                    stmt->decl_init.value()->args.empty()) {
+                    value = zeroAggregateValue(stmt->decl_type, callee);
+                } else {
+                    value = rewriteInlineExpr(stmt->decl_init.value(), flow);
+                }
                 if (!value || !error_.empty()) return false;
                 if (findStructFields(stmt->decl_type)) {
                     int packed_width = flattenedWidth(stmt->decl_type);
@@ -552,6 +788,26 @@ private:
                     }
                     break;
                 }
+                if (decl_array_type.is_array && !decl_array_type.array_dims.empty()) {
+                    int packed_width = flattenedWidth(decl_array_type);
+                    if (packed_width <= 0) {
+                        error_ = "Helper function '" + callee +
+                                 "' declares array local with unknown flattened width '" +
+                                 stmt->decl_name + "'";
+                        return false;
+                    }
+                    ExprPtr packed = value;
+                    if (packed->type.width != packed_width) {
+                        packed = castIfWidthChanges(packed,
+                                                    make_hw_type("UInt", packed_width, false));
+                    }
+                    int offset = 0;
+                    if (!storeInlineArrayLocal(stmt->decl_name, decl_array_type,
+                                               packed, flow, callee, offset)) {
+                        return false;
+                    }
+                    break;
+                }
                 flow.values[stmt->decl_name] = castIfWidthChanges(value, stmt->decl_type);
                 break;
             }
@@ -566,6 +822,11 @@ private:
                 } else if (auto field = inlineLocalFieldTarget(stmt->assign_target, flow)) {
                     name = field->first;
                     type = field->second;
+                    flow.types[name] = type;
+                    require_existing = false;
+                } else if (auto element = inlineLocalArrayTarget(stmt->assign_target, flow)) {
+                    name = element->first;
+                    type = element->second;
                     flow.types[name] = type;
                     require_existing = false;
                 } else {
@@ -600,6 +861,27 @@ private:
                     }
                     int offset = 0;
                     if (!storeInlineStructLocal(name, type, packed, flow, callee, offset)) {
+                        return false;
+                    }
+                    break;
+                }
+                TypeInfo assign_array_type = normalizeArrayType(type);
+                if (assign_array_type.is_array && !assign_array_type.array_dims.empty()) {
+                    int packed_width = flattenedWidth(assign_array_type);
+                    if (packed_width <= 0) {
+                        error_ = "Helper function '" + callee +
+                                 "' assigns array local with unknown flattened width '" +
+                                 name + "'";
+                        return false;
+                    }
+                    ExprPtr packed = value;
+                    if (packed->type.width != packed_width) {
+                        packed = castIfWidthChanges(packed,
+                                                    make_hw_type("UInt", packed_width, false));
+                    }
+                    int offset = 0;
+                    if (!storeInlineArrayLocal(name, assign_array_type,
+                                               packed, flow, callee, offset)) {
                         return false;
                     }
                     break;
@@ -699,6 +981,18 @@ private:
                                                       callee);
                     }
                 }
+                if (!value) {
+                    returned_local = returnedArrayLocalName(returned, flow);
+                    if (!returned_local.empty()) {
+                        auto type_it = flow.types.find(returned_local);
+                        if (type_it != flow.types.end()) {
+                            value = packInlineArrayLocal(returned_local,
+                                                         type_it->second,
+                                                         flow,
+                                                         callee);
+                        }
+                    }
+                }
                 if (!value) value = rewriteInlineExpr(returned, flow);
                 if (!value || !error_.empty()) return false;
                 appendReturn(flow, cloneExpr(flow.active), std::move(value));
@@ -745,7 +1039,34 @@ private:
                                                           field.type);
                 }
             } else {
-                flow.values[param.name] = arg;
+                TypeInfo param_array_type = normalizeArrayType(param.type);
+                if (param_array_type.is_array && !param_array_type.array_dims.empty()) {
+                    flow.values[param.name] = cloneExpr(arg);
+                    TypeInfo elem_type = scalarTypeFromArray(param_array_type);
+                    std::vector<int> prefix;
+                    auto add_elements = [&](auto&& self, std::size_t depth, ExprPtr base) -> void {
+                        if (depth >= param_array_type.array_dims.size()) {
+                            const std::string flat = joinIndexName(param.name, prefix);
+                            flow.types[flat] = elem_type;
+                            flow.values[flat] = base;
+                            return;
+                        }
+                        for (int idx = 0; idx < param_array_type.array_dims[depth]; ++idx) {
+                            prefix.push_back(idx);
+                            auto access = make_array_access(
+                                cloneExpr(base),
+                                make_literal(std::to_string(idx), TypeInfo{"int", 32, true}),
+                                depth + 1 == param_array_type.array_dims.size()
+                                    ? elem_type
+                                    : param_array_type);
+                            self(self, depth + 1, std::move(access));
+                            prefix.pop_back();
+                        }
+                    };
+                    add_elements(add_elements, 0, cloneExpr(arg));
+                } else {
+                    flow.values[param.name] = arg;
+                }
             }
         }
 
@@ -758,6 +1079,14 @@ private:
             error_ = "Helper function '" + callee +
                      "' does not return a value on every statically represented path";
             return nullptr;
+        }
+        TypeInfo call_array_type = normalizeArrayType(call->type);
+        if (!call_array_type.is_array) {
+            call_array_type = normalizeArrayType(helper.return_type);
+        }
+        if (call_array_type.is_array && !call_array_type.array_dims.empty()) {
+            flow.return_value->type = make_hw_type("UInt", flow.return_value->type.width, false);
+            return flow.return_value;
         }
         return castIfWidthChanges(flow.return_value, call->type);
     }

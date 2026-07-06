@@ -680,7 +680,13 @@ private:
 
     Signal& ensureSignal(const std::string& name, ValueType type) {
         if (type.isArray()) {
-            throw std::runtime_error("beir scalar signal cannot use array type: " + name);
+            std::string dims;
+            for (int dim : type.array_dims) {
+                dims += dims.empty() ? std::to_string(dim) : "x" + std::to_string(dim);
+            }
+            throw std::runtime_error("beir scalar signal cannot use array type: " + name +
+                                     " width=" + std::to_string(type.width) +
+                                     " dims=" + dims);
         }
         auto it = signal_id_by_name_.find(name);
         if (it == signal_id_by_name_.end()) {

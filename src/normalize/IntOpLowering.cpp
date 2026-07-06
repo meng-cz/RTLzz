@@ -110,17 +110,27 @@ TypeInfo constantContextType(TypeInfo target_type) {
 }
 
 ExprPtr castIfWidthChanges(ExprPtr value, const TypeInfo& target_type) {
-    if (!value || target_type.width <= 0 || value->type.width <= 0) {
+    TypeInfo scalar_target = target_type;
+    if (scalar_target.is_array) {
+        scalar_target.is_array = false;
+        scalar_target.array_size = 0;
+        scalar_target.array_dims.clear();
+    }
+    if (!value || scalar_target.width <= 0 || value->type.width <= 0) {
         return value;
     }
-    if (target_type.width == value->type.width) {
+    if (scalar_target.width == value->type.width) {
         const bool has_target_type =
-            !target_type.name.empty() || !target_type.hw_kind.empty() || target_type.is_hw_int;
+            !scalar_target.name.empty() || !scalar_target.hw_kind.empty() || scalar_target.is_hw_int;
         const bool metadata_differs =
-            value->type.name != target_type.name ||
-            value->type.hw_kind != target_type.hw_kind ||
-            value->type.is_signed != target_type.is_signed ||
-            value->type.is_hw_int != target_type.is_hw_int;
+            value->type.name != scalar_target.name ||
+            value->type.hw_kind != scalar_target.hw_kind ||
+            value->type.is_signed != scalar_target.is_signed ||
+            value->type.is_hw_int != scalar_target.is_hw_int ||
+            value->type.is_array != scalar_target.is_array ||
+            value->type.array_size != scalar_target.array_size ||
+            value->type.array_dims != scalar_target.array_dims ||
+            value->type.struct_name != scalar_target.struct_name;
         if (has_target_type && metadata_differs) {
             // A same-width signed/unsigned conversion is still semantic. Keep
             // it as an explicit node so SSA symbol typing cannot erase the
@@ -128,30 +138,30 @@ ExprPtr castIfWidthChanges(ExprPtr value, const TypeInfo& target_type) {
             auto out = std::make_shared<Expr>();
             out->kind = ExprKind::Cast;
             out->cast_expr = std::move(value);
-            out->cast_type = target_type;
-            out->type = target_type;
+            out->cast_type = scalar_target;
+            out->type = scalar_target;
             return out;
         }
         return value;
     }
-    if (target_type.width > value->type.width) {
+    if (scalar_target.width > value->type.width) {
         ExprPtr widened;
         if (value->type.hw_kind == "signed_view" || value->type.is_signed) {
-            widened = make_sext(value, target_type.width);
+            widened = make_sext(value, scalar_target.width);
         } else {
-            widened = make_zext(value, target_type.width);
+            widened = make_zext(value, scalar_target.width);
         }
-        widened->type = target_type;
+        widened->type = scalar_target;
         return widened;
     }
-    if (value->type.hw_kind == "signed_view" && target_type.width > 0 && value->type.width > target_type.width) {
-        auto narrowed = make_trunc(value, target_type.width, target_type.is_signed);
-        narrowed->type = target_type;
+    if (value->type.hw_kind == "signed_view" && scalar_target.width > 0 && value->type.width > scalar_target.width) {
+        auto narrowed = make_trunc(value, scalar_target.width, scalar_target.is_signed);
+        narrowed->type = scalar_target;
         auto sign = make_bit_select(cloneExpr(value), value->type.width - 1);
-        return make_write_bit(narrowed, target_type.width - 1, sign, target_type);
+        return make_write_bit(narrowed, scalar_target.width - 1, sign, scalar_target);
     }
-    auto narrowed = make_trunc(value, target_type.width, target_type.is_signed);
-    narrowed->type = target_type;
+    auto narrowed = make_trunc(value, scalar_target.width, scalar_target.is_signed);
+    narrowed->type = scalar_target;
     return narrowed;
 }
 

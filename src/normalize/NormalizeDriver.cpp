@@ -30,6 +30,7 @@ std::vector<StmtPtr> rewriteStmts(const std::vector<StmtPtr>& stmts, Env& env);
 const std::vector<StructFieldInfo>* structFieldsForType(const TypeInfo& type, const Env& env);
 const std::vector<StructFieldInfo>* findStructFields(const TypeInfo& type, Env& env);
 ExprPtr buildPackedStructValue(const ExprPtr& value, TypeInfo target_type, Env& env);
+TypeInfo normalizeArrayType(TypeInfo type);
 int flattenedTypeWidth(const TypeInfo& type, Env& env);
 bool appendStructUnpackDecls(const StmtPtr& block,
                              const std::string& prefix,
@@ -774,6 +775,29 @@ inlineLocalFieldTarget(const ExprPtr& target,
     return std::nullopt;
 }
 
+std::optional<std::pair<std::string, TypeInfo>>
+inlineLocalArrayTarget(const ExprPtr& target,
+                       const InlineExpressionFlow& flow) {
+    ExprPtr base;
+    std::vector<ExprPtr> indices;
+    if (!collectArrayAccess(target, base, indices) || !base) return std::nullopt;
+    const std::string name = baseName(base);
+    if (name.empty()) return std::nullopt;
+    auto type_it = flow.types.find(name);
+    if (type_it == flow.types.end()) return std::nullopt;
+    TypeInfo arr_type = normalizeArrayType(type_it->second);
+    if (!arr_type.is_array || arr_type.array_dims.empty()) return std::nullopt;
+    if (indices.size() != arr_type.array_dims.size()) return std::nullopt;
+    std::vector<int> literal_prefix;
+    for (const auto& idx : indices) {
+        auto lit = literalIndex(idx);
+        if (!lit.has_value()) return std::nullopt;
+        literal_prefix.push_back(*lit);
+    }
+    return std::make_pair(joinIndexName(name, literal_prefix),
+                          scalarTypeFromArray(arr_type));
+}
+
 ExprPtr packInlineStructLocal(const std::string& name,
                               const TypeInfo& type,
                               const InlineExpressionFlow& flow,
@@ -805,6 +829,50 @@ ExprPtr packInlineStructLocal(const std::string& name,
     TypeInfo packed_type = type;
     packed_type.width = packed->type.width;
     packed->type = packed_type;
+    return packed;
+}
+
+ExprPtr packInlineArrayLocal(const std::string& name,
+                             const TypeInfo& type,
+                             const InlineExpressionFlow& flow,
+                             Env& env,
+                             const std::string& callee) {
+    TypeInfo arr_type = normalizeArrayType(type);
+    if (!arr_type.is_array || arr_type.array_dims.empty()) return nullptr;
+    TypeInfo elem_type = scalarTypeFromArray(arr_type);
+    std::vector<ExprPtr> parts;
+    std::vector<int> prefix;
+    auto collect = [&](auto&& self, std::size_t depth) -> bool {
+        if (depth >= arr_type.array_dims.size()) {
+            const std::string flat = joinIndexName(name, prefix);
+            ExprPtr part;
+            if (findStructFields(elem_type, env)) {
+                part = packInlineStructLocal(flat, elem_type, flow, env, callee);
+            } else {
+                auto value_it = flow.values.find(flat);
+                if (value_it == flow.values.end()) {
+                    env.error = "Helper function '" + callee +
+                                "' returns array local '" + name +
+                                "' with uninitialized element '" + flat + "'";
+                    return false;
+                }
+                part = castIfWidthChanges(cloneExpr(value_it->second), elem_type);
+            }
+            if (!part || !env.error.empty()) return false;
+            parts.push_back(std::move(part));
+            return true;
+        }
+        for (int i = 0; i < arr_type.array_dims[depth]; ++i) {
+            prefix.push_back(i);
+            if (!self(self, depth + 1)) return false;
+            prefix.pop_back();
+        }
+        return true;
+    };
+    if (!collect(collect, 0)) return nullptr;
+    std::reverse(parts.begin(), parts.end());
+    auto packed = make_concat(std::move(parts));
+    packed->type = make_hw_type("UInt", packed->type.width, false);
     return packed;
 }
 
@@ -842,6 +910,52 @@ bool storeInlineStructLocal(const std::string& name,
         offset += field_width;
     }
     return true;
+}
+
+bool storeInlineArrayLocal(const std::string& name,
+                           const TypeInfo& type,
+                           const ExprPtr& packed,
+                           InlineExpressionFlow& flow,
+                           Env& env,
+                           const std::string& callee,
+                           int& offset) {
+    TypeInfo arr_type = normalizeArrayType(type);
+    if (!arr_type.is_array || arr_type.array_dims.empty()) return false;
+    TypeInfo elem_type = scalarTypeFromArray(arr_type);
+    std::vector<int> prefix;
+    auto store = [&](auto&& self, std::size_t depth) -> bool {
+        if (depth >= arr_type.array_dims.size()) {
+            const std::string flat = joinIndexName(name, prefix);
+            flow.types[flat] = elem_type;
+            if (findStructFields(elem_type, env)) {
+                return storeInlineStructLocal(flat, elem_type, packed,
+                                              flow, env, callee, offset);
+            }
+            int elem_width = flattenedTypeWidth(elem_type, env);
+            if (elem_width <= 0) {
+                env.error = "Helper function '" + callee +
+                            "' assigns array element with unknown width '" +
+                            flat + "'";
+                return false;
+            }
+            TypeInfo leaf_type = elem_type;
+            leaf_type.width = elem_width;
+            flow.types[flat] = leaf_type;
+            flow.values[flat] = make_slice(cloneExpr(packed),
+                                           offset + elem_width - 1,
+                                           offset,
+                                           leaf_type);
+            offset += elem_width;
+            return true;
+        }
+        for (int i = 0; i < arr_type.array_dims[depth]; ++i) {
+            prefix.push_back(i);
+            if (!self(self, depth + 1)) return false;
+            prefix.pop_back();
+        }
+        return true;
+    };
+    return store(store, 0);
 }
 
 ExprPtr orExpr(ExprPtr lhs, ExprPtr rhs) {
@@ -942,6 +1056,7 @@ bool lowerInlineExpressionSequence(const std::vector<StmtPtr>& statements,
         switch (stmt->kind) {
         case StmtKind::Decl: {
             flow.types[stmt->decl_name] = stmt->decl_type;
+            TypeInfo decl_array_type = normalizeArrayType(stmt->decl_type);
             const std::string decl_struct_name = canonicalStructName(stmt->decl_type.name);
             std::string init_struct_name;
             if (stmt->decl_init.has_value() && stmt->decl_init.value() &&
@@ -961,19 +1076,92 @@ bool lowerInlineExpressionSequence(const std::vector<StmtPtr>& statements,
                 stmt->decl_init.value()->kind == ExprKind::Call &&
                 stmt->decl_init.value()->args.empty() &&
                 known_struct_type;
-            if (empty_struct_constructor) {
+            const bool empty_array_constructor = stmt->decl_init.has_value() &&
+                stmt->decl_init.value() &&
+                stmt->decl_init.value()->kind == ExprKind::Call &&
+                stmt->decl_init.value()->args.empty() &&
+                decl_array_type.is_array && !decl_array_type.array_dims.empty();
+            if (empty_struct_constructor && !findStructFields(stmt->decl_type, env)) {
                 break;
             }
             if (!stmt->decl_init.has_value()) {
                 if (findStructFields(stmt->decl_type, env)) {
                     break;
                 }
+                if (decl_array_type.is_array && !decl_array_type.array_dims.empty()) {
+                    std::vector<int> prefix;
+                    auto add_types = [&](auto&& self, std::size_t depth) -> void {
+                        if (depth >= decl_array_type.array_dims.size()) {
+                            flow.types[joinIndexName(stmt->decl_name, prefix)] =
+                                scalarTypeFromArray(decl_array_type);
+                            return;
+                        }
+                        for (int i = 0; i < decl_array_type.array_dims[depth]; ++i) {
+                            prefix.push_back(i);
+                            self(self, depth + 1);
+                            prefix.pop_back();
+                        }
+                    };
+                    add_types(add_types, 0);
+                    break;
+                }
                 env.error = "Helper function '" + callee +
                             "' declares uninitialized local '" + stmt->decl_name + "'";
                 return false;
             }
-            auto value = rewriteInlineExpression(stmt->decl_init.value(), flow, env);
+            ExprPtr value;
+            if (empty_array_constructor || empty_struct_constructor) {
+                int width = flattenedTypeWidth(stmt->decl_type, env);
+                if (width <= 0) {
+                    env.error = "Helper function '" + callee +
+                                "' default-initializes aggregate with unknown flattened width";
+                    return false;
+                }
+                value = make_literal("0", make_hw_type("UInt", width, false));
+            } else {
+                value = rewriteInlineExpression(stmt->decl_init.value(), flow, env);
+            }
             if (!value || !env.error.empty()) return false;
+            if (findStructFields(stmt->decl_type, env)) {
+                int packed_width = flattenedTypeWidth(stmt->decl_type, env);
+                if (packed_width <= 0) {
+                    env.error = "Helper function '" + callee +
+                                "' declares struct local with unknown flattened width '" +
+                                stmt->decl_name + "'";
+                    return false;
+                }
+                ExprPtr packed = value;
+                if (packed->type.width != packed_width) {
+                    packed = castIfWidthChanges(packed,
+                                                make_hw_type("UInt", packed_width, false));
+                }
+                int offset = 0;
+                if (!storeInlineStructLocal(stmt->decl_name, stmt->decl_type,
+                                            packed, flow, env, callee, offset)) {
+                    return false;
+                }
+                break;
+            }
+            if (decl_array_type.is_array && !decl_array_type.array_dims.empty()) {
+                int packed_width = flattenedTypeWidth(decl_array_type, env);
+                if (packed_width <= 0) {
+                    env.error = "Helper function '" + callee +
+                                "' declares array local with unknown flattened width '" +
+                                stmt->decl_name + "'";
+                    return false;
+                }
+                ExprPtr packed = value;
+                if (packed->type.width != packed_width) {
+                    packed = castIfWidthChanges(packed,
+                                                make_hw_type("UInt", packed_width, false));
+                }
+                int offset = 0;
+                if (!storeInlineArrayLocal(stmt->decl_name, decl_array_type,
+                                           packed, flow, env, callee, offset)) {
+                    return false;
+                }
+                break;
+            }
             flow.values[stmt->decl_name] = castIfWidthChanges(value, stmt->decl_type);
             break;
         }
@@ -988,6 +1176,11 @@ bool lowerInlineExpressionSequence(const std::vector<StmtPtr>& statements,
             } else if (auto field = inlineLocalFieldTarget(stmt->assign_target, flow, env)) {
                 name = field->first;
                 type = field->second;
+                flow.types[name] = type;
+                require_existing = false;
+            } else if (auto element = inlineLocalArrayTarget(stmt->assign_target, flow)) {
+                name = element->first;
+                type = element->second;
                 flow.types[name] = type;
                 require_existing = false;
             } else {
@@ -1028,6 +1221,27 @@ bool lowerInlineExpressionSequence(const std::vector<StmtPtr>& statements,
                 }
                 int offset = 0;
                 if (!storeInlineStructLocal(name, type, packed, flow, env, callee, offset)) {
+                    return false;
+                }
+                break;
+            }
+            TypeInfo assign_array_type = normalizeArrayType(type);
+            if (assign_array_type.is_array && !assign_array_type.array_dims.empty()) {
+                int packed_width = flattenedTypeWidth(assign_array_type, env);
+                if (packed_width <= 0) {
+                    env.error = "Helper function '" + callee +
+                                "' assigns array local with unknown flattened width '" +
+                                name + "'";
+                    return false;
+                }
+                ExprPtr packed = value;
+                if (packed->type.width != packed_width) {
+                    packed = castIfWidthChanges(packed,
+                                                make_hw_type("UInt", packed_width, false));
+                }
+                int offset = 0;
+                if (!storeInlineArrayLocal(name, assign_array_type,
+                                           packed, flow, env, callee, offset)) {
                     return false;
                 }
                 break;
@@ -1087,7 +1301,12 @@ bool lowerInlineExpressionSequence(const std::vector<StmtPtr>& statements,
             if (!name.empty()) {
                 auto type_it = flow.types.find(name);
                 if (type_it != flow.types.end()) {
-                    value = packInlineStructLocal(name, type_it->second, flow, env, callee);
+                    TypeInfo ret_array_type = normalizeArrayType(type_it->second);
+                    if (ret_array_type.is_array && !ret_array_type.array_dims.empty()) {
+                        value = packInlineArrayLocal(name, ret_array_type, flow, env, callee);
+                    } else if (findStructFields(type_it->second, env)) {
+                        value = packInlineStructLocal(name, type_it->second, flow, env, callee);
+                    }
                 }
             }
             if (!value) value = rewriteInlineExpression(stmt->return_value.value(), flow, env);
@@ -1331,6 +1550,50 @@ ExprPtr inlineHelperCall(const ExprPtr& e, Env& env) {
     // call named after the struct. For the restricted value semantics this is
     // an identity wrapper around the single source value; field unpacking is
     // performed by the declaration lowering that consumes it.
+    TypeInfo call_array_type = normalizeArrayType(e->type);
+    if (call_array_type.is_array && !call_array_type.array_dims.empty()) {
+        int packed_width = flattenedTypeWidth(call_array_type, env);
+        if (packed_width <= 0) {
+            env.error = "Unsupported value-initialized array '" + e->callee +
+                        "' with unknown flattened width";
+            return nullptr;
+        }
+        if (e->args.empty()) {
+            return make_literal("0", make_hw_type("UInt", packed_width, false));
+        }
+        TypeInfo elem_type = scalarTypeFromArray(call_array_type);
+        std::vector<ExprPtr> parts;
+        for (const auto& arg : e->args) {
+            ExprPtr value;
+            TypeInfo arg_type = arg ? arg->type : TypeInfo{};
+            if (arg && arg->kind == ExprKind::VarRef && env.symbols.count(arg->var_name)) {
+                arg_type = env.symbols[arg->var_name];
+            }
+            if (findStructFields(arg_type, env)) {
+                int width = flattenedTypeWidth(arg_type, env);
+                value = buildPackedStructValue(arg, make_hw_type("UInt", width, false), env);
+            } else {
+                value = rewriteExpr(arg, env);
+            }
+            if (!value || !env.error.empty()) return nullptr;
+            parts.push_back(castIfWidthChanges(value, elem_type));
+        }
+        if (parts.empty()) {
+            return make_literal("0", make_hw_type("UInt", packed_width, false));
+        }
+        std::reverse(parts.begin(), parts.end());
+        auto packed = make_concat(std::move(parts));
+        int concat_width = packed->type.width;
+        packed->type = make_hw_type("UInt", concat_width > 0 ? concat_width : packed_width, false);
+        return packed;
+    }
+    if (e->args.empty() && e->type.width > 0) {
+        const std::string callee_type = canonicalStructName(e->callee);
+        const std::string expr_type = canonicalStructName(e->type.name);
+        if (!callee_type.empty() && callee_type == expr_type) {
+            return make_literal("0", e->type);
+        }
+    }
     const std::string constructor_name = canonicalStructName(e->callee);
     bool is_struct_constructor = env.struct_fields.count(constructor_name) != 0 ||
                                  env.struct_fields.count("struct " + constructor_name) != 0;
@@ -1499,7 +1762,35 @@ ExprPtr inlineHelperCall(const ExprPtr& e, Env& env) {
     InlineExpressionFlow flow;
     flow.values = std::move(arg_map);
     for (std::size_t i = 0; i < helper.params.size(); ++i) {
-        flow.types[helper.params[i].name] = helper.params[i].type;
+        const auto& param = helper.params[i];
+        flow.types[param.name] = param.type;
+        TypeInfo param_array_type = normalizeArrayType(param.type);
+        if (param_array_type.is_array && !param_array_type.array_dims.empty()) {
+            TypeInfo elem_type = scalarTypeFromArray(param_array_type);
+            auto base_it = flow.values.find(param.name);
+            if (base_it == flow.values.end()) continue;
+            std::vector<int> prefix;
+            auto add_elements = [&](auto&& self, std::size_t depth, ExprPtr base) -> void {
+                if (depth >= param_array_type.array_dims.size()) {
+                    const std::string flat = joinIndexName(param.name, prefix);
+                    flow.types[flat] = elem_type;
+                    flow.values[flat] = base;
+                    return;
+                }
+                for (int idx = 0; idx < param_array_type.array_dims[depth]; ++idx) {
+                    prefix.push_back(idx);
+                    auto access = make_array_access(
+                        cloneExpr(base),
+                        make_literal(std::to_string(idx), TypeInfo{"int", 32, true}),
+                        depth + 1 == param_array_type.array_dims.size()
+                            ? elem_type
+                            : param_array_type);
+                    self(self, depth + 1, std::move(access));
+                    prefix.pop_back();
+                }
+            };
+            add_elements(add_elements, 0, cloneExpr(base_it->second));
+        }
     }
     if (!lowerInlineExpressionSequence(helper.body, e->callee, flow, env)) return nullptr;
     if (!flow.return_value) {
@@ -1510,6 +1801,29 @@ ExprPtr inlineHelperCall(const ExprPtr& e, Env& env) {
         env.error = "Helper function '" + e->callee +
                     "' does not return a value on every statically represented path";
         return nullptr;
+    }
+    TypeInfo helper_return_array = normalizeArrayType(helper.return_type);
+    if (flow.return_value && flow.return_value->type.width <= 0 &&
+        helper_return_array.is_array && !helper_return_array.array_dims.empty()) {
+        std::string match;
+        ExprPtr packed_match;
+        for (const auto& [name, type] : flow.types) {
+            TypeInfo candidate = normalizeArrayType(type);
+            if (!candidate.is_array || candidate.array_dims != helper_return_array.array_dims) {
+                continue;
+            }
+            if (!match.empty()) {
+                env.error = "Helper function '" + e->callee +
+                            "' has ambiguous array return slot";
+                return nullptr;
+            }
+            match = name;
+            packed_match = packInlineArrayLocal(name, candidate, flow, env, e->callee);
+            if (!packed_match || !env.error.empty()) return nullptr;
+        }
+        if (packed_match) {
+            flow.return_value = packed_match;
+        }
     }
     if (flow.return_value && flow.return_value->type.width <= 0) {
         const auto* return_fields = findStructFields(helper.return_type, env);
@@ -1566,6 +1880,14 @@ ExprPtr inlineHelperCall(const ExprPtr& e, Env& env) {
         TypeInfo return_type = helper.return_type;
         return_type.width = flow.return_value->type.width;
         flow.return_value->type = return_type;
+    }
+    TypeInfo return_array_type = normalizeArrayType(e->type);
+    if (!return_array_type.is_array) {
+        return_array_type = normalizeArrayType(helper.return_type);
+    }
+    if (flow.return_value && return_array_type.is_array && !return_array_type.array_dims.empty()) {
+        flow.return_value->type = make_hw_type("UInt", flow.return_value->type.width, false);
+        return flow.return_value;
     }
     return castIfWidthChanges(flow.return_value, e->type);
 }
@@ -1914,6 +2236,13 @@ const std::vector<StructFieldInfo>* structFieldsForType(const TypeInfo& type, co
     return nullptr;
 }
 
+TypeInfo normalizeArrayType(TypeInfo type) {
+    if (type.is_array && type.array_dims.empty() && type.array_size > 0) {
+        type.array_dims = {type.array_size};
+    }
+    return type;
+}
+
 std::string initializerArgForField(const StmtPtr& decl,
                                    const std::string& field,
                                    const Env& env) {
@@ -2198,6 +2527,15 @@ const std::vector<StructConstructorInfo>* findStructConstructors(const TypeInfo&
 }
 
 int flattenedTypeWidth(const TypeInfo& type, Env& env) {
+    TypeInfo arr_type = normalizeArrayType(type);
+    if (arr_type.is_array && !arr_type.array_dims.empty()) {
+        TypeInfo elem_type = scalarTypeFromArray(arr_type);
+        int elem_width = flattenedTypeWidth(elem_type, env);
+        if (elem_width <= 0) return 0;
+        int count = 1;
+        for (int dim : arr_type.array_dims) count *= std::max(1, dim);
+        return elem_width * count;
+    }
     if (type.width > 0) return type.width;
     const auto* fields = findStructFields(type, env);
     if (!fields || fields->empty()) return 0;
@@ -2469,6 +2807,47 @@ std::vector<StmtPtr> rewritePackedArrayInitDecl(const StmtPtr& s, Env& env) {
 
     ExprPtr packed;
     auto init = s->decl_init.value();
+    ExprPtr init_base;
+    std::vector<ExprPtr> init_indices;
+    if (collectArrayAccess(init, init_base, init_indices) && init_base) {
+        TypeInfo init_array_type = init_base->type;
+        std::string init_base_name = baseName(init_base);
+        if (!init_base_name.empty() && env.symbols.count(init_base_name)) {
+            init_array_type = env.symbols[init_base_name];
+        }
+        init_array_type = normalizeArrayType(init_array_type);
+        if (init_array_type.is_array &&
+            init_indices.size() == init_array_type.array_dims.size()) {
+            auto value = rewriteExpr(init, env);
+            if (!value || !env.error.empty()) return out;
+            TypeInfo scalar = value->type;
+            if (scalar.is_array) scalar = scalarTypeFromArray(init_array_type);
+            std::vector<int> cleanup_prefix;
+            auto cleanup = [&](auto&& self, std::size_t depth) -> void {
+                if (depth >= arr_type.array_dims.size()) {
+                    const std::string flat = joinIndexName(s->decl_name, cleanup_prefix);
+                    env.symbols.erase(flat);
+                    env.initialized.erase(flat);
+                    return;
+                }
+                for (int i = 0; i < arr_type.array_dims[depth]; ++i) {
+                    cleanup_prefix.push_back(i);
+                    self(self, depth + 1);
+                    cleanup_prefix.pop_back();
+                }
+            };
+            cleanup(cleanup, 0);
+            auto stmt = std::make_shared<Stmt>();
+            stmt->kind = StmtKind::Decl;
+            stmt->decl_name = s->decl_name;
+            stmt->decl_type = scalar;
+            stmt->decl_init = castIfWidthChanges(value, scalar);
+            env.symbols[s->decl_name] = scalar;
+            markScalarFullyInitialized(env, s->decl_name, scalar);
+            out.push_back(std::move(stmt));
+            return out;
+        }
+    }
     std::string init_name = directVarName(init);
     if (!init_name.empty() && env.symbols.count(init_name)) {
         TypeInfo src_type = env.symbols[init_name];
@@ -2543,9 +2922,25 @@ std::vector<StmtPtr> rewritePackedArrayInitDecl(const StmtPtr& s, Env& env) {
         packed = rewriteExpr(init, env);
         if (!env.error.empty()) return out;
     }
+    if (packed) {
+        TypeInfo packed_array_type = normalizeArrayType(packed->type);
+        if (packed_array_type.is_array && !packed_array_type.array_dims.empty()) {
+            int packed_array_width = flattenedTypeWidth(packed_array_type, env);
+            if (packed_array_width > 0 && packed->type.width < packed_array_width) {
+                packed->type.width = packed_array_width;
+            }
+        }
+    }
 
     int elem_count = flatElementCount(arr_type);
     TypeInfo scalar = scalarTypeFromArray(arr_type);
+    int target_array_width = flattenedTypeWidth(arr_type, env);
+    if (packed && target_array_width > 0 && packed->type.width > 0 &&
+        packed->type.width < target_array_width &&
+        packed->kind == ExprKind::Trunc &&
+        packed->cast_expr && packed->cast_expr->type.width >= target_array_width) {
+        packed = packed->cast_expr;
+    }
     if (packed && packed->type.width > 0 && elem_count > 1 &&
         scalar.width > 0 && scalar.width * elem_count > packed->type.width &&
         arr_type.width > 0 && arr_type.width % elem_count == 0) {
@@ -2613,7 +3008,11 @@ ExprPtr rewriteArrayAccess(const ExprPtr& e, Env& env) {
                                         scalar);
         auto value = rewriteArrayAccess(access, env);
         if (!value || !env.error.empty()) return nullptr;
-        return castIfWidthChanges(value, e->type.width > 0 ? e->type : scalar);
+        TypeInfo target_type = e->type;
+        if (target_type.is_array || target_type.width <= 0) {
+            target_type = scalar;
+        }
+        return castIfWidthChanges(value, target_type);
     }
 
     TypeInfo arr_type = base->type;
@@ -3054,9 +3453,22 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
     case ExprKind::Trunc: {
         auto c = rewriteExpr(e->cast_expr, env);
         if (!env.error.empty()) return nullptr;
-        if (e->kind == ExprKind::SExt) return make_sext(c, e->to_width > 0 ? e->to_width : e->type.width);
-        if (e->kind == ExprKind::Trunc) return make_trunc(c, e->to_width > 0 ? e->to_width : e->type.width, e->type.is_signed);
-        return make_zext(c, e->to_width > 0 ? e->to_width : e->type.width);
+        TypeInfo cast_type = e->type;
+        if (cast_type.is_array) cast_type = scalarTypeFromArray(cast_type);
+        int to_width = e->to_width > 0 ? e->to_width : cast_type.width;
+        if (e->kind == ExprKind::SExt) {
+            auto out = make_sext(c, to_width);
+            out->type = cast_type.width > 0 ? cast_type : out->type;
+            return out;
+        }
+        if (e->kind == ExprKind::Trunc) {
+            auto out = make_trunc(c, to_width, cast_type.is_signed);
+            out->type = cast_type.width > 0 ? cast_type : out->type;
+            return out;
+        }
+        auto out = make_zext(c, to_width);
+        out->type = cast_type.width > 0 ? cast_type : out->type;
+        return out;
     }
     case ExprKind::Slice:
     case ExprKind::BitSelect: {
@@ -3074,7 +3486,11 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
             env.error = "Slice out of bounds";
             return nullptr;
         }
-        return make_slice(b, e->hi, e->lo, e->type);
+        TypeInfo slice_type = e->type;
+        if (slice_type.is_array) {
+            slice_type = scalarTypeFromArray(slice_type);
+        }
+        return make_slice(b, e->hi, e->lo, slice_type);
     }
     case ExprKind::WriteSlice:
     case ExprKind::WriteBit:
@@ -3211,11 +3627,12 @@ void expandArrayWriteRec(const std::string& name,
         auto s = std::make_shared<Stmt>();
         s->kind = StmtKind::Assign;
         s->assign_target = make_var(flat, scalar);
+        rhs = castIfWidthChanges(rhs, scalar);
         if (isRegProxyWdataAliasTarget(flat, env) && scalar.width > 0) {
             s->assign_value = make_write_slice(make_var(flat, scalar),
                                                scalar.width - 1,
                                                0,
-                                               castIfWidthChanges(rhs, scalar),
+                                               rhs,
                                                scalar);
         } else {
             s->assign_value = rhs;
@@ -3561,6 +3978,40 @@ ExprPtr rewriteTarget(const ExprPtr& e, Env& env) {
                 if (env.symbols.count(alias->canonical_name)) alias_type = env.symbols[alias->canonical_name];
                 markFormalWrite(env, alias->canonical_name);
                 return make_var(alias->canonical_name, alias_type);
+            }
+        }
+        ExprPtr array_base;
+        std::vector<ExprPtr> array_indices;
+        if (collectArrayAccess(e->struct_base, array_base, array_indices) && array_base) {
+            std::string array_name = baseName(array_base);
+            TypeInfo array_type = array_base->type;
+            if (!array_name.empty() && env.symbols.count(array_name)) {
+                array_type = env.symbols[array_name];
+            }
+            array_type = normalizeArrayType(array_type);
+            if (array_type.is_array && array_indices.size() == array_type.array_dims.size()) {
+                std::vector<int> literal_prefix;
+                bool all_literal = true;
+                for (const auto& idx : array_indices) {
+                    auto lit = literalIndex(idx);
+                    if (!lit.has_value()) {
+                        all_literal = false;
+                        break;
+                    }
+                    literal_prefix.push_back(*lit);
+                }
+                TypeInfo elem_type = scalarTypeFromArray(array_type);
+                if (all_literal) {
+                    if (const auto* fields = findStructFields(elem_type, env)) {
+                        for (const auto& field : *fields) {
+                            if (field.name == e->field_name) {
+                                return make_var(joinIndexName(array_name, literal_prefix) +
+                                                    "_" + field.name,
+                                                field.type);
+                            }
+                        }
+                    }
+                }
             }
         }
         auto b = rewriteTarget(e->struct_base, env);
