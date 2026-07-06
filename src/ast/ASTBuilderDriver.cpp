@@ -1,7 +1,6 @@
 ﻿#include "ast/ASTBuilder.h"
 #include "ast/VulOpRecognizer.h"
 #include "ast/VulTypeRecognizer.h"
-#include "transform/LoopUnroll.h"
 #include <clang-c/Index.h>
 #include <cstring>
 #include <functional>
@@ -3989,17 +3988,6 @@ BuildResult buildASTFromSource(const std::string& source_file,
     }
     collectStructFieldLayouts(root, func);
     collectLocalLambdas(found, func);
-    for (auto& [name, lambda] : func.lambdas) {
-        if (!lambda) continue;
-        auto unrolled = unrollLoops(lambda->body);
-        if (!unrolled.error.empty()) {
-            result.error = "Failed to unroll lambda '" + name + "': " + unrolled.error;
-            clang_disposeTranslationUnit(tu);
-            clang_disposeIndex(index);
-            return result;
-        }
-        lambda->body = std::move(unrolled.body);
-    }
 
     std::vector<StmtPtr> global_static_decls;
     clang_visitChildren(root, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
@@ -4018,14 +4006,6 @@ BuildResult buildASTFromSource(const std::string& source_file,
         if (fn.name == func.name && clang_equalCursors(fn.cursor, found)) continue;
         if (fn.name == func.name) continue;
         auto helper = std::make_shared<FunctionAST>(convertFunctionDecl(fn.cursor, fn.name));
-        auto unrolled = unrollLoops(helper->body);
-        if (!unrolled.error.empty()) {
-            result.error = "Failed to unroll helper '" + fn.name + "': " + unrolled.error;
-            clang_disposeTranslationUnit(tu);
-            clang_disposeIndex(index);
-            return result;
-        }
-        helper->body = std::move(unrolled.body);
         func.helpers.push_back(helper);
     }
 

@@ -1,9 +1,5 @@
-#include "ast/ASTBuilder.h"
-#include "ir/CFG.h"
-#include "ir/SSA.h"
-#include "transform/LoopUnroll.h"
-#include "transform/Normalize.h"
 #include "transform/Predicate.h"
+#include "pipeline/Stages.h"
 #include "predicate/OutputExpressionMap.h"
 #include "predicate/PredicateVerifier.h"
 #include "backend/beir.hpp"
@@ -144,59 +140,78 @@ static int runMain(int argc, char* argv[]) {
         return 1;
     }
 
-    // Step 1: Parse source with Clang
-    auto build_result = pred::buildASTFromSource(source_file, top_function, clang_args);
-    if (!build_result.error.empty()) {
-        std::cerr << "Error: " << build_result.error << "\n";
+    // Step 1: Parse source with Clang into frontend AST.
+    pred::pipeline::ParseConfig parse_cfg;
+    parse_cfg.source_file = source_file;
+    parse_cfg.top_function = top_function;
+    parse_cfg.clang_args = clang_args;
+    auto parse_result = pred::pipeline::parseSource(parse_cfg);
+    if (!parse_result.error.empty()) {
+        std::cerr << "Error during parse: " << parse_result.error << "\n";
         return 1;
     }
-    if (!build_result.function.has_value()) {
+    if (!parse_result.function.has_value()) {
         std::cerr << "Error: failed to extract function\n";
         return 1;
     }
 
-    auto& func = build_result.function.value();
+    auto func = std::move(parse_result.function.value());
 
-    // Step 2: Unroll loops
+    // Step 2: Unroll statically bounded loops in top/helper/lambda bodies.
     pred::UnrollConfig unroll_cfg;
     unroll_cfg.max_iterations = unroll_limit;
-    auto unroll_result = pred::unrollLoops(func.body, unroll_cfg);
+    auto unroll_result = pred::pipeline::unrollFunction(std::move(func), unroll_cfg);
     if (!unroll_result.error.empty()) {
         std::cerr << "Error during loop unrolling: " << unroll_result.error << "\n";
         return 1;
     }
+    if (!unroll_result.function.has_value()) {
+        std::cerr << "Error during loop unrolling: stage produced no function\n";
+        return 1;
+    }
 
     // Step 3: Inline user helpers/lambdas before array/struct flattening.
-    auto inline_result = pred::inlineHelpersAndLambdas(func, unroll_result.body);
+    auto inline_result = pred::pipeline::inlineHelpersAndLambdas(
+        std::move(unroll_result.function.value()));
     if (!inline_result.error.empty()) {
         std::cerr << "Error during helper/lambda inlining: " << inline_result.error << "\n";
         return 1;
     }
-
-    // Step 4: Subset/type checks and predicate-friendly normalization
-    auto norm_result = pred::normalizeFunction(func, inline_result.body);
-    if (!norm_result.error.empty()) {
-        std::cerr << "Error during subset/type checking: " << norm_result.error << "\n";
+    if (!inline_result.function.has_value()) {
+        std::cerr << "Error during helper/lambda inlining: stage produced no function\n";
         return 1;
     }
 
-    // Step 5: Build CFG from normalized body
-    auto cfg = pred::buildCFG(norm_result.body);
+    const auto& lowered_func = inline_result.function.value();
 
-    // Step 6: Build SSA
-    auto ssa = pred::buildSSA(cfg, norm_result.ssa_seed_symbols);
-    if (!ssa.error.empty()) {
-        std::cerr << "Error during SSA construction: " << ssa.error << "\n";
+    // Step 4: Normalize, flatten arrays/structs, and lower frontend operations.
+    auto norm_result = pred::pipeline::normalizeFunction(lowered_func);
+    if (!norm_result.error.empty()) {
+        std::cerr << "Error during normalization/lowering: " << norm_result.error << "\n";
+        return 1;
+    }
+
+    // Step 5: Build CFG from normalized body.
+    auto cfg_result = pred::pipeline::buildControlFlow(norm_result);
+    if (!cfg_result.error.empty()) {
+        std::cerr << "Error during CFG construction: " << cfg_result.error << "\n";
+        return 1;
+    }
+
+    // Step 6: Build SSA.
+    auto ssa_result = pred::pipeline::buildSSAForm(cfg_result, norm_result);
+    if (!ssa_result.error.empty()) {
+        std::cerr << "Error during SSA construction: " << ssa_result.error << "\n";
         return 1;
     }
 
     // Step 7: Predication (if-conversion)
-    auto pred_prog = pred::predicate(ssa);
-    pred_prog.function_name = func.name;
+    auto pred_prog = pred::predicate(ssa_result.program);
+    pred_prog.function_name = lowered_func.name;
 
     for (auto& [name, type] : norm_result.symbols) pred_prog.symbols[name] = type;
     pred_prog.param_directions = norm_result.param_directions;
-    for (const auto& param : func.params) {
+    for (const auto& param : lowered_func.params) {
         if (param.debug_loc.valid()) pred_prog.param_debug_locs[param.name] = param.debug_loc;
     }
     pred_prog.output_default_reasons = norm_result.output_default_reasons;
