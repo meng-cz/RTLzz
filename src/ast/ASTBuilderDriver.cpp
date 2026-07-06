@@ -1334,6 +1334,31 @@ static bool isSimpleIdentifierText(const std::string& s) {
     return true;
 }
 
+static ExprPtr parseMemberPathExpr(const std::string& text, TypeInfo type = {}) {
+    std::string s = compactText(text);
+    if (s.empty() || s.find("->") != std::string::npos ||
+        s.find('[') != std::string::npos || s.find('(') != std::string::npos) {
+        return nullptr;
+    }
+    std::vector<std::string> parts;
+    size_t begin = 0;
+    while (begin <= s.size()) {
+        size_t dot = s.find('.', begin);
+        std::string part = s.substr(begin, dot == std::string::npos ? std::string::npos : dot - begin);
+        if (!isSimpleIdentifierText(part)) return nullptr;
+        parts.push_back(part);
+        if (dot == std::string::npos) break;
+        begin = dot + 1;
+    }
+    if (parts.empty()) return nullptr;
+    ExprPtr out = make_var(parts.front(), TypeInfo{});
+    for (size_t i = 1; i < parts.size(); ++i) {
+        TypeInfo field_type = (i + 1 == parts.size()) ? type : TypeInfo{};
+        out = make_field_access(out, parts[i], field_type);
+    }
+    return out;
+}
+
 static bool isSimpleAssignmentLhsText(const std::string& s) {
     if (isSimpleIdentifierText(s)) return true;
     if (s.size() > 1 && s.front() == '*') {
@@ -1952,6 +1977,31 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
         return make_literal(val, TypeInfo{"bool", 1, false});
     }
 
+    case CXCursor_InitListExpr: {
+        TypeInfo init_type = convertType(type);
+        if (children.empty()) {
+            if (!init_type.struct_name.empty() ||
+                (!init_type.name.empty() && !isBuiltinIntegerType(init_type))) {
+                auto call = std::make_shared<Expr>();
+                call->kind = ExprKind::Call;
+                call->callee = init_type.struct_name.empty() ? init_type.name : init_type.struct_name;
+                call->type = init_type;
+                return call;
+            }
+            if (init_type.name == "bool" || init_type.hw_kind == "bool") {
+                return make_literal("false", TypeInfo{"bool", 1, false});
+            }
+            return make_literal("0", init_type);
+        }
+        if (children.size() == 1) return convertExpr(children.front());
+        auto call = std::make_shared<Expr>();
+        call->kind = ExprKind::Call;
+        call->callee = init_type.struct_name.empty() ? init_type.name : init_type.struct_name;
+        call->type = init_type;
+        for (const auto& child : children) call->args.push_back(convertExpr(child));
+        return call;
+    }
+
     case CXCursor_DeclRefExpr:
     case CXCursor_MemberRefExpr: {
         if (kind == CXCursor_MemberRefExpr && !children.empty()) {
@@ -2136,6 +2186,30 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             if (!first_call_child && !children.empty()) first_call_child = convertExpr(children.front());
             return first_call_child;
         };
+        if (spelling.rfind("operator", 0) == 0 && spelling != "operator()" &&
+            clang_Cursor_getNumArguments(cursor) == 0) {
+            auto converted = get_first_call_child();
+            TypeInfo target_type = convertType(type);
+            if (converted && converted->kind == ExprKind::FieldAccess &&
+                converted->field_name == spelling && converted->struct_base) {
+                converted = converted->struct_base;
+            }
+            if (converted && target_type.width > 0) {
+                if (converted->type.width <= 0) {
+                    converted->type = target_type;
+                } else if (converted->type.width != target_type.width ||
+                           converted->type.is_signed != target_type.is_signed ||
+                           converted->type.hw_kind != target_type.hw_kind) {
+                    auto cast = std::make_shared<Expr>();
+                    cast->kind = ExprKind::Cast;
+                    cast->cast_type = target_type;
+                    cast->type = target_type;
+                    cast->cast_expr = converted;
+                    return cast;
+                }
+            }
+            if (converted) return converted;
+        }
         if (spelling.rfind("operator", 0) == 0 && spelling != "operator()" &&
             children.size() == 1 && first_child_spelling == spelling) {
             auto converted = get_first_call_child();
@@ -2934,6 +3008,30 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
     default: {
         // Try to recurse into first child for implicit casts
         if (!children.empty()) {
+            if (firstSpellingDeep(children.front()).rfind("operator", 0) == 0) {
+                auto converted = convertExpr(children.front());
+                TypeInfo target_type = convertType(type);
+                if (converted && converted->kind == ExprKind::FieldAccess &&
+                    converted->field_name.rfind("operator", 0) == 0 &&
+                    converted->struct_base) {
+                    converted = converted->struct_base;
+                }
+                if (converted && target_type.width > 0) {
+                    if (converted->type.width <= 0) {
+                        converted->type = target_type;
+                    } else if (converted->type.width != target_type.width ||
+                               converted->type.is_signed != target_type.is_signed ||
+                               converted->type.hw_kind != target_type.hw_kind) {
+                        auto cast = std::make_shared<Expr>();
+                        cast->kind = ExprKind::Cast;
+                        cast->cast_type = target_type;
+                        cast->type = target_type;
+                        cast->cast_expr = converted;
+                        return cast;
+                    }
+                }
+                if (converted && !isOperatorOnlyExpr(converted)) return converted;
+            }
             if (children.size() > 1 && firstSpellingDeep(children.front()).rfind("operator", 0) == 0) {
                 for (size_t i = 1; i < children.size(); ++i) {
                     auto candidate = convertExpr(children[i]);
@@ -2979,7 +3077,9 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
     auto unsupported = std::make_shared<Expr>();
     unsupported->kind = ExprKind::Call;
     unsupported->callee = "__unsupported_expr";
-    unsupported->literal_value = cursorLocation(cursor);
+    unsupported->literal_value = cursorLocation(cursor) +
+        " kind=" + std::to_string(static_cast<int>(kind)) +
+        " spelling='" + cxToStr(clang_getCursorSpelling(cursor)) + "'";
     unsupported->type = convertType(type);
     return unsupported;
 }
@@ -3258,8 +3358,10 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                 receiver->field_name.rfind("operator", 0) == 0) {
                 stmt->assign_target = receiver->struct_base;
             } else {
-                std::string lhs_text = allowUnsafeTextFallback ? compactText(lhsTextBeforeAssign(cursor)) : ""; // UNSAFE_TEXT_FALLBACK_ALLOW: disabled by allowUnsafeTextFallback.
-                if (allowUnsafeTextFallback && isSimpleAssignmentLhsText(lhs_text)) {
+                std::string lhs_text = lhsTextBeforeAssign(cursor);
+                if (auto member_lhs = parseMemberPathExpr(lhs_text, convertType(clang_getCursorType(children.empty() ? cursor : children.front())))) {
+                    stmt->assign_target = member_lhs;
+                } else if (allowUnsafeTextFallback && isSimpleAssignmentLhsText(compactText(lhs_text))) {
                     stmt->assign_target = tokenExpr(lhs_text); // UNSAFE_TEXT_FALLBACK_ALLOW: disabled by allowUnsafeTextFallback.
                 } else {
                     size_t lhs_index = children.size() >= 2 ? children.size() - 2 : 0;

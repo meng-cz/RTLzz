@@ -312,7 +312,11 @@ private:
             parts.push_back(std::move(part));
         }
         std::reverse(parts.begin(), parts.end());
-        return make_concat(std::move(parts));
+        auto packed = make_concat(std::move(parts));
+        TypeInfo packed_type = type;
+        packed_type.width = packed->type.width;
+        packed->type = packed_type;
+        return packed;
     }
 
     bool storeInlineStructLocal(const std::string& name,

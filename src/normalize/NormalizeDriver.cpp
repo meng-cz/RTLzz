@@ -159,6 +159,37 @@ void registerChildServiceResponseDefaults(Env& env) {
     }
 }
 
+std::string requestOutputPayloadPrefix(const std::string& name) {
+    const std::string suffix = "__";
+    if (name.size() <= suffix.size() ||
+        name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        return {};
+    }
+    std::string stem = name.substr(0, name.size() - suffix.size());
+    auto sep = stem.rfind('_');
+    if (sep == std::string::npos || sep == 0) return {};
+    return stem.substr(0, sep);
+}
+
+void registerRequestOutputPayloadDefaults(Env& env) {
+    for (const auto& item : env.param_directions) {
+        const std::string& payload = item.first;
+        if (item.second != "Output") continue;
+        if (env.output_paired_controls.count(payload) != 0) continue;
+
+        std::string prefix = requestOutputPayloadPrefix(payload);
+        if (prefix.empty()) continue;
+        std::string valid = prefix + "__vld__";
+        auto valid_it = env.param_directions.find(valid);
+        if (valid_it == env.param_directions.end() || valid_it->second != "Output") {
+            continue;
+        }
+
+        env.output_default_reasons[payload] = "payload_default_zero_when_valid_false";
+        env.output_paired_controls[payload] = valid;
+    }
+}
+
 ExprPtr zeroValueForType(const TypeInfo& type) {
     if (type.width == 1 || type.hw_kind == "bool" || type.name == "bool") {
         return make_literal("false", TypeInfo{"bool", 1, false, true, "bool"});
@@ -770,7 +801,11 @@ ExprPtr packInlineStructLocal(const std::string& name,
         parts.push_back(std::move(part));
     }
     std::reverse(parts.begin(), parts.end());
-    return make_concat(std::move(parts));
+    auto packed = make_concat(std::move(parts));
+    TypeInfo packed_type = type;
+    packed_type.width = packed->type.width;
+    packed->type = packed_type;
+    return packed;
 }
 
 bool storeInlineStructLocal(const std::string& name,
@@ -1525,6 +1560,12 @@ ExprPtr inlineHelperCall(const ExprPtr& e, Env& env) {
                 return nullptr;
             }
         }
+    }
+    if (flow.return_value && flow.return_value->type.width > 0 &&
+        findStructFields(helper.return_type, env)) {
+        TypeInfo return_type = helper.return_type;
+        return_type.width = flow.return_value->type.width;
+        flow.return_value->type = return_type;
     }
     return castIfWidthChanges(flow.return_value, e->type);
 }
@@ -2736,7 +2777,10 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
         // field must validate that flattened symbol, not require a separate
         // initialized aggregate value that does not exist in the normalized IR.
         if (e->struct_base) {
-            const std::string base_name = baseName(e->struct_base);
+            std::string base_object;
+            std::vector<std::string> base_fields;
+            const bool has_flattened_base_path = fieldAccessPath(e->struct_base, base_object, base_fields);
+            const std::string base_name = has_flattened_base_path ? baseName(e->struct_base) : std::string{};
             if (base_name.empty()) {
                 // Fall through to packed-expression handling below.
             } else {
@@ -2779,6 +2823,9 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
                 }
                 if (!env.initialized.count(flat)) {
                     env.error = "Read of uninitialized field '" + flat + "'";
+                    env.error += " base_name='" + base_name + "'";
+                    env.error += " base_kind=" +
+                        std::to_string(e->struct_base ? static_cast<int>(e->struct_base->kind) : -1);
                     return nullptr;
                 }
                 if (env.ssa_seed_symbols.count(base_name)) {
@@ -2796,6 +2843,7 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
                     if (field.name == e->field_name) {
                         auto packed = rewriteExpr(e->struct_base, env);
                         if (!packed || !env.error.empty()) return nullptr;
+                        int field_width = flattenedTypeWidth(field.type, env);
                         if (packed->type.width <= 0 &&
                             e->struct_base->kind == ExprKind::Call &&
                             e->struct_base->args.empty()) {
@@ -2815,8 +2863,8 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
                                     "0", make_hw_type("UInt", total_width, false));
                             }
                         }
-                        if (field.type.width <= 0 || packed->type.width <= 0 ||
-                            offset + field.type.width > packed->type.width) {
+                        if (field_width <= 0 || packed->type.width <= 0 ||
+                            offset + field_width > packed->type.width) {
                             env.error = "Unsupported packed struct field read '" +
                                         e->field_name + "' with inconsistent width";
                             env.error += " base_kind=" +
@@ -2843,16 +2891,18 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
                             }
                             env.error += " base_name='" + baseName(e->struct_base) + "'";
                             env.error += " packed_width=" + std::to_string(packed ? packed->type.width : 0);
-                            env.error += " field_width=" + std::to_string(field.type.width);
+                            env.error += " field_width=" + std::to_string(field_width);
                             env.error += " offset=" + std::to_string(offset);
                             return nullptr;
                         }
+                        TypeInfo field_type = field.type;
+                        field_type.width = field_width;
                         return make_slice(std::move(packed),
-                                          offset + field.type.width - 1,
+                                          offset + field_width - 1,
                                           offset,
-                                          field.type);
+                                          field_type);
                     }
-                    offset += field.type.width;
+                    offset += flattenedTypeWidth(field.type, env);
                 }
             }
         }
@@ -2867,6 +2917,12 @@ ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {
         }
         if (!ty.is_array && !env.initialized.count(flat)) {
             env.error = "Read of uninitialized field '" + flat + "'";
+            env.error += " rewritten_base_name='" + baseName(base) + "'";
+            env.error += " original_base_kind=" +
+                std::to_string(e->struct_base ? static_cast<int>(e->struct_base->kind) : -1);
+            env.error += " rewritten_base_kind=" +
+                std::to_string(base ? static_cast<int>(base->kind) : -1);
+            env.error += " field='" + e->field_name + "'";
             return nullptr;
         }
         if (env.ssa_seed_symbols.count(baseName(base))) {
@@ -4240,6 +4296,7 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
     }
     registerHandshakePayloadDefaults(env);
     registerChildServiceResponseDefaults(env);
+    registerRequestOutputPayloadDefaults(env);
 
     result.body = rewriteStmts(body, env);
     result.error = env.error;
@@ -4269,6 +4326,7 @@ NormalizeResult normalizeFunction(const FunctionAST& func,
     }
     registerHandshakePayloadDefaults(env);
     registerChildServiceResponseDefaults(env);
+    registerRequestOutputPayloadDefaults(env);
     result.symbols = env.symbols;
     result.ssa_seed_symbols = env.ssa_seed_symbols;
     result.lookup_tables = env.lookup_tables;
