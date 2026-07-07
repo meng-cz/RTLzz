@@ -12,6 +12,7 @@ struct Options {
     bool common_subexpressions = true;
     bool dead_node_elimination = true;
     bool bit_value_analysis = true;
+    bool width_simplification = true;
     int max_iterations = 16;
 };
 

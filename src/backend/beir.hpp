@@ -127,6 +127,15 @@ struct Operand {
     bool signed_view = false;
 };
 
+struct ValueFacts {
+    bool valid = false;
+    int width = 0;
+    bool constant = false;
+    Operand::Constant value;
+    std::vector<std::uint64_t> known_zero;
+    std::vector<std::uint64_t> known_one;
+};
+
 struct Operation {
     OperationKind kind = OperationKind::Assign;
     OpCode op = OpCode::None;
@@ -148,6 +157,7 @@ struct Signal {
     std::string port_name;
     int port_element_index = -1;
     DebugInfo debug;
+    ValueFacts value;
     std::optional<Operation> driver;
 };
 
@@ -244,12 +254,15 @@ public:
     Operand resolveOperand(Operand operand, const std::unordered_map<NodeId, Operand>& aliases) const;
     bool replaceAliases(const std::unordered_map<NodeId, Operand>& aliases);
     void compact(const std::unordered_set<NodeId>& live);
+    void ensureValueFacts();
+    void markValueFactsDirty();
 
 private:
     Program program_;
     std::unordered_map<std::string, std::uint64_t> text_ids_;
     std::unordered_set<NodeId> observable_ids_;
     std::uint64_t next_text_id_ = 1;
+    bool value_facts_dirty_ = true;
 
     void rebuildObservableIds();
     std::uint64_t internText(const std::string& text);
@@ -258,6 +271,7 @@ private:
     OperandSignature operandSignature(const Operand& operand);
     void remapDebug(DebugInfo& debug, const std::vector<NodeId>& remap);
     void remapOperand(Operand& operand, const std::vector<NodeId>& remap);
+    void analyzeValueFacts();
 };
 
 Program buildProgram(const PredicateProgram& source, bool optimize = true);
