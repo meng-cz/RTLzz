@@ -1031,6 +1031,407 @@ private:
     }
 };
 
+static bool sameType(const ValueType& lhs, const ValueType& rhs) {
+    return lhs.width == rhs.width && lhs.array_dims == rhs.array_dims;
+}
+
+static bool isCommutativeOp(OperationKind kind, OpCode op) {
+    if (kind != OperationKind::Binary) return false;
+    switch (op) {
+    case OpCode::Add:
+    case OpCode::Mul:
+    case OpCode::BitAnd:
+    case OpCode::BitOr:
+    case OpCode::BitXor:
+    case OpCode::LogicAnd:
+    case OpCode::LogicOr:
+    case OpCode::Eq:
+    case OpCode::Ne:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void hashCombine(std::uint64_t& seed, std::uint64_t value) {
+    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+}
+
+struct TypeSignature {
+    int width = 0;
+    std::vector<int> array_dims;
+
+    bool operator==(const TypeSignature& other) const {
+        return width == other.width && array_dims == other.array_dims;
+    }
+    bool operator<(const TypeSignature& other) const {
+        if (width != other.width) return width < other.width;
+        return array_dims < other.array_dims;
+    }
+};
+
+struct TypeSignatureHash {
+    std::size_t operator()(const TypeSignature& sig) const {
+        std::uint64_t seed = static_cast<std::uint64_t>(sig.width);
+        for (int dim : sig.array_dims) hashCombine(seed, static_cast<std::uint64_t>(dim));
+        return static_cast<std::size_t>(seed);
+    }
+};
+
+struct ConstantSignature {
+    int width = 0;
+    bool signed_view = false;
+    std::vector<std::uint64_t> limbs;
+
+    bool operator==(const ConstantSignature& other) const {
+        return width == other.width &&
+               signed_view == other.signed_view &&
+               limbs == other.limbs;
+    }
+    bool operator<(const ConstantSignature& other) const {
+        if (width != other.width) return width < other.width;
+        if (signed_view != other.signed_view) return signed_view < other.signed_view;
+        return limbs < other.limbs;
+    }
+};
+
+struct OperandSignature {
+    OperandKind kind = OperandKind::Symbol;
+    NodeId node = kInvalidNodeId;
+    std::uint64_t text_id = 0;
+    TypeSignature type;
+    bool signed_view = false;
+    ConstantSignature constant;
+
+    bool operator==(const OperandSignature& other) const {
+        return kind == other.kind &&
+               node == other.node &&
+               text_id == other.text_id &&
+               type == other.type &&
+               signed_view == other.signed_view &&
+               constant == other.constant;
+    }
+    bool operator<(const OperandSignature& other) const {
+        if (kind != other.kind) return static_cast<int>(kind) < static_cast<int>(other.kind);
+        if (node != other.node) return node < other.node;
+        if (text_id != other.text_id) return text_id < other.text_id;
+        if (!(type == other.type)) return type < other.type;
+        if (signed_view != other.signed_view) return signed_view < other.signed_view;
+        return constant < other.constant;
+    }
+};
+
+struct OperandSignatureHash {
+    std::size_t operator()(const OperandSignature& sig) const {
+        std::uint64_t seed = static_cast<std::uint64_t>(sig.kind);
+        hashCombine(seed, sig.node);
+        hashCombine(seed, sig.text_id);
+        hashCombine(seed, TypeSignatureHash{}(sig.type));
+        hashCombine(seed, sig.signed_view ? 1 : 0);
+        hashCombine(seed, static_cast<std::uint64_t>(sig.constant.width));
+        hashCombine(seed, sig.constant.signed_view ? 1 : 0);
+        for (std::uint64_t limb : sig.constant.limbs) hashCombine(seed, limb);
+        return static_cast<std::size_t>(seed);
+    }
+};
+
+struct OperationSignature {
+    OperationKind kind = OperationKind::Assign;
+    OpCode op = OpCode::None;
+    TypeSignature type;
+    int to_width = 0;
+    int hi = -1;
+    int lo = -1;
+    int bit = -1;
+    int times = 0;
+    std::vector<OperandSignature> operands;
+
+    bool operator==(const OperationSignature& other) const {
+        return kind == other.kind &&
+               op == other.op &&
+               type == other.type &&
+               to_width == other.to_width &&
+               hi == other.hi &&
+               lo == other.lo &&
+               bit == other.bit &&
+               times == other.times &&
+               operands == other.operands;
+    }
+};
+
+struct OperationSignatureHash {
+    std::size_t operator()(const OperationSignature& sig) const {
+        std::uint64_t seed = static_cast<std::uint64_t>(sig.kind);
+        hashCombine(seed, static_cast<std::uint64_t>(sig.op));
+        hashCombine(seed, TypeSignatureHash{}(sig.type));
+        hashCombine(seed, static_cast<std::uint64_t>(sig.to_width));
+        hashCombine(seed, static_cast<std::uint64_t>(sig.hi));
+        hashCombine(seed, static_cast<std::uint64_t>(sig.lo));
+        hashCombine(seed, static_cast<std::uint64_t>(sig.bit));
+        hashCombine(seed, static_cast<std::uint64_t>(sig.times));
+        OperandSignatureHash operand_hash;
+        for (const auto& operand : sig.operands) hashCombine(seed, operand_hash(operand));
+        return static_cast<std::size_t>(seed);
+    }
+};
+
+class MutableProgram {
+public:
+    explicit MutableProgram(Program program) : program_(std::move(program)) {
+        rebuildObservableIds();
+    }
+
+    Program finish() {
+        return std::move(program_);
+    }
+
+    bool foldAssignChains() {
+        std::unordered_map<NodeId, Operand> aliases;
+        for (const auto& signal : program_.signals) {
+            if (isObservable(signal) || !signal.driver ||
+                signal.driver->kind != OperationKind::Assign ||
+                signal.driver->operands.size() != 1) {
+                continue;
+            }
+            Operand replacement = signal.driver->operands.front();
+            if (replacement.kind == OperandKind::Symbol && replacement.node == signal.id) continue;
+            aliases[signal.id] = std::move(replacement);
+        }
+        if (aliases.empty()) return false;
+        return replaceAliases(aliases);
+    }
+
+    bool mergeCommonExpressions() {
+        std::unordered_map<OperationSignature, Operand, OperationSignatureHash> available;
+        std::unordered_map<NodeId, Operand> aliases;
+        for (const auto& signal : program_.signals) {
+            if (isObservable(signal) || !signal.driver || !isCseCandidate(*signal.driver)) continue;
+            OperationSignature key = operationSignature(*signal.driver);
+            auto it = available.find(key);
+            if (it == available.end()) {
+                Operand self;
+                self.kind = OperandKind::Symbol;
+                self.node = signal.id;
+                self.text = signal.name;
+                self.type = signal.type;
+                available.emplace(std::move(key), std::move(self));
+            } else {
+                aliases[signal.id] = it->second;
+            }
+        }
+        if (aliases.empty()) return false;
+        return replaceAliases(aliases);
+    }
+
+    bool eliminateDeadNodes() {
+        std::unordered_set<NodeId> live;
+        std::vector<NodeId> stack;
+        auto push = [&](NodeId id) {
+            if (id == kInvalidNodeId || id >= program_.signals.size()) return;
+            if (live.insert(id).second) stack.push_back(id);
+        };
+
+        for (NodeId id : observable_ids_) push(id);
+        for (const auto& aggregate : program_.aggregates) {
+            for (NodeId id : aggregate.element_nodes) push(id);
+        }
+
+        while (!stack.empty()) {
+            NodeId id = stack.back();
+            stack.pop_back();
+            const Signal* signal = program_.findSignal(id);
+            if (!signal || !signal->driver) continue;
+            for (const auto& operand : signal->driver->operands) {
+                if (operand.kind == OperandKind::Symbol) push(operand.node);
+            }
+        }
+
+        if (live.size() == program_.signals.size()) return false;
+        compact(live);
+        return true;
+    }
+
+private:
+    Program program_;
+    std::unordered_map<std::string, std::uint64_t> text_ids_;
+    std::unordered_set<NodeId> observable_ids_;
+    std::uint64_t next_text_id_ = 1;
+
+    bool isObservable(const Signal& signal) const {
+        return observable_ids_.count(signal.id) != 0;
+    }
+
+    void rebuildObservableIds() {
+        observable_ids_.clear();
+        for (const auto& signal : program_.signals) {
+            if (!signal.port_name.empty()) observable_ids_.insert(signal.id);
+        }
+        for (const auto& output : program_.outputs) {
+            for (const auto& signal : program_.signals) {
+                if (signal.name == output) {
+                    observable_ids_.insert(signal.id);
+                    break;
+                }
+            }
+        }
+    }
+
+    bool isCseCandidate(const Operation& op) const {
+        if (op.kind == OperationKind::Assign || op.kind == OperationKind::PortRead) return false;
+        if (op.kind == OperationKind::DynamicWriteSlice ||
+            op.kind == OperationKind::DynamicWriteBit ||
+            op.kind == OperationKind::WriteSlice ||
+            op.kind == OperationKind::WriteBit) {
+            return false;
+        }
+        return true;
+    }
+
+    std::uint64_t internText(const std::string& text) {
+        if (text.empty()) return 0;
+        auto it = text_ids_.find(text);
+        if (it != text_ids_.end()) return it->second;
+        std::uint64_t id = next_text_id_++;
+        text_ids_.emplace(text, id);
+        return id;
+    }
+
+    TypeSignature typeSignature(const ValueType& type) const {
+        TypeSignature sig;
+        sig.width = type.width;
+        sig.array_dims = type.array_dims;
+        return sig;
+    }
+
+    ConstantSignature constantSignature(const Operand::Constant& constant) const {
+        ConstantSignature sig;
+        sig.width = constant.width;
+        sig.signed_view = constant.signed_view;
+        sig.limbs = constant.limbs;
+        return sig;
+    }
+
+    OperandSignature operandSignature(const Operand& operand) {
+        OperandSignature sig;
+        sig.kind = operand.kind;
+        sig.node = operand.node;
+        sig.text_id = internText(operand.text);
+        sig.type = typeSignature(operand.type);
+        sig.signed_view = operand.signed_view;
+        if (operand.kind == OperandKind::Literal) {
+            sig.constant = constantSignature(operand.constant);
+        }
+        return sig;
+    }
+
+    OperationSignature operationSignature(const Operation& op) {
+        OperationSignature sig;
+        sig.kind = op.kind;
+        sig.op = op.op;
+        sig.type = typeSignature(op.type);
+        sig.to_width = op.to_width;
+        sig.hi = op.hi;
+        sig.lo = op.lo;
+        sig.bit = op.bit;
+        sig.times = op.times;
+        sig.operands.reserve(op.operands.size());
+        for (const auto& operand : op.operands) {
+            sig.operands.push_back(operandSignature(operand));
+        }
+        if (isCommutativeOp(op.kind, op.op) && sig.operands.size() == 2 &&
+            sig.operands[1] < sig.operands[0]) {
+            std::swap(sig.operands[0], sig.operands[1]);
+        }
+        return sig;
+    }
+
+    Operand resolveOperand(Operand operand, const std::unordered_map<NodeId, Operand>& aliases) const {
+        std::unordered_set<NodeId> seen;
+        bool use_signed_view = operand.signed_view;
+        while (operand.kind == OperandKind::Symbol) {
+            auto it = aliases.find(operand.node);
+            if (it == aliases.end()) break;
+            if (!seen.insert(operand.node).second) break;
+            use_signed_view = use_signed_view || operand.signed_view;
+            operand = it->second;
+        }
+        if (use_signed_view) {
+            operand.signed_view = true;
+            if (operand.kind == OperandKind::Literal) operand.constant.signed_view = true;
+        }
+        return operand;
+    }
+
+    bool replaceAliases(const std::unordered_map<NodeId, Operand>& aliases) {
+        bool changed = false;
+        for (auto& signal : program_.signals) {
+            if (!signal.driver) continue;
+            for (auto& operand : signal.driver->operands) {
+                Operand resolved = resolveOperand(operand, aliases);
+                if (!(operandSignature(resolved) == operandSignature(operand))) {
+                    operand = std::move(resolved);
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+
+    void remapDebug(DebugInfo& debug, const std::vector<NodeId>& remap) {
+        std::vector<NodeId> out;
+        out.reserve(debug.derived_nodes.size());
+        for (NodeId old_id : debug.derived_nodes) {
+            if (old_id < remap.size() && remap[old_id] != kInvalidNodeId) out.push_back(remap[old_id]);
+        }
+        debug.derived_nodes = std::move(out);
+    }
+
+    void remapOperand(Operand& operand, const std::vector<NodeId>& remap) {
+        if (operand.kind != OperandKind::Symbol) return;
+        if (operand.node < remap.size() && remap[operand.node] != kInvalidNodeId) {
+            operand.node = remap[operand.node];
+        }
+    }
+
+    void compact(const std::unordered_set<NodeId>& live) {
+        std::vector<NodeId> remap(program_.signals.size(), kInvalidNodeId);
+        std::vector<Signal> compacted;
+        compacted.reserve(live.size());
+        for (const auto& signal : program_.signals) {
+            if (!live.count(signal.id)) continue;
+            NodeId new_id = static_cast<NodeId>(compacted.size());
+            remap[signal.id] = new_id;
+            compacted.push_back(signal);
+            compacted.back().id = new_id;
+        }
+
+        auto remap_node_list = [&](std::vector<NodeId>& nodes) {
+            std::vector<NodeId> out;
+            out.reserve(nodes.size());
+            for (NodeId old_id : nodes) {
+                if (old_id < remap.size() && remap[old_id] != kInvalidNodeId) out.push_back(remap[old_id]);
+            }
+            nodes = std::move(out);
+        };
+
+        for (auto& port : program_.ports) remap_node_list(port.element_nodes);
+        for (auto& aggregate : program_.aggregates) remap_node_list(aggregate.element_nodes);
+        program_.aggregates.erase(
+            std::remove_if(program_.aggregates.begin(), program_.aggregates.end(),
+                           [](const Aggregate& aggregate) { return aggregate.element_nodes.empty(); }),
+            program_.aggregates.end());
+
+        for (auto& signal : compacted) {
+            remapDebug(signal.debug, remap);
+            if (!signal.driver) continue;
+            remapDebug(signal.driver->debug, remap);
+            for (auto& operand : signal.driver->operands) remapOperand(operand, remap);
+        }
+        program_.signals = std::move(compacted);
+        rebuildObservableIds();
+    }
+};
+
 static std::string typeText(const ValueType& type) {
     std::ostringstream os;
     os << "bits";
@@ -1159,8 +1560,23 @@ static void emitOperation(std::ostream& os, const Program& program, const Operat
 
 } // namespace
 
-Program buildProgram(const PredicateProgram& source) {
-    return Builder().build(source);
+Program optimizeProgram(Program program) {
+    MutableProgram graph(std::move(program));
+    bool changed = true;
+    int iteration = 0;
+    while (changed && iteration++ < 16) {
+        changed = false;
+        changed = graph.foldAssignChains() || changed;
+        changed = graph.mergeCommonExpressions() || changed;
+        changed = graph.foldAssignChains() || changed;
+        changed = graph.eliminateDeadNodes() || changed;
+    }
+    return graph.finish();
+}
+
+Program buildProgram(const PredicateProgram& source, bool optimize) {
+    Program program = Builder().build(source);
+    return optimize ? optimizeProgram(std::move(program)) : program;
 }
 
 std::string emitText(const Program& program) {

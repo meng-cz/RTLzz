@@ -183,7 +183,8 @@ struct Program {
     const Signal& signal(NodeId id) const;
 };
 
-Program buildProgram(const PredicateProgram& source);
+Program optimizeProgram(Program program);
+Program buildProgram(const PredicateProgram& source, bool optimize = true);
 std::string emitText(const Program& program);
 std::string emitText(const PredicateProgram& source);
 
