@@ -242,6 +242,27 @@ static TypeInfo convertType(CXType t) {
         return ti;
     }
 
+    CXType canonical = clang_getCanonicalType(t);
+    if (t.kind == CXType_Enum || canonical.kind == CXType_Enum) {
+        CXCursor enum_decl = clang_getTypeDeclaration(t.kind == CXType_Enum ? t : canonical);
+        CXType underlying = clang_getEnumDeclIntegerType(enum_decl);
+        TypeInfo ti;
+        if (underlying.kind != CXType_Invalid) {
+            ti = convertType(underlying);
+        } else {
+            ti.name = "int";
+            ti.width = 32;
+            ti.is_signed = true;
+            ti.is_hw_int = true;
+            ti.hw_kind = "builtin";
+        }
+        if (ti.width <= 0) {
+            ti.width = static_cast<int>(clang_Type_getSizeOf(t)) * 8;
+            if (ti.width < 0) ti.width = 32;
+        }
+        return make_hw_type(ti.is_signed ? "Int" : "UInt", ti.width, ti.is_signed);
+    }
+
     if (auto array = recognizeStdArrayType(t, convertType)) return *array;
     if (auto hw = recognizeHwIntType(t)) return *hw;
     if (auto record = recognizeRecordType(t)) return *record;
@@ -2011,14 +2032,24 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
 
     case CXCursor_DeclRefExpr:
     case CXCursor_MemberRefExpr: {
+        CXCursor referenced = clang_getCursorReferenced(cursor);
+        CXCursorKind referenced_kind = clang_Cursor_isNull(referenced)
+            ? CXCursor_InvalidFile
+            : clang_getCursorKind(referenced);
+        if (referenced_kind == CXCursor_EnumConstantDecl) {
+            TypeInfo enum_type = convertType(type);
+            std::string value;
+            if (enum_type.is_signed) {
+                value = std::to_string(clang_getEnumConstantDeclValue(referenced));
+            } else {
+                value = std::to_string(clang_getEnumConstantDeclUnsignedValue(referenced));
+            }
+            return make_literal(value, enum_type);
+        }
         if (kind == CXCursor_MemberRefExpr && !children.empty()) {
             auto base = convertExpr(children[0]);
             std::string field = cxToStr(clang_getCursorSpelling(cursor));
             TypeInfo field_type;
-            CXCursor referenced = clang_getCursorReferenced(cursor);
-            CXCursorKind referenced_kind = clang_Cursor_isNull(referenced)
-                ? CXCursor_InvalidFile
-                : clang_getCursorKind(referenced);
             const bool callable_member =
                 referenced_kind == CXCursor_CXXMethod ||
                 referenced_kind == CXCursor_FunctionDecl ||
