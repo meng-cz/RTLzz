@@ -1,0 +1,56 @@
+#include "backend/beopt.hpp"
+
+#include "backend/beopt_assign_chains.hpp"
+#include "backend/beopt_cse.hpp"
+#include "backend/beopt_dce.hpp"
+
+#include <stdexcept>
+#include <utility>
+
+namespace pred::beir::opt {
+
+Options parseOptions(const std::vector<std::string>& values) {
+    Options options;
+    for (const std::string& value : values) {
+        if (value == "all") {
+            options.fold_assign_chains = true;
+            options.common_subexpressions = true;
+            options.dead_node_elimination = true;
+        } else if (value == "none") {
+            options.fold_assign_chains = false;
+            options.common_subexpressions = false;
+            options.dead_node_elimination = false;
+        } else if (value == "assign" || value == "fold-assign") {
+            options.fold_assign_chains = true;
+        } else if (value == "no-assign" || value == "no-fold-assign") {
+            options.fold_assign_chains = false;
+        } else if (value == "cse") {
+            options.common_subexpressions = true;
+        } else if (value == "no-cse") {
+            options.common_subexpressions = false;
+        } else if (value == "dce") {
+            options.dead_node_elimination = true;
+        } else if (value == "no-dce") {
+            options.dead_node_elimination = false;
+        } else {
+            throw std::runtime_error("unknown BEIR optimization option: " + value);
+        }
+    }
+    return options;
+}
+
+Program optimizeProgram(Program program, const Options& options) {
+    MutableProgram graph(std::move(program));
+    bool changed = true;
+    int iteration = 0;
+    while (changed && iteration++ < options.max_iterations) {
+        changed = false;
+        if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
+        if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
+        if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
+        if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
+    }
+    return graph.finish();
+}
+
+} // namespace pred::beir::opt

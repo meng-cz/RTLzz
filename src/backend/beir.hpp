@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace pred {
@@ -183,7 +185,95 @@ struct Program {
     const Signal& signal(NodeId id) const;
 };
 
-Program optimizeProgram(Program program);
+bool sameType(const ValueType& lhs, const ValueType& rhs);
+bool isCommutativeOp(OperationKind kind, OpCode op);
+void hashCombine(std::uint64_t& seed, std::uint64_t value);
+
+struct TypeSignature {
+    int width = 0;
+    std::vector<int> array_dims;
+
+    bool operator==(const TypeSignature& other) const;
+    bool operator<(const TypeSignature& other) const;
+};
+
+struct TypeSignatureHash {
+    std::size_t operator()(const TypeSignature& sig) const;
+};
+
+struct ConstantSignature {
+    int width = 0;
+    bool signed_view = false;
+    std::vector<std::uint64_t> limbs;
+
+    bool operator==(const ConstantSignature& other) const;
+    bool operator<(const ConstantSignature& other) const;
+};
+
+struct OperandSignature {
+    OperandKind kind = OperandKind::Symbol;
+    NodeId node = kInvalidNodeId;
+    std::uint64_t text_id = 0;
+    TypeSignature type;
+    bool signed_view = false;
+    ConstantSignature constant;
+
+    bool operator==(const OperandSignature& other) const;
+    bool operator<(const OperandSignature& other) const;
+};
+
+struct OperandSignatureHash {
+    std::size_t operator()(const OperandSignature& sig) const;
+};
+
+struct OperationSignature {
+    OperationKind kind = OperationKind::Assign;
+    OpCode op = OpCode::None;
+    TypeSignature type;
+    int to_width = 0;
+    int hi = -1;
+    int lo = -1;
+    int bit = -1;
+    int times = 0;
+    std::vector<OperandSignature> operands;
+
+    bool operator==(const OperationSignature& other) const;
+};
+
+struct OperationSignatureHash {
+    std::size_t operator()(const OperationSignature& sig) const;
+};
+
+class MutableProgram {
+public:
+    explicit MutableProgram(Program program);
+
+    Program& program();
+    const Program& program() const;
+    Program finish();
+
+    bool isObservable(const Signal& signal) const;
+    bool isCseCandidate(const Operation& op) const;
+    OperationSignature operationSignature(const Operation& op);
+    Operand resolveOperand(Operand operand, const std::unordered_map<NodeId, Operand>& aliases) const;
+    bool replaceAliases(const std::unordered_map<NodeId, Operand>& aliases);
+    void compact(const std::unordered_set<NodeId>& live);
+
+private:
+    Program program_;
+    std::unordered_map<std::string, std::uint64_t> text_ids_;
+    std::unordered_set<NodeId> observable_ids_;
+    std::uint64_t next_text_id_ = 1;
+
+    void rebuildObservableIds();
+    std::uint64_t internText(const std::string& text);
+    TypeSignature typeSignature(const ValueType& type) const;
+    ConstantSignature constantSignature(const Operand::Constant& constant) const;
+    OperandSignature operandSignature(const Operand& operand);
+    void remapDebug(DebugInfo& debug, const std::vector<NodeId>& remap);
+    void remapOperand(Operand& operand, const std::vector<NodeId>& remap);
+};
+
 Program buildProgram(const PredicateProgram& source, bool optimize = true);
 std::string emitText(const Program& program);
 std::string emitText(const PredicateProgram& source);
