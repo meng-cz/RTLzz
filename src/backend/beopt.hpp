@@ -11,6 +11,7 @@ struct Options {
     bool fold_assign_chains = true;
     bool common_subexpressions = true;
     bool dead_node_elimination = true;
+    bool bit_value_analysis = true;
     int max_iterations = 16;
 };
 
