@@ -346,6 +346,13 @@ static bool isMutableParamPassing(ParamPassingKind passing) {
     return passing == ParamPassingKind::MutableRef || passing == ParamPassingKind::Pointer;
 }
 
+static bool sameLiteralExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
+    return lhs && rhs &&
+           lhs->kind == ExprKind::Literal &&
+           rhs->kind == ExprKind::Literal &&
+           lhs->literal_value == rhs->literal_value;
+}
+
 // Forward declarations
 static ExprPtr convertExpr(CXCursor cursor);
 static ExprPtr convertExprImpl(CXCursor cursor);
@@ -2187,7 +2194,8 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             return first_call_child;
         };
         if (spelling.rfind("operator", 0) == 0 && spelling != "operator()" &&
-            clang_Cursor_getNumArguments(cursor) == 0) {
+            clang_Cursor_getNumArguments(cursor) == 0 &&
+            children.size() == 1) {
             auto converted = get_first_call_child();
             TypeInfo target_type = convertType(type);
             if (converted && converted->kind == ExprKind::FieldAccess &&
@@ -2650,6 +2658,13 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             } else {
                 base = convertExpr(children[children.size() - 2]);
                 idx = convertExpr(children[children.size() - 1]);
+            }
+            if (base && base->kind == ExprKind::ArrayAccess && !base->type.is_array) {
+                if (auto parsed = arrayAccessFromBracketTokens(cursor, convertType(type))) { // UNSAFE_TEXT_FALLBACK_ALLOW: libclang operator[] bracket recovery, not source lowering
+                    return parsed;
+                }
+                if (sameLiteralExpr(base->index, idx)) return base;
+                return make_array_access(base->array_base, idx, convertType(type));
             }
             if ((base && base->kind == ExprKind::VarRef && base->var_name == "operator[]") ||
                 containsUnsupportedOperatorReceiverCall(base) ||

@@ -3032,7 +3032,9 @@ ExprPtr rewriteArrayAccess(const ExprPtr& e, Env& env) {
     }
 
     if (indices.size() > arr_type.array_dims.size()) {
-        env.error = "Too many indices for array '" + name + "'";
+        env.error = "Too many indices for array '" + name + "': indices=" +
+            std::to_string(indices.size()) + " dims=" +
+            std::to_string(arr_type.array_dims.size());
         return nullptr;
     }
     if (!validateLiteralBounds(name, indices, arr_type.array_dims, env)) {

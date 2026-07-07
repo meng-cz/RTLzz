@@ -47,7 +47,8 @@ static std::string sanitizeIdentifier(const std::string& text) {
         "module", "endmodule", "input", "output", "inout", "logic", "wire",
         "assign", "always", "if", "else", "case", "endcase", "function",
         "endfunction", "signed", "unsigned", "localparam", "bit", "byte",
-        "shortint", "int", "longint", "reg", "integer", "time", "local"
+        "shortint", "int", "longint", "reg", "integer", "time", "local",
+        "final"
     };
     if (keywords.count(out)) out += "_";
     return out;
@@ -554,11 +555,11 @@ private:
                    ")";
         case beir::OperationKind::Slice:
             need(1);
-            return "(" + operand(ops[0]) + "[" + std::to_string(op.hi) + ":" +
-                   std::to_string(op.lo) + "])";
+            return std::to_string(op.hi - op.lo + 1) + "'((" + operand(ops[0]) +
+                   ") >> " + std::to_string(op.lo) + ")";
         case beir::OperationKind::BitSelect:
             need(1);
-            return "(" + operand(ops[0]) + "[" + std::to_string(op.bit) + "])";
+            return "1'((" + operand(ops[0]) + ") >> " + std::to_string(op.bit) + ")";
         case beir::OperationKind::WriteSlice:
             need(2);
             return writeSliceExpr(operand(ops[0]), operand(ops[1]), widthOf(op.type),

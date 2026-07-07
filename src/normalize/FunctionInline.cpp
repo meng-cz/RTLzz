@@ -10,6 +10,18 @@
 
 namespace pred {
 
+ExprPtr rebuildArrayAccess(ExprPtr base,
+                           const std::vector<ExprPtr>& indices,
+                           const TypeInfo& final_type) {
+    ExprPtr current = std::move(base);
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        current = make_array_access(std::move(current),
+                                    cloneExpr(indices[i]),
+                                    i + 1 == indices.size() ? final_type : TypeInfo{});
+    }
+    return current;
+}
+
 ExprPtr substituteInlineExpr(const ExprPtr& e,
                              const std::unordered_map<std::string, ExprPtr>& args) {
     if (!e) return nullptr;
@@ -38,6 +50,15 @@ ExprPtr substituteInlineExpr(const ExprPtr& e,
                     if (it != args.end()) return cloneExpr(it->second);
                 }
             }
+            auto substituted_base = substituteInlineExpr(base, args);
+            std::vector<ExprPtr> substituted_indices;
+            substituted_indices.reserve(indices.size());
+            for (const auto& idx : indices) {
+                substituted_indices.push_back(substituteInlineExpr(idx, args));
+            }
+            return rebuildArrayAccess(std::move(substituted_base),
+                                      substituted_indices,
+                                      e->type);
         }
     }
     auto r = std::make_shared<Expr>(*e);
@@ -694,6 +715,15 @@ private:
                         }
                     }
                 }
+                auto substituted_base = substituteFlowExpr(base, flow);
+                std::vector<ExprPtr> substituted_indices;
+                substituted_indices.reserve(indices.size());
+                for (const auto& idx : indices) {
+                    substituted_indices.push_back(substituteFlowExpr(idx, flow));
+                }
+                return rebuildArrayAccess(std::move(substituted_base),
+                                          substituted_indices,
+                                          expr->type);
             }
         }
         auto r = std::make_shared<Expr>(*expr);
