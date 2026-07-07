@@ -170,6 +170,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--cxx", default=lj.default_cxx())
     ap.add_argument("--verilator", default=shutil.which("verilator") or "verilator")
+    ap.add_argument("--beopt", action="append", default=[],
+                    help="BEIR optimization option to pass to predicate-expand, e.g. none")
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
 
@@ -187,6 +189,8 @@ def main() -> int:
             "--clang-arg", f"-I{ROOT}",
             "--clang-arg", "-std=c++20",
         ]
+        for opt in args.beopt:
+            common_args += ["--beopt", opt]
         lj.run(common_args + ["--format", "listjson", "-o", str(listjson)], cwd=ROOT)
         lj.run(common_args + ["--format", "rtl", "-o", str(rtl)], cwd=ROOT)
         program = json.loads(listjson.read_text())

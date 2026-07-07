@@ -169,23 +169,14 @@ public:
         for (const auto& signal : program_.signals) {
             name_to_node_[signal.name] = signal.id;
         }
-        for (const auto& aggregate : program_.aggregates) {
-            aggregates_by_name_[aggregate.name] = &aggregate;
-        }
-        for (const auto& table : program_.lookup_tables) {
-            lookup_tables_by_name_[table.name] = &table;
-        }
     }
 
     std::string emit() {
         std::ostringstream os;
         os << "`timescale 1ns/1ps\n\n";
         emitModuleHeader(os);
-        emitLookupArrays(os);
-        emitAggregateArrays(os);
         emitSignalDecls(os);
         emitPortElementConnections(os);
-        emitAggregateConnections(os);
         emitSignalAssignments(os);
         os << "endmodule\n";
         return os.str();
@@ -194,16 +185,13 @@ public:
 private:
     const beir::Program& program_;
     std::unordered_map<std::string, NodeId> name_to_node_;
-    std::unordered_map<std::string, const beir::Aggregate*> aggregates_by_name_;
-    std::unordered_map<std::string, const beir::LookupTable*> lookup_tables_by_name_;
 
     std::string sig(NodeId id) const {
         return sanitizeIdentifier(program_.signal(id).name);
     }
 
-    bool isScalarPortSignal(const beir::Signal& signal) const {
-        return !signal.port_name.empty() && signal.port_element_index == 0 &&
-               signal.name == signal.port_name;
+    bool isDirectPortSignal(const beir::Signal& signal) const {
+        return !signal.port_name.empty() && signal.name == signal.port_name;
     }
 
     std::string debugComment(const beir::DebugInfo& debug) const {
@@ -271,20 +259,6 @@ private:
         return debug;
     }
 
-    beir::DebugInfo aggregateDebug(const beir::Aggregate& aggregate) const {
-        beir::DebugInfo debug;
-        debug.origin = beir::DebugOrigin::Generated;
-        debug.reason = "SystemVerilog array for aggregate '" + aggregate.name + "'";
-        for (NodeId id : aggregate.element_nodes) {
-            debug.derived_nodes.push_back(id);
-            const auto& signal = program_.signal(id);
-            debug.source_locs.insert(debug.source_locs.end(),
-                                     signal.debug.source_locs.begin(),
-                                     signal.debug.source_locs.end());
-        }
-        return debug;
-    }
-
     void emitModuleHeader(std::ostream& os) const {
         os << "module " << sanitizeIdentifier(program_.function_name) << "(\n";
         for (std::size_t i = 0; i < program_.ports.size(); ++i) {
@@ -304,42 +278,11 @@ private:
         os << ");\n\n";
     }
 
-    void emitLookupArrays(std::ostream& os) const {
-        for (const auto& table : program_.lookup_tables) {
-            if (aggregates_by_name_.count(table.name)) continue;
-            os << "    localparam logic [31:0] " << sanitizeIdentifier(table.name)
-               << " [0:" << (table.values.empty() ? 0 : table.values.size() - 1) << "] = '{";
-            for (std::size_t i = 0; i < table.values.size(); ++i) {
-                if (i) os << ", ";
-                os << constExpr(parseSmallConst(table.values[i], 32));
-            }
-            if (table.values.empty()) os << "32'h0";
-            beir::DebugInfo debug;
-            debug.origin = beir::DebugOrigin::Generated;
-            debug.reason = "localparam lookup table '" + table.name + "'";
-            debug.derived_names.push_back(table.name);
-            os << "};" << debugComment(debug) << "\n";
-        }
-        if (!program_.lookup_tables.empty()) os << "\n";
-    }
-
-    void emitAggregateArrays(std::ostream& os) const {
-        for (const auto& aggregate : program_.aggregates) {
-            beir::ValueType element_type = aggregate.type;
-            element_type.array_dims.clear();
-            int count = flattenedArraySize(aggregate.type);
-            if (count <= 0) continue;
-            os << "    " << logicType(element_type) << sanitizeIdentifier(aggregate.name)
-               << " [0:" << (count - 1) << "];"
-               << debugComment(aggregateDebug(aggregate)) << "\n";
-        }
-        if (!program_.aggregates.empty()) os << "\n";
-    }
-
     void emitSignalDecls(std::ostream& os) const {
         for (const auto& signal : program_.signals) {
-            if (isScalarPortSignal(signal)) continue;
-            os << "    " << logicType(signal.type) << sanitizeIdentifier(signal.name) << ";"
+            if (isDirectPortSignal(signal)) continue;
+            os << "    " << logicType(signal.type) << sanitizeIdentifier(signal.name)
+               << unpackedDims(signal.type) << ";"
                << debugComment(signalDebug(signal)) << "\n";
         }
         if (!program_.signals.empty()) os << "\n";
@@ -350,7 +293,7 @@ private:
             if (port.direction == beir::PortDirection::Output) {
                 for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
                     const auto& signal = program_.signal(port.element_nodes[i]);
-                    if (isScalarPortSignal(signal)) continue;
+                    if (isDirectPortSignal(signal)) continue;
                     os << "    assign " << sanitizeIdentifier(port.name) << "[" << i << "] = "
                        << sig(signal.id) << ";" << debugComment(signalDebug(signal)) << "\n";
                 }
@@ -368,77 +311,19 @@ private:
         os << "\n";
     }
 
-    NodeId latestElementNode(const std::string& aggregate_name, std::size_t index) const {
-        std::string stem = aggregate_name + "_" + std::to_string(index);
-        NodeId best = beir::kInvalidNodeId;
-        int best_version = -1;
-        auto base_it = name_to_node_.find(stem);
-        if (base_it != name_to_node_.end()) best = base_it->second;
-        for (const auto& signal : program_.signals) {
-            std::string base;
-            if (!endsWithNumber(signal.name, base) || base != stem) continue;
-            std::string version_text = signal.name.substr(base.size() + 1);
-            int version = std::stoi(version_text);
-            if (version > best_version) {
-                best_version = version;
-                best = signal.id;
-            }
-        }
-        if (best == beir::kInvalidNodeId) {
-            throw std::runtime_error("rtlgen cannot find aggregate element: " + stem);
-        }
-        return best;
-    }
-
-    bool hasVersionedElement(const std::string& aggregate_name, std::size_t index) const {
-        std::string stem = aggregate_name + "_" + std::to_string(index);
-        for (const auto& signal : program_.signals) {
-            std::string base;
-            if (endsWithNumber(signal.name, base) && base == stem) return true;
-        }
-        return false;
-    }
-
-    void emitAggregateConnections(std::ostream& os) const {
-        for (const auto& aggregate : program_.aggregates) {
-            int count = flattenedArraySize(aggregate.type);
-            beir::ValueType element_type = aggregate.type;
-            element_type.array_dims.clear();
-            auto table_it = lookup_tables_by_name_.find(aggregate.name);
-            for (int i = 0; i < count; ++i) {
-                std::size_t index = static_cast<std::size_t>(i);
-                beir::DebugInfo debug;
-                debug.origin = beir::DebugOrigin::Generated;
-                debug.reason = "connect aggregate element '" + aggregate.name + "[" +
-                    std::to_string(i) + "]'";
-                os << "    assign " << sanitizeIdentifier(aggregate.name) << "[" << i << "] = ";
-                if (table_it != lookup_tables_by_name_.end() &&
-                    index < table_it->second->values.size() &&
-                    !hasVersionedElement(aggregate.name, index)) {
-                    os << constExpr(parseSmallConst(table_it->second->values[index],
-                                                    widthOf(element_type)));
-                    debug.reason += " from lookup table initializer";
-                    debug.derived_names.push_back(aggregate.name);
-                } else {
-                    NodeId id = latestElementNode(aggregate.name, index);
-                    debug = signalDebug(program_.signal(id));
-                    os << sig(id);
-                }
-                os << ";" << debugComment(debug) << "\n";
-            }
-        }
-        if (!program_.aggregates.empty()) os << "\n";
-    }
-
     void emitSignalAssignments(std::ostream& os) const {
         for (const auto& signal : program_.signals) {
             if (signal.driver) {
                 if (signal.driver->kind == beir::OperationKind::PortRead &&
-                    signal.port_element_index == 0 && signal.name == signal.port_name) {
+                    isDirectPortSignal(signal)) {
                     continue;
                 }
                 if (signal.driver->kind == beir::OperationKind::PortRead &&
                     signal.port_element_index >= 0) {
+                    continue;
+                }
+                if (signal.driver->kind == beir::OperationKind::Aggregate) {
+                    emitAggregateAssignment(os, signal, *signal.driver);
                     continue;
                 }
                 os << "    assign " << sig(signal.id) << " = "
@@ -459,13 +344,28 @@ private:
                     continue;
                 }
             }
-            if (!isScalarPortSignal(signal)) {
+            if (!isDirectPortSignal(signal) && !signal.type.isArray()) {
                 beir::DebugInfo debug;
                 debug.origin = beir::DebugOrigin::Generated;
                 debug.reason = "default zero for undriven intermediate signal '" + signal.name + "'";
                 os << "    assign " << sig(signal.id) << " = " << zeroFor(signal.type) << ";"
                    << debugComment(debug) << "\n";
             }
+        }
+    }
+
+    void emitAggregateAssignment(std::ostream& os, const beir::Signal& signal, const beir::Operation& op) const {
+        int count = flattenedArraySize(signal.type);
+        if (count != static_cast<int>(op.operands.size())) {
+            throw std::runtime_error("rtlgen aggregate operand count does not match array size");
+        }
+        for (int i = 0; i < count; ++i) {
+            os << "    assign " << sig(signal.id) << "[" << i << "] = "
+               << resizeExpr(operand(op.operands[static_cast<std::size_t>(i)]),
+                             widthOf(op.operands[static_cast<std::size_t>(i)].type),
+                             widthOf(signal.type),
+                             false)
+               << ";" << debugComment(op.debug) << "\n";
         }
     }
 
@@ -476,8 +376,6 @@ private:
         case beir::OperandKind::Literal:
             return constExpr(op.constant);
         case beir::OperandKind::Port:
-        case beir::OperandKind::Aggregate:
-        case beir::OperandKind::LookupTable:
             return sanitizeIdentifier(op.text);
         }
         throw std::runtime_error("rtlgen unsupported operand kind");
@@ -600,6 +498,8 @@ private:
         case beir::OperationKind::ArrayAccess:
             need(2);
             return operand(ops[0]) + "[" + arrayIndexExpr(ops[0], ops[1]) + "]";
+        case beir::OperationKind::Aggregate:
+            throw std::runtime_error("rtlgen aggregate operation must be emitted as element assignments");
         case beir::OperationKind::Call:
             throw std::runtime_error("rtlgen cannot lower call operation");
         }
@@ -630,15 +530,6 @@ private:
 
     std::string arrayIndexExpr(const beir::Operand& array_op, const beir::Operand& index_op) const {
         std::size_t count = static_cast<std::size_t>(flattenedArraySize(array_op.type));
-        if (count == 0 && array_op.kind == beir::OperandKind::LookupTable) {
-            auto it = lookup_tables_by_name_.find(array_op.text);
-            if (it != lookup_tables_by_name_.end()) count = it->second->values.size();
-        } else if (count == 0 && array_op.kind == beir::OperandKind::Aggregate) {
-            auto it = aggregates_by_name_.find(array_op.text);
-            if (it != aggregates_by_name_.end()) {
-                count = static_cast<std::size_t>(flattenedArraySize(it->second->type));
-            }
-        }
         if (count == 0) return operand(index_op);
         int index_width = indexWidthForCount(count);
         if (widthOf(index_op.type) == index_width) return operand(index_op);

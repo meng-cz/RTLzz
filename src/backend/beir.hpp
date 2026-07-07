@@ -22,8 +22,6 @@ enum class OperandKind {
     Symbol,
     Literal,
     Port,
-    Aggregate,
-    LookupTable,
 };
 
 enum class OperationKind {
@@ -52,6 +50,7 @@ enum class OperationKind {
     DynamicWriteSlice,
     DynamicWriteBit,
     Lookup,
+    Aggregate,
 };
 
 enum class OpCode {
@@ -159,24 +158,11 @@ struct Port {
     std::vector<NodeId> element_nodes;
 };
 
-struct Aggregate {
-    std::string name;
-    ValueType type;
-    std::vector<NodeId> element_nodes;
-};
-
-struct LookupTable {
-    std::string name;
-    std::vector<std::string> values;
-};
-
 struct Program {
     std::string function_name;
     std::vector<std::string> inputs;
     std::vector<std::string> outputs;
     std::vector<Port> ports;
-    std::vector<Aggregate> aggregates;
-    std::vector<LookupTable> lookup_tables;
     std::vector<Signal> signals;
 
     Signal* findSignal(NodeId id);

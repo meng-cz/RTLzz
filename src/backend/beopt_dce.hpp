@@ -19,10 +19,6 @@ inline bool eliminateDeadNodes(MutableProgram& graph) {
     for (const auto& signal : program.signals) {
         if (graph.isObservable(signal)) push(signal.id);
     }
-    for (const auto& aggregate : program.aggregates) {
-        for (NodeId id : aggregate.element_nodes) push(id);
-    }
-
     while (!stack.empty()) {
         NodeId id = stack.back();
         stack.pop_back();

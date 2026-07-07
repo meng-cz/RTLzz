@@ -13,7 +13,7 @@ static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <source.cpp> --top <function_name> [--format listjson|beir|rtl]"
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
-              << " [--clang-arg ARG ...] [-o output_file]\n";
+              << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -104,6 +104,7 @@ static int runMain(int argc, char* argv[]) {
     std::string vullib_dir;
     int unroll_limit = 1024;
     std::vector<std::string> clang_args;
+    std::vector<std::string> beopt_args;
 
     if (const char* env = std::getenv("PREDICATE_EXPAND_CLANG_ARGS")) {
         auto env_args = splitArgs(env);
@@ -131,6 +132,8 @@ static int runMain(int argc, char* argv[]) {
             }
         } else if (arg == "--clang-arg" && i + 1 < argc) {
             clang_args.push_back(argv[++i]);
+        } else if (arg == "--beopt" && i + 1 < argc) {
+            beopt_args.push_back(argv[++i]);
         } else if (arg[0] != '-') {
             source_file = arg;
         } else {
@@ -166,6 +169,7 @@ static int runMain(int argc, char* argv[]) {
     options.top_function = top_function;
     options.unroll_limit = unroll_limit;
     options.clang_args = std::move(clang_args);
+    options.beopt_args = std::move(beopt_args);
     options.vullib_dir = vullib_dir;
 
     rtlzz::CompileResult result;

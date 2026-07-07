@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/beir.hpp"
+#include "backend/beopt.hpp"
 #include "backend/rtlgen.hpp"
 #include "emitter/ListJsonEmitter.h"
 #include "pipeline/Stages.h"
@@ -30,6 +31,9 @@ struct CompileOptions {
     std::vector<std::string> clang_args;
     // Additional include directories translated into clang -I arguments.
     std::vector<std::string> include_dirs;
+    // BEIR optimization options. Empty means the default optimization pipeline;
+    // use {"none"} to disable all BEIR optimization passes.
+    std::vector<std::string> beopt_args;
 };
 
 struct CompileResult {
@@ -166,12 +170,22 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
         case OutputKind::ListJson:
             output = pred::emitListJson(program);
             break;
-        case OutputKind::Beir:
-            output = pred::beir::emitText(program);
+        case OutputKind::Beir: {
+            auto beir_program = pred::beir::buildProgram(program, false);
+            beir_program = pred::beir::opt::optimizeProgram(
+                std::move(beir_program),
+                pred::beir::opt::parseOptions(options.beopt_args));
+            output = pred::beir::emitText(beir_program);
             break;
-        case OutputKind::Rtl:
-            output = pred::rtlgen::emitSystemVerilog(program);
+        }
+        case OutputKind::Rtl: {
+            auto beir_program = pred::beir::buildProgram(program, false);
+            beir_program = pred::beir::opt::optimizeProgram(
+                std::move(beir_program),
+                pred::beir::opt::parseOptions(options.beopt_args));
+            output = pred::rtlgen::emitSystemVerilog(beir_program);
             break;
+        }
         }
         return {splitCodeLines(output), ""};
     } catch (const std::exception& ex) {

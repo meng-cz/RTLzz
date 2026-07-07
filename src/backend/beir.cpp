@@ -119,6 +119,16 @@ static int flattenedArraySize(const ValueType& type) {
     return 0;
 }
 
+static bool endsWithNumber(const std::string& name, std::string& base) {
+    std::size_t pos = name.rfind('_');
+    if (pos == std::string::npos || pos + 1 >= name.size()) return false;
+    for (std::size_t i = pos + 1; i < name.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(name[i]))) return false;
+    }
+    base = name.substr(0, pos);
+    return true;
+}
+
 static ValueType scalarElementType(ValueType type) {
     type.array_dims.clear();
     return type;
@@ -285,8 +295,6 @@ static const char* operandKindText(OperandKind kind) {
     case OperandKind::Symbol: return "symbol";
     case OperandKind::Literal: return "literal";
     case OperandKind::Port: return "port";
-    case OperandKind::Aggregate: return "aggregate";
-    case OperandKind::LookupTable: return "lookup_table";
     }
     return "unknown";
 }
@@ -318,6 +326,7 @@ static const char* operationKindText(OperationKind kind) {
     case OperationKind::DynamicWriteSlice: return "dynamic_write_slice";
     case OperationKind::DynamicWriteBit: return "dynamic_write_bit";
     case OperationKind::Lookup: return "lookup";
+    case OperationKind::Aggregate: return "aggregate";
     }
     return "unknown";
 }
@@ -575,13 +584,7 @@ public:
                 throw std::runtime_error("beir rejects InOut port direction: " + name);
             }
         }
-        for (const auto& name : sortedKeys(source.lookup_tables)) {
-            lookup_table_names_.insert(name);
-            LookupTable table;
-            table.name = name;
-            table.values = source.lookup_tables.at(name);
-            program_.lookup_tables.push_back(std::move(table));
-        }
+        lookup_table_values_ = source.lookup_tables;
         if (program_.outputs.empty()) {
             for (const auto& [name, direction] : source.param_directions) {
                 if (parsePortDirection(direction) == PortDirection::Output) {
@@ -663,15 +666,17 @@ public:
             setDriver(output.name, std::move(op), false);
         }
 
+        finalizeAggregateDrivers();
+
         return std::move(program_);
     }
 
 private:
     Program program_;
     std::unordered_map<std::string, std::size_t> port_index_;
-    std::unordered_map<std::string, std::size_t> aggregate_index_;
+    std::unordered_map<std::string, NodeId> aggregate_index_;
     std::unordered_map<std::string, NodeId> signal_id_by_name_;
-    std::unordered_set<std::string> lookup_table_names_;
+    std::unordered_map<std::string, std::vector<std::string>> lookup_table_values_;
     NodeId next_node_id_ = 0;
     std::size_t next_temp_ = 0;
 
@@ -680,15 +685,6 @@ private:
     }
 
     Signal& ensureSignal(const std::string& name, ValueType type) {
-        if (type.isArray()) {
-            std::string dims;
-            for (int dim : type.array_dims) {
-                dims += dims.empty() ? std::to_string(dim) : "x" + std::to_string(dim);
-            }
-            throw std::runtime_error("beir scalar signal cannot use array type: " + name +
-                                     " width=" + std::to_string(type.width) +
-                                     " dims=" + dims);
-        }
         auto it = signal_id_by_name_.find(name);
         if (it == signal_id_by_name_.end()) {
             NodeId id = next_node_id_++;
@@ -728,6 +724,9 @@ private:
 
         ValueType element_type = scalarElementType(type);
         if (type.isArray()) {
+            Signal& array_signal = ensureSignal(name, type);
+            array_signal.port_name = name;
+            array_signal.port_element_index = 0;
             int count = flattenedArraySize(type);
             for (int i = 0; i < count; ++i) {
                 std::string element_name = name + "_" + std::to_string(i);
@@ -747,27 +746,22 @@ private:
         return program_.ports.back();
     }
 
-    Aggregate& ensureAggregate(const std::string& name, TypeInfo source_type) {
+    Signal& ensureAggregate(const std::string& name, TypeInfo source_type) {
         ValueType type = beirType(source_type);
         auto it = aggregate_index_.find(name);
-        if (it != aggregate_index_.end()) return program_.aggregates[it->second];
+        if (it != aggregate_index_.end()) return signalById(it->second);
 
-        std::size_t index = program_.aggregates.size();
-        aggregate_index_.emplace(name, index);
-        Aggregate aggregate;
-        aggregate.name = name;
-        aggregate.type = type;
+        Signal& aggregate_signal = ensureSignal(name, type);
+        aggregate_index_.emplace(name, aggregate_signal.id);
 
         ValueType element_type = scalarElementType(type);
         int count = flattenedArraySize(type);
         for (int i = 0; i < count; ++i) {
             std::string element_name = name + "_" + std::to_string(i);
-            Signal& element = ensureSignal(element_name, element_type);
-            aggregate.element_nodes.push_back(element.id);
+            ensureSignal(element_name, element_type);
         }
 
-        program_.aggregates.push_back(std::move(aggregate));
-        return program_.aggregates.back();
+        return aggregate_signal;
     }
 
     void connectInputPorts(const PredicateProgram& source) {
@@ -950,14 +944,95 @@ private:
         return result;
     }
 
+    NodeId latestElementNode(const std::string& aggregate_name, int index) const {
+        std::string stem = aggregate_name + "_" + std::to_string(index);
+        NodeId best = kInvalidNodeId;
+        int best_version = -1;
+        auto base_it = signal_id_by_name_.find(stem);
+        if (base_it != signal_id_by_name_.end()) best = base_it->second;
+        for (const auto& signal : program_.signals) {
+            std::string base;
+            if (!endsWithNumber(signal.name, base) || base != stem) continue;
+            std::string version_text = signal.name.substr(base.size() + 1);
+            int version = std::stoi(version_text);
+            if (version > best_version) {
+                best_version = version;
+                best = signal.id;
+            }
+        }
+        return best;
+    }
+
+    bool hasVersionedElement(const std::string& aggregate_name, int index) const {
+        std::string stem = aggregate_name + "_" + std::to_string(index);
+        for (const auto& signal : program_.signals) {
+            std::string base;
+            if (endsWithNumber(signal.name, base) && base == stem) return true;
+        }
+        return false;
+    }
+
+    void finalizeAggregateDrivers() {
+        for (const auto& [name, id] : aggregate_index_) {
+            Signal& aggregate = signalById(id);
+            if (aggregate.driver) continue;
+            if (!aggregate.type.isArray()) {
+                throw std::runtime_error("beir aggregate signal is not array typed: " + name);
+            }
+            ValueType element_type = scalarElementType(aggregate.type);
+            int count = flattenedArraySize(aggregate.type);
+            Operation op;
+            op.kind = OperationKind::Aggregate;
+            op.type = aggregate.type;
+            auto init_it = lookup_table_values_.find(name);
+            for (int i = 0; i < count; ++i) {
+                if (init_it != lookup_table_values_.end() &&
+                    i < static_cast<int>(init_it->second.size()) &&
+                    !hasVersionedElement(name, i)) {
+                    op.operands.push_back(literalOperand(init_it->second[static_cast<std::size_t>(i)],
+                                                         TypeInfo{"", element_type.width, true}));
+                    continue;
+                }
+                NodeId element_id = latestElementNode(name, i);
+                if (element_id == kInvalidNodeId) {
+                    throw std::runtime_error("beir cannot find aggregate element for: " +
+                                             name + "[" + std::to_string(i) + "]");
+                }
+                Operand operand;
+                operand.kind = OperandKind::Symbol;
+                operand.node = element_id;
+                operand.text = signalById(element_id).name;
+                operand.type = signalById(element_id).type;
+                op.operands.push_back(std::move(operand));
+            }
+            op.debug = generatedDebug("aggregate array value for '" + name + "'", op.operands);
+            aggregate.debug = op.debug;
+            aggregate.driver = std::move(op);
+        }
+    }
+
     Operand symbolOperand(const std::string& name, TypeInfo type) {
         bool signed_view = isSignedViewType(type);
         if (type.is_array || aggregate_index_.count(name)) {
-            ensureAggregate(name, type);
+            auto existing = signal_id_by_name_.find(name);
+            if (existing != signal_id_by_name_.end()) {
+                Signal& signal = signalById(existing->second);
+                if (signal.type.isArray()) {
+                    Operand operand;
+                    operand.kind = OperandKind::Symbol;
+                    operand.node = signal.id;
+                    operand.text = signal.name;
+                    operand.type = signal.type;
+                    operand.signed_view = signed_view;
+                    return operand;
+                }
+            }
+            Signal& signal = ensureAggregate(name, type);
             Operand operand;
-            operand.kind = OperandKind::Aggregate;
-            operand.text = name;
-            operand.type = beirType(type);
+            operand.kind = OperandKind::Symbol;
+            operand.node = signal.id;
+            operand.text = signal.name;
+            operand.type = signal.type;
             operand.signed_view = signed_view;
             return operand;
         }
@@ -975,8 +1050,15 @@ private:
     Operand literalOperand(std::string value, TypeInfo type) {
         bool signed_view = isSignedViewType(type);
         ValueType storage_type = beirType(type);
-        if (lookup_table_names_.count(value) || type.is_array) {
-            return lookupTableOperand(std::move(value), storage_type);
+        if (type.is_array) {
+            Signal& signal = ensureAggregate(value, type);
+            Operand operand;
+            operand.kind = OperandKind::Symbol;
+            operand.node = signal.id;
+            operand.text = signal.name;
+            operand.type = signal.type;
+            operand.signed_view = signed_view;
+            return operand;
         }
         Operand operand;
         operand.kind = OperandKind::Literal;
@@ -984,14 +1066,6 @@ private:
         operand.text = std::move(value);
         operand.type = std::move(storage_type);
         operand.signed_view = signed_view;
-        return operand;
-    }
-
-    Operand lookupTableOperand(std::string value, ValueType type) {
-        Operand operand;
-        operand.kind = OperandKind::LookupTable;
-        operand.text = std::move(value);
-        operand.type = std::move(type);
         return operand;
     }
 
@@ -1005,6 +1079,7 @@ private:
 
     void setDriver(const std::string& signal_name, Operation op, bool allow_existing_same_kind) {
         Signal& signal = ensureSignal(signal_name, op.type);
+        validateOperationTypes(op);
         if (signal.driver) {
             if (allow_existing_same_kind && signal.driver->kind == op.kind) return;
             throw std::runtime_error("beir signal has more than one driver: " + signal_name);
@@ -1016,6 +1091,68 @@ private:
         }
         signal.debug = op.debug;
         signal.driver = std::move(op);
+    }
+
+    void validateOperationTypes(const Operation& op) const {
+        auto reject_array_operand = [&](const Operand& operand) {
+            if (operand.type.isArray()) {
+                throw std::runtime_error("beir operation '" + std::string(operationKindText(op.kind)) +
+                                         "' cannot use array operand directly");
+            }
+        };
+
+        switch (op.kind) {
+        case OperationKind::Aggregate:
+            if (!op.type.isArray()) {
+                throw std::runtime_error("beir aggregate operation must produce array type");
+            }
+            for (const auto& operand : op.operands) {
+                if (operand.type.isArray()) {
+                    ValueType expected = op.type;
+                    if (expected.array_dims.empty()) {
+                        throw std::runtime_error("beir malformed aggregate array type");
+                    }
+                    expected.array_dims.erase(expected.array_dims.begin());
+                    if (operand.type.width != expected.width ||
+                        operand.type.array_dims != expected.array_dims) {
+                        throw std::runtime_error("beir aggregate operand array dimension mismatch");
+                    }
+                } else if (operand.type.width != op.type.width) {
+                    throw std::runtime_error("beir aggregate operand width mismatch");
+                }
+            }
+            return;
+        case OperationKind::Lookup:
+        case OperationKind::ArrayAccess:
+            if (op.operands.empty() || !op.operands[0].type.isArray()) {
+                throw std::runtime_error("beir lookup/array_access requires array base operand");
+            }
+            for (std::size_t i = 1; i < op.operands.size(); ++i) reject_array_operand(op.operands[i]);
+            if (op.type.isArray()) {
+                ValueType expected = op.operands[0].type;
+                expected.array_dims.erase(expected.array_dims.begin());
+                if (op.type.width != expected.width ||
+                    op.type.array_dims != expected.array_dims) {
+                    throw std::runtime_error("beir lookup/array_access result dimension mismatch");
+                }
+            }
+            return;
+        case OperationKind::PortRead:
+            for (std::size_t i = 1; i < op.operands.size(); ++i) reject_array_operand(op.operands[i]);
+            return;
+        case OperationKind::Assign:
+            if (op.operands.size() == 1 && op.type.isArray() != op.operands[0].type.isArray()) {
+                throw std::runtime_error("beir assign array/scalar type mismatch");
+            }
+            return;
+        default:
+            if (op.type.isArray()) {
+                throw std::runtime_error("beir operation '" + std::string(operationKindText(op.kind)) +
+                                         "' cannot produce array type");
+            }
+            for (const auto& operand : op.operands) reject_array_operand(operand);
+            return;
+        }
     }
 
     void mergeType(ValueType& existing, const ValueType& incoming) {
@@ -1317,11 +1454,6 @@ void MutableProgram::compact(const std::unordered_set<NodeId>& live) {
     };
 
     for (auto& port : program_.ports) remap_node_list(port.element_nodes);
-    for (auto& aggregate : program_.aggregates) remap_node_list(aggregate.element_nodes);
-    program_.aggregates.erase(
-        std::remove_if(program_.aggregates.begin(), program_.aggregates.end(),
-                       [](const Aggregate& aggregate) { return aggregate.element_nodes.empty(); }),
-        program_.aggregates.end());
 
     for (auto& signal : compacted) {
         remapDebug(signal.debug, remap);
@@ -1434,8 +1566,6 @@ static void emitOperand(std::ostream& os, const Program& program, const Operand&
         if (operand.signed_view) os << " signed_view";
         return;
     case OperandKind::Port:
-    case OperandKind::Aggregate:
-    case OperandKind::LookupTable:
         os << operandKindText(operand.kind) << "(" << operand.text << " : "
            << typeText(operand.type) << ")";
         if (operand.signed_view) os << " signed_view";
@@ -1484,22 +1614,6 @@ std::string emitText(const Program& program) {
         os << "  " << portDirectionText(port.direction) << " " << port.name << " : " << typeText(port.type)
            << " elements=";
         emitNodeList(os, program, port.element_nodes);
-        os << "\n";
-    }
-    os << "\n";
-
-    os << "aggregates\n";
-    for (const auto& aggregate : program.aggregates) {
-        os << "  " << aggregate.name << " : " << typeText(aggregate.type) << " elements=";
-        emitNodeList(os, program, aggregate.element_nodes);
-        os << "\n";
-    }
-    os << "\n";
-
-    os << "lookup_tables\n";
-    for (const auto& table : program.lookup_tables) {
-        os << "  " << table.name << " = ";
-        emitNameList(os, table.values);
         os << "\n";
     }
     os << "\n";

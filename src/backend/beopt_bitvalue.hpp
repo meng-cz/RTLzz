@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <queue>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -246,6 +248,7 @@ inline Facts literalFacts(const Operand& operand) {
 }
 
 inline Facts zextFacts(const Facts& src, int out_width) {
+    if (src.width <= 0) return unknown(out_width);
     Facts out = unknown(out_width);
     int copy_width = std::min(src.width, out_width);
     out.known_zero = sliceBits(src.known_zero, 0, copy_width);
@@ -260,6 +263,7 @@ inline Facts zextFacts(const Facts& src, int out_width) {
 }
 
 inline Facts truncFacts(const Facts& src, int out_width) {
+    if (src.width <= 0) return unknown(out_width);
     Facts out = unknown(out_width);
     out.known_zero = sliceBits(src.known_zero, 0, out_width);
     out.known_one = sliceBits(src.known_one, 0, out_width);
@@ -268,6 +272,7 @@ inline Facts truncFacts(const Facts& src, int out_width) {
 }
 
 inline Facts sliceFacts(const Facts& src, int lo, int out_width) {
+    if (src.width <= 0) return unknown(out_width);
     Facts out = unknown(out_width);
     out.known_zero = sliceBits(src.known_zero, lo, out_width);
     out.known_one = sliceBits(src.known_one, lo, out_width);
@@ -277,6 +282,7 @@ inline Facts sliceFacts(const Facts& src, int lo, int out_width) {
 
 inline Facts bitSelectFacts(const Facts& src, int bit) {
     Facts out = unknown(1);
+    if (src.width <= 0) return out;
     if (src.bitKnownZero(bit)) setBit(out.known_zero, 0);
     if (src.bitKnownOne(bit)) setBit(out.known_one, 0);
     if (src.constant) {
@@ -287,6 +293,7 @@ inline Facts bitSelectFacts(const Facts& src, int bit) {
 }
 
 inline Facts bitNotFacts(const Facts& src) {
+    if (src.width <= 0) return unknown(1);
     Facts out = unknown(src.width);
     out.known_zero = src.known_one;
     out.known_one = src.known_zero;
@@ -501,6 +508,68 @@ inline Facts inferOperation(const Operation& op, const std::vector<Facts>& facts
     return unknown(width);
 }
 
+inline std::vector<NodeId> topologicalOrder(const Program& program) {
+    const std::size_t count = program.signals.size();
+    std::vector<std::vector<NodeId>> users(count);
+    std::vector<std::size_t> indegree(count, 0);
+
+    for (const auto& signal : program.signals) {
+        if (signal.id >= count) {
+            throw std::runtime_error("BEIR bit-value analysis requires dense NodeId indices");
+        }
+        if (!signal.driver) continue;
+        for (const Operand& operand : signal.driver->operands) {
+            if (operand.kind != OperandKind::Symbol) continue;
+            if (operand.node >= count || !program.findSignal(operand.node)) {
+                throw std::runtime_error("BEIR bit-value analysis found dependency on unknown node");
+            }
+            users[static_cast<std::size_t>(operand.node)].push_back(signal.id);
+            ++indegree[static_cast<std::size_t>(signal.id)];
+        }
+    }
+
+    std::queue<NodeId> ready;
+    for (const auto& signal : program.signals) {
+        if (indegree[static_cast<std::size_t>(signal.id)] == 0) ready.push(signal.id);
+    }
+
+    std::vector<NodeId> order;
+    order.reserve(count);
+    while (!ready.empty()) {
+        NodeId id = ready.front();
+        ready.pop();
+        order.push_back(id);
+        for (NodeId user : users[static_cast<std::size_t>(id)]) {
+            std::size_t& degree = indegree[static_cast<std::size_t>(user)];
+            if (degree == 0) {
+                throw std::runtime_error("BEIR bit-value analysis internal topological degree underflow");
+            }
+            --degree;
+            if (degree == 0) ready.push(user);
+        }
+    }
+
+    if (order.size() != count) {
+        throw std::runtime_error("BEIR bit-value analysis requires an acyclic signal dependency graph");
+    }
+    return order;
+}
+
+inline void verifyDependenciesResolved(const Operation& op,
+                                       const std::vector<bool>& resolved,
+                                       NodeId signal_id) {
+    for (const Operand& operand : op.operands) {
+        if (operand.kind != OperandKind::Symbol) continue;
+        if (operand.node >= resolved.size()) {
+            throw std::runtime_error("BEIR bit-value analysis found dependency on unknown node");
+        }
+        if (!resolved[static_cast<std::size_t>(operand.node)]) {
+            throw std::runtime_error("BEIR bit-value analysis encountered unresolved dependency before node #" +
+                                     std::to_string(signal_id));
+        }
+    }
+}
+
 inline Operand makeLiteralFromFacts(const Facts& facts, const ValueType& type) {
     Operand operand = literalOperand(facts.value, type);
     operand.constant.width = widthOf(type);
@@ -589,12 +658,21 @@ inline bool rewriteOperation(Operation& op, const Program& program, const Facts&
 inline std::vector<Facts> analyze(const Program& program) {
     std::vector<Facts> facts(program.signals.size());
     for (const auto& signal : program.signals) {
-        Facts out = unknown(widthOf(signal.type));
-        if (signal.driver) out = inferOperation(*signal.driver, facts);
-        out.width = widthOf(signal.type);
-        trim(out.known_zero, out.width);
-        trim(out.known_one, out.width);
-        facts[signal.id] = std::move(out);
+        if (signal.id < facts.size()) facts[signal.id] = unknown(widthOf(signal.type));
+    }
+
+    std::vector<bool> resolved(program.signals.size(), false);
+    for (NodeId id : topologicalOrder(program)) {
+        const Signal& signal = program.signal(id);
+        if (signal.driver) {
+            verifyDependenciesResolved(*signal.driver, resolved, id);
+            Facts out = inferOperation(*signal.driver, facts);
+            out.width = widthOf(signal.type);
+            trim(out.known_zero, out.width);
+            trim(out.known_one, out.width);
+            facts[static_cast<std::size_t>(id)] = std::move(out);
+        }
+        resolved[static_cast<std::size_t>(id)] = true;
     }
     return facts;
 }
