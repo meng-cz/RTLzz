@@ -1,5 +1,46 @@
 # src 代码索引
 
+## 统一回归测试流程
+
+后续修改代码后，优先使用以下流程确认 `tests/fixtures` 正向用例的 RTL 生成与随机差分测试仍然正确。
+
+1. 配置构建目录：
+
+```bash
+cmake -S . -B build
+```
+
+2. 构建前端/后端编译器：
+
+```bash
+cmake --build build --target predicate-expand -j2
+```
+
+3. 对 `tests/fixtures` 执行全量 RTL diff 回归：
+
+```bash
+for f in tests/fixtures/*.logic.cpp; do
+  echo "== $f"
+  python3 scripts/differential_rtl.py "$f" --top hls_main --cases 50 || exit 1
+done
+```
+
+4. 对高风险修改加大随机样本数复测代表用例：
+
+```bash
+python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls_main --cases 200
+python3 scripts/differential_rtl.py tests/fixtures/int_uint_corner.logic.cpp --top hls_main --cases 200
+python3 scripts/differential_rtl.py tests/fixtures/array_flatten.logic.cpp --top hls_main --cases 200
+```
+
+5. 排查优化相关问题时，可关闭 BEIR 优化对比：
+
+```bash
+python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls_main --cases 100 --beopt none
+```
+
+说明：`differential_rtl.py` 会调用 `build/predicate-expand` 生成 listjson 与 RTL，使用 `third_party/vulsim/vullib` 作为 `--vullib`，再通过 Verilator 与 C++ oracle 做随机输入差分。
+
 ## 顶层 API
 
 ### `src/rtlzz.hpp`
