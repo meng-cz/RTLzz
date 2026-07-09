@@ -1,5 +1,6 @@
 #include "backend/beopt.hpp"
 
+#include "backend/beopt_algebraic.hpp"
 #include "backend/beopt_assign_chains.hpp"
 #include "backend/beopt_bitvalue.hpp"
 #include "backend/beopt_cse.hpp"
@@ -18,12 +19,14 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.fold_assign_chains = true;
             options.bit_value_analysis = true;
             options.width_simplification = true;
+            options.algebraic_identities = true;
             options.common_subexpressions = true;
             options.dead_node_elimination = true;
         } else if (value == "none") {
             options.fold_assign_chains = false;
             options.bit_value_analysis = false;
             options.width_simplification = false;
+            options.algebraic_identities = false;
             options.common_subexpressions = false;
             options.dead_node_elimination = false;
         } else if (value == "assign" || value == "fold-assign") {
@@ -42,6 +45,10 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.width_simplification = true;
         } else if (value == "no-width" || value == "no-width-simplify") {
             options.width_simplification = false;
+        } else if (value == "algebraic" || value == "arith") {
+            options.algebraic_identities = true;
+        } else if (value == "no-algebraic" || value == "no-arith") {
+            options.algebraic_identities = false;
         } else if (value == "dce") {
             options.dead_node_elimination = true;
         } else if (value == "no-dce") {
@@ -61,6 +68,7 @@ Program optimizeProgram(Program program, const Options& options) {
         changed = false;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.bit_value_analysis) changed = propagateBitValues(graph) || changed;
+        if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
         if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
