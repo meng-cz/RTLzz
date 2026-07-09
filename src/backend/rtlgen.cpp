@@ -527,11 +527,10 @@ private:
                    ")";
         case beir::OperationKind::Slice:
             need(1);
-            return std::to_string(op.hi - op.lo + 1) + "'((" + operand(ops[0]) +
-                   ") >> " + std::to_string(op.lo) + ")";
+            return partSelectExpr(operand(ops[0]), op.hi, op.lo);
         case beir::OperationKind::BitSelect:
             need(1);
-            return "1'((" + operand(ops[0]) + ") >> " + std::to_string(op.bit) + ")";
+            return partSelectExpr(operand(ops[0]), op.bit, op.bit);
         case beir::OperationKind::WriteSlice:
             need(2);
             return writeSliceExpr(operand(ops[0]), operand(ops[1]), widthOf(op.type),
@@ -542,10 +541,10 @@ private:
                                   op.bit, 1, widthOf(ops[1].type));
         case beir::OperationKind::DynamicBitSelect:
             need(2);
-            return "1'(" + operand(ops[0]) + " >> " + operand(ops[1]) + ")";
+            return dynamicPartSelectExpr(operand(ops[0]), ops[1], widthOf(ops[0].type), 1);
         case beir::OperationKind::DynamicSlice:
             need(2);
-            return "(" + operand(ops[0]) + " >> " + operand(ops[1]) + ")";
+            return dynamicPartSelectExpr(operand(ops[0]), ops[1], widthOf(ops[0].type), widthOf(op.type));
         case beir::OperationKind::DynamicWriteSlice:
             need(3);
             return writeSliceExpr(operand(ops[0]), operand(ops[2]), widthOf(op.type),
@@ -657,6 +656,18 @@ private:
             return base + "[" + std::to_string(hi) + ":" + std::to_string(lo) + "]";
         }
         return std::to_string(width) + "'((" + base + ") >> " + std::to_string(lo) + ")";
+    }
+
+    std::string dynamicPartSelectExpr(const std::string& base,
+                                      const beir::Operand& index,
+                                      int base_width,
+                                      int width) const {
+        if (width <= 0) throw std::runtime_error("rtlgen malformed dynamic part-select width");
+        if (isSimpleIdentifier(base)) {
+            return base + "[" + dynamicIndexExpr(index, base_width) + " +: " +
+                   std::to_string(width) + "]";
+        }
+        return std::to_string(width) + "'((" + base + ") >> " + dynamicIndexExpr(index, base_width) + ")";
     }
 
     std::string writeSliceExpr(const std::string& base, const std::string& value,
