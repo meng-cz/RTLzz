@@ -690,6 +690,8 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `emitLocList`：输出输入 C++ 源位置列表。
   - `debugComment`：统一生成 RTL 注释，格式为 `loc: <输入 C++ 行位置>; message: <来源或生成说明>`。
   - `signalDebug`：为无直接 driver 的版本化信号回退到基名信号源码位置。
+  - `writeSliceExpr`：静态切片写使用 Verilog 大括号拼接 `{high, value, low}` 生成 RTL。
+  - `emitDynamicWriteAssignment`：动态切片/位写生成一行 `always_comb begin base-copy; target[index +: N] = value; end`。
 
 ## Debug
 

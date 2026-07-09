@@ -45,10 +45,10 @@ static std::string sanitizeIdentifier(const std::string& text) {
     }
     static const std::unordered_set<std::string> keywords = {
         "module", "endmodule", "input", "output", "inout", "logic", "wire",
-        "assign", "always", "if", "else", "case", "endcase", "function",
-        "endfunction", "signed", "unsigned", "localparam", "bit", "byte",
-        "shortint", "int", "longint", "reg", "integer", "time", "local",
-        "final"
+        "assign", "always", "always_comb", "if", "else", "case", "endcase",
+        "function", "endfunction", "signed", "unsigned", "localparam", "bit",
+        "byte", "shortint", "int", "longint", "reg", "integer", "time",
+        "local", "final"
     };
     if (keywords.count(out)) out += "_";
     return out;
@@ -121,6 +121,17 @@ static bool endsWithNumber(const std::string& name, std::string& base) {
         if (!std::isdigit(static_cast<unsigned char>(name[i]))) return false;
     }
     base = name.substr(0, pos);
+    return true;
+}
+
+static bool isSimpleIdentifier(const std::string& text) {
+    if (text.empty()) return false;
+    unsigned char first = static_cast<unsigned char>(text.front());
+    if (!std::isalpha(first) && text.front() != '_') return false;
+    for (char ch : text) {
+        unsigned char c = static_cast<unsigned char>(ch);
+        if (!std::isalnum(c) && ch != '_') return false;
+    }
     return true;
 }
 
@@ -341,6 +352,10 @@ private:
                     emitAggregateAssignment(os, signal, *signal.driver);
                     continue;
                 }
+                if (isDynamicWrite(*signal.driver)) {
+                    emitDynamicWriteAssignment(os, signal, *signal.driver);
+                    continue;
+                }
                 os << "    assign " << sig(signal.id) << " = "
                    << resizeExpr(expr(*signal.driver),
                                  widthOf(signal.driver->type),
@@ -382,6 +397,50 @@ private:
                              false)
                << ";" << debugComment(op.debug) << "\n";
         }
+    }
+
+    bool isDynamicWrite(const beir::Operation& op) const {
+        return op.kind == beir::OperationKind::DynamicWriteSlice ||
+               op.kind == beir::OperationKind::DynamicWriteBit;
+    }
+
+    void emitDynamicWriteAssignment(std::ostream& os,
+                                    const beir::Signal& signal,
+                                    const beir::Operation& op) const {
+        const auto& ops = op.operands;
+        if (op.kind == beir::OperationKind::DynamicWriteSlice) {
+            if (ops.size() < 3) throw std::runtime_error("rtlgen malformed dynamic write-slice operands");
+            emitDynamicWriteAssignment(os, signal, op, ops[0], ops[1], ops[2], widthOf(ops[2].type));
+            return;
+        }
+        if (op.kind == beir::OperationKind::DynamicWriteBit) {
+            if (ops.size() < 3) throw std::runtime_error("rtlgen malformed dynamic write-bit operands");
+            emitDynamicWriteAssignment(os, signal, op, ops[0], ops[1], ops[2], 1);
+            return;
+        }
+        throw std::runtime_error("rtlgen unsupported dynamic write operation");
+    }
+
+    void emitDynamicWriteAssignment(std::ostream& os,
+                                    const beir::Signal& signal,
+                                    const beir::Operation& op,
+                                    const beir::Operand& base,
+                                    const beir::Operand& index,
+                                    const beir::Operand& value,
+                                    int write_width) const {
+        std::string target = sig(signal.id);
+        os << "    always_comb begin "
+           << target << " = "
+           << resizeExpr(operand(base), widthOf(base.type), widthOf(signal.type), false)
+           << "; " << target << "[" << dynamicIndexExpr(index, widthOf(signal.type))
+           << " +: " << write_width << "] = "
+           << resizeExpr(operand(value), widthOf(value.type), write_width, false)
+           << "; end" << debugComment(op.debug) << "\n";
+    }
+
+    std::string dynamicIndexExpr(const beir::Operand& index, int target_width) const {
+        int required_width = indexWidthForCount(static_cast<std::size_t>(std::max(target_width, 1)));
+        return resizeExpr(operand(index), widthOf(index.type), required_width, false);
     }
 
     std::string operand(const beir::Operand& op) const {
@@ -565,7 +624,39 @@ private:
 
     std::string writeSliceExpr(const std::string& base, const std::string& value,
                                int base_width, int lo, int write_width, int value_width) const {
-        return writeSliceExpr(base, value, base_width, std::to_string(lo), write_width, value_width);
+        int hi = lo + write_width - 1;
+        if (base_width <= 0 || write_width <= 0 || lo < 0 || hi >= base_width) {
+            throw std::runtime_error("rtlgen malformed static write-slice range");
+        }
+
+        std::vector<std::string> parts;
+        if (hi + 1 < base_width) {
+            parts.push_back(partSelectExpr(base, base_width - 1, hi + 1));
+        }
+        parts.push_back(resizeExpr(value, value_width, write_width, false));
+        if (lo > 0) {
+            parts.push_back(partSelectExpr(base, lo - 1, 0));
+        }
+
+        if (parts.size() == 1) return parts.front();
+        std::ostringstream os;
+        os << "{";
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            if (i) os << ", ";
+            os << parts[i];
+        }
+        os << "}";
+        return os.str();
+    }
+
+    std::string partSelectExpr(const std::string& base, int hi, int lo) const {
+        int width = hi - lo + 1;
+        if (width <= 0) throw std::runtime_error("rtlgen malformed static part-select range");
+        if (isSimpleIdentifier(base)) {
+            if (width == 1) return base + "[" + std::to_string(lo) + "]";
+            return base + "[" + std::to_string(hi) + ":" + std::to_string(lo) + "]";
+        }
+        return std::to_string(width) + "'((" + base + ") >> " + std::to_string(lo) + ")";
     }
 
     std::string writeSliceExpr(const std::string& base, const std::string& value,
