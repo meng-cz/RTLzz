@@ -2,7 +2,7 @@
 
 #include "backend/beopt_algebraic.hpp"
 #include "backend/beopt_assign_chains.hpp"
-#include "backend/beopt_bitvalue.hpp"
+#include "backend/beopt_constant.hpp"
 #include "backend/beopt_cse.hpp"
 #include "backend/beopt_dce.hpp"
 #include "backend/beopt_width.hpp"
@@ -17,14 +17,14 @@ Options parseOptions(const std::vector<std::string>& values) {
     for (const std::string& value : values) {
         if (value == "all") {
             options.fold_assign_chains = true;
-            options.bit_value_analysis = true;
+            options.constant_folding = true;
             options.width_simplification = true;
             options.algebraic_identities = true;
             options.common_subexpressions = true;
             options.dead_node_elimination = true;
         } else if (value == "none") {
             options.fold_assign_chains = false;
-            options.bit_value_analysis = false;
+            options.constant_folding = false;
             options.width_simplification = false;
             options.algebraic_identities = false;
             options.common_subexpressions = false;
@@ -37,10 +37,14 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.common_subexpressions = true;
         } else if (value == "no-cse") {
             options.common_subexpressions = false;
+        } else if (value == "constant" || value == "const" || value == "constant-fold") {
+            options.constant_folding = true;
+        } else if (value == "no-constant" || value == "no-const" || value == "no-constant-fold") {
+            options.constant_folding = false;
         } else if (value == "bitvalue" || value == "bit-value") {
-            options.bit_value_analysis = true;
+            options.constant_folding = true;
         } else if (value == "no-bitvalue" || value == "no-bit-value") {
-            options.bit_value_analysis = false;
+            options.constant_folding = false;
         } else if (value == "width" || value == "width-simplify") {
             options.width_simplification = true;
         } else if (value == "no-width" || value == "no-width-simplify") {
@@ -67,7 +71,7 @@ Program optimizeProgram(Program program, const Options& options) {
     while (changed && iteration++ < options.max_iterations) {
         changed = false;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
-        if (options.bit_value_analysis) changed = propagateBitValues(graph) || changed;
+        if (options.constant_folding) changed = foldConstants(graph) || changed;
         if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
         if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;

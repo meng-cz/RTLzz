@@ -606,6 +606,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `sourceDebug`：生成源代码调试信息。
   - `generatedDebug`：生成中间节点调试信息。
   - `factsInferOperation`：推断单个操作的常量和确定位 facts。
+  - `factsPromoteKnownConstant`：将所有位均确定的 facts 晋升为常量。
   - `factsTopologicalOrder`：为 facts 分析生成拓扑序。
   - `MutableProgram::ensureValueFacts`：按需刷新 value facts。
   - `MutableProgram::analyzeValueFacts`：按拓扑序分析所有节点 facts。
@@ -623,7 +624,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
 - 主要功能：实现 BEIR 优化选项解析和 pass 调度。
 - 主要函数：
   - `parseOptions`：将字符串选项转换为 `Options`。
-  - `optimizeProgram`：依次运行赋值链、bit facts、代数化简、位宽化简、CSE 和 DCE。
+  - `optimizeProgram`：依次运行赋值链、常量折叠/传播、代数化简、位宽化简、CSE 和 DCE。
 
 ### `src/backend/beopt_assign_chains.hpp`
 - 主要功能：优化连续 assign 和同 guard mux 链。
@@ -633,13 +634,14 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `symbolDriver`：查找符号操作数的驱动操作。
   - `sameOperand`：比较两个操作数是否等价。
 
-### `src/backend/beopt_bitvalue.hpp`
-- 主要功能：基于 value facts 折叠常量和位值确定的操作。
+### `src/backend/beopt_constant.hpp`
+- 主要功能：基于 `ensureValueFacts` 的确定值信息执行专用常量传播与常量折叠。
 - 主要函数：
-  - `propagateBitValues`：执行位值传播优化。
-  - `rewriteOperation`：根据输出 facts 重写单个操作。
-  - `makeLiteralFromFacts`：从完全确定的 facts 构造字面量。
-  - `sameLowBits`：判断低位是否与原值完全一致。
+  - `foldConstants`：按依赖拓扑序从被依赖节点到使用节点执行常量传播和折叠。
+  - `topologicalOrder`：为常量传播生成依赖优先遍历顺序。
+  - `propagateConstantOperands`：将操作数中常量符号替换为 literal。
+  - `foldConstantResult`：将已完全确定的操作改写为 literal assign。
+  - `literalOperandFromFacts`：从完全确定的 facts 构造字面量操作数。
 
 ### `src/backend/beopt_algebraic.hpp`
 - 主要功能：消除 `+0`、`*1`、与全零/全一位运算等无用算术和逻辑驱动节点。

@@ -1296,6 +1296,14 @@ static void factsSetBit(std::vector<std::uint64_t>& limbs, int bit) {
     if (limb < limbs.size()) limbs[limb] |= (1ULL << (bit % 64));
 }
 
+static bool factsAllBitsKnown(const ValueFacts& facts) {
+    if (!facts.valid || facts.width <= 0) return false;
+    for (int bit = 0; bit < facts.width; ++bit) {
+        if (!factsGetBit(facts.known_zero, bit) && !factsGetBit(facts.known_one, bit)) return false;
+    }
+    return true;
+}
+
 static std::vector<std::uint64_t> factsBitNot(std::vector<std::uint64_t> value, int width) {
     for (auto& limb : value) limb = ~limb;
     factsTrim(value, width);
@@ -1317,6 +1325,12 @@ static Operand::Constant factsMakeConstant(std::vector<std::uint64_t> limbs, int
     constant.limbs = std::move(limbs);
     factsTrim(constant.limbs, width);
     return constant;
+}
+
+static void factsPromoteKnownConstant(ValueFacts& facts) {
+    if (facts.constant || !factsAllBitsKnown(facts)) return;
+    facts.constant = true;
+    facts.value = factsMakeConstant(facts.known_one, facts.width);
 }
 
 static ValueFacts factsUnknown(int width) {
@@ -1351,6 +1365,42 @@ static ValueFacts factsZExt(const ValueFacts& src, int out_width) {
     factsTrim(out.known_zero, out_width);
     factsTrim(out.known_one, out_width);
     if (src.constant) out = factsFromConstant(factsMakeConstant(src.value.limbs, copy_width, src.value.signed_view), out_width);
+    return out;
+}
+
+static ValueFacts factsSExt(const ValueFacts& src, int out_width) {
+    if (src.width <= 0) return factsUnknown(out_width);
+    if (out_width <= src.width) {
+        ValueFacts out = factsUnknown(out_width);
+        out.known_zero = factsSliceBits(src.known_zero, 0, out_width);
+        out.known_one = factsSliceBits(src.known_one, 0, out_width);
+        if (src.constant) out = factsFromConstant(factsMakeConstant(src.value.limbs, out_width, src.value.signed_view), out_width);
+        return out;
+    }
+
+    ValueFacts out = factsUnknown(out_width);
+    out.known_zero = factsSliceBits(src.known_zero, 0, src.width);
+    out.known_one = factsSliceBits(src.known_one, 0, src.width);
+    out.known_zero.resize(factsLimbCount(out_width), 0);
+    out.known_one.resize(factsLimbCount(out_width), 0);
+
+    bool sign_zero = factsGetBit(src.known_zero, src.width - 1);
+    bool sign_one = factsGetBit(src.known_one, src.width - 1);
+    for (int bit = src.width; bit < out_width; ++bit) {
+        if (sign_zero) factsSetBit(out.known_zero, bit);
+        if (sign_one) factsSetBit(out.known_one, bit);
+    }
+    factsTrim(out.known_zero, out_width);
+    factsTrim(out.known_one, out_width);
+
+    if (src.constant) {
+        std::vector<std::uint64_t> limbs = src.value.limbs;
+        factsTrim(limbs, out_width);
+        if (factsGetBit(src.value.limbs, src.width - 1)) {
+            for (int bit = src.width; bit < out_width; ++bit) factsSetBit(limbs, bit);
+        }
+        out = factsFromConstant(factsMakeConstant(std::move(limbs), out_width, src.value.signed_view), out_width);
+    }
     return out;
 }
 
@@ -1402,6 +1452,7 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
         return factsTrunc(operands[0], width);
     }
     if (op.kind == OperationKind::ZExt) return operands.empty() ? factsUnknown(width) : factsZExt(operands[0], width);
+    if (op.kind == OperationKind::SExt) return operands.empty() ? factsUnknown(width) : factsSExt(operands[0], width);
     if (op.kind == OperationKind::Trunc) return operands.empty() ? factsUnknown(width) : factsTrunc(operands[0], width);
     if (op.kind == OperationKind::Slice) return operands.empty() ? factsUnknown(width) : factsSlice(operands[0], op.lo, width);
     if (op.kind == OperationKind::BitSelect) return operands.empty() ? factsUnknown(1) : factsBitSelect(operands[0], op.bit);
@@ -1623,6 +1674,7 @@ void MutableProgram::analyzeValueFacts() {
             facts.width = factsWidthOf(signal.type);
             factsTrim(facts.known_zero, facts.width);
             factsTrim(facts.known_one, facts.width);
+            factsPromoteKnownConstant(facts);
             signal.value = std::move(facts);
         } else {
             signal.value = factsUnknown(factsWidthOf(signal.type));
