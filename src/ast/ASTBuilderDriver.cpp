@@ -533,12 +533,12 @@ static DebugLoc debugLocFromCursor(CXCursor cursor) {
 }
 
 static ExprPtr withDebugLoc(ExprPtr expr, CXCursor cursor) {
-    if (expr && !expr->debug_loc.valid()) expr->debug_loc = debugLocFromCursor(cursor);
+    if (expr) expr->debug_loc = debugLocFromCursor(cursor);
     return expr;
 }
 
 static StmtPtr withDebugLoc(StmtPtr stmt, CXCursor cursor) {
-    if (stmt && !stmt->debug_loc.valid()) stmt->debug_loc = debugLocFromCursor(cursor);
+    if (stmt) stmt->debug_loc = debugLocFromCursor(cursor);
     return stmt;
 }
 

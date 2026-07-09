@@ -75,7 +75,13 @@ inline Operand allOnesOperand(const ValueType& type) {
     return constantOperand(std::move(limbs), type);
 }
 
-inline void setAssign(Operation& op, Operand operand, const ValueType& type, const std::string& reason) {
+inline void setAssign(Operation& op,
+                      Operand operand,
+                      const ValueType& type,
+                      const std::string& reason,
+                      const Program& program) {
+    std::vector<DebugLoc> source_locs = op.source_locs;
+    source_locs.insert(source_locs.end(), op.debug.source_locs.begin(), op.debug.source_locs.end());
     op.kind = OperationKind::Assign;
     op.op = OpCode::None;
     op.operands.clear();
@@ -88,6 +94,7 @@ inline void setAssign(Operation& op, Operand operand, const ValueType& type, con
     op.times = 0;
     op.debug.origin = DebugOrigin::Generated;
     op.debug.reason = reason;
+    op.debug.source_locs = std::move(source_locs);
     op.debug.derived_nodes.clear();
     op.debug.derived_names.clear();
     for (const auto& operand_ref : op.operands) {
@@ -97,6 +104,8 @@ inline void setAssign(Operation& op, Operand operand, const ValueType& type, con
             op.debug.derived_names.push_back(operand_ref.text);
         }
     }
+    addOperandDebugLocs(op.debug, program, op.operands);
+    op.source_locs = op.debug.source_locs;
 }
 
 inline bool rewriteBinary(Operation& op, const Program& program) {
@@ -109,98 +118,98 @@ inline bool rewriteBinary(Operation& op, const Program& program) {
     switch (op.op) {
     case OpCode::Add:
         if (isZero(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed addition by zero");
+            setAssign(op, std::move(lhs), type, "removed addition by zero", program);
             return true;
         }
         if (isZero(lhs, program)) {
-            setAssign(op, std::move(rhs), type, "removed addition of zero");
+            setAssign(op, std::move(rhs), type, "removed addition of zero", program);
             return true;
         }
         return false;
     case OpCode::Sub:
         if (isZero(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed subtraction by zero");
+            setAssign(op, std::move(lhs), type, "removed subtraction by zero", program);
             return true;
         }
         return false;
     case OpCode::Mul:
         if (isZero(lhs, program) || isZero(rhs, program)) {
-            setAssign(op, zeroOperand(type), type, "folded multiplication by zero");
+            setAssign(op, zeroOperand(type), type, "folded multiplication by zero", program);
             return true;
         }
         if (isOne(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed multiplication by one");
+            setAssign(op, std::move(lhs), type, "removed multiplication by one", program);
             return true;
         }
         if (isOne(lhs, program)) {
-            setAssign(op, std::move(rhs), type, "removed multiplication of one");
+            setAssign(op, std::move(rhs), type, "removed multiplication of one", program);
             return true;
         }
         return false;
     case OpCode::BitAnd:
         if (isZero(lhs, program) || isZero(rhs, program)) {
-            setAssign(op, zeroOperand(type), type, "folded bitwise and with zero");
+            setAssign(op, zeroOperand(type), type, "folded bitwise and with zero", program);
             return true;
         }
         if (isAllOnes(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed bitwise and with all ones");
+            setAssign(op, std::move(lhs), type, "removed bitwise and with all ones", program);
             return true;
         }
         if (isAllOnes(lhs, program)) {
-            setAssign(op, std::move(rhs), type, "removed bitwise and of all ones");
+            setAssign(op, std::move(rhs), type, "removed bitwise and of all ones", program);
             return true;
         }
         return false;
     case OpCode::BitOr:
         if (isZero(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed bitwise or with zero");
+            setAssign(op, std::move(lhs), type, "removed bitwise or with zero", program);
             return true;
         }
         if (isZero(lhs, program)) {
-            setAssign(op, std::move(rhs), type, "removed bitwise or of zero");
+            setAssign(op, std::move(rhs), type, "removed bitwise or of zero", program);
             return true;
         }
         if (isAllOnes(lhs, program) || isAllOnes(rhs, program)) {
-            setAssign(op, allOnesOperand(type), type, "folded bitwise or with all ones");
+            setAssign(op, allOnesOperand(type), type, "folded bitwise or with all ones", program);
             return true;
         }
         return false;
     case OpCode::BitXor:
         if (isZero(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed bitwise xor with zero");
+            setAssign(op, std::move(lhs), type, "removed bitwise xor with zero", program);
             return true;
         }
         if (isZero(lhs, program)) {
-            setAssign(op, std::move(rhs), type, "removed bitwise xor of zero");
+            setAssign(op, std::move(rhs), type, "removed bitwise xor of zero", program);
             return true;
         }
         return false;
     case OpCode::LogicAnd:
         if (isZero(lhs, program) || isZero(rhs, program)) {
-            setAssign(op, zeroOperand(type), type, "folded logical and with false");
+            setAssign(op, zeroOperand(type), type, "folded logical and with false", program);
             return true;
         }
         if (isOne(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed logical and with true");
+            setAssign(op, std::move(lhs), type, "removed logical and with true", program);
             return true;
         }
         if (isOne(lhs, program)) {
-            setAssign(op, std::move(rhs), type, "removed logical and of true");
+            setAssign(op, std::move(rhs), type, "removed logical and of true", program);
             return true;
         }
         return false;
     case OpCode::LogicOr:
         if (isOne(lhs, program) || isOne(rhs, program)) {
             Operand one = constantOperand({1}, type);
-            setAssign(op, std::move(one), type, "folded logical or with true");
+            setAssign(op, std::move(one), type, "folded logical or with true", program);
             return true;
         }
         if (isZero(rhs, program)) {
-            setAssign(op, std::move(lhs), type, "removed logical or with false");
+            setAssign(op, std::move(lhs), type, "removed logical or with false", program);
             return true;
         }
         if (isZero(lhs, program)) {
-            setAssign(op, std::move(rhs), type, "removed logical or of false");
+            setAssign(op, std::move(rhs), type, "removed logical or of false", program);
             return true;
         }
         return false;

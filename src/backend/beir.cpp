@@ -22,6 +22,72 @@ bool DebugInfo::hasSourceLoc() const {
     return false;
 }
 
+namespace {
+
+static bool sameDebugLoc(const DebugLoc& lhs, const DebugLoc& rhs) {
+    return lhs.file == rhs.file &&
+           lhs.line == rhs.line &&
+           lhs.column == rhs.column &&
+           lhs.end_line == rhs.end_line &&
+           lhs.end_column == rhs.end_column;
+}
+
+static bool splitVersionedName(const std::string& name, std::string& base) {
+    std::size_t pos = name.rfind('_');
+    if (pos == std::string::npos || pos + 1 >= name.size()) return false;
+    for (std::size_t i = pos + 1; i < name.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(name[i]))) return false;
+    }
+    base = name.substr(0, pos);
+    return !base.empty();
+}
+
+} // namespace
+
+void addDebugLoc(DebugInfo& debug, const DebugLoc& loc) {
+    constexpr std::size_t kMaxSourceLocsPerDebugInfo = 32;
+    if (!loc.valid() || debug.source_locs.size() >= kMaxSourceLocsPerDebugInfo) return;
+    for (const auto& existing : debug.source_locs) {
+        if (sameDebugLoc(existing, loc)) return;
+    }
+    debug.source_locs.push_back(loc);
+}
+
+void addDebugLocs(DebugInfo& debug, const std::vector<DebugLoc>& locs) {
+    for (const auto& loc : locs) addDebugLoc(debug, loc);
+}
+
+void addDebugInfoLocs(DebugInfo& debug, const DebugInfo& source) {
+    addDebugLocs(debug, source.source_locs);
+}
+
+void addOperandDebugLocs(DebugInfo& debug, const Program& program, const Operand& operand) {
+    if (operand.kind != OperandKind::Symbol || operand.node == kInvalidNodeId) return;
+    const Signal* signal = program.findSignal(operand.node);
+    if (!signal) return;
+    addDebugInfoLocs(debug, signal->debug);
+    if (signal->driver) {
+        addDebugInfoLocs(debug, signal->driver->debug);
+        addDebugLocs(debug, signal->driver->source_locs);
+    }
+    std::string base_name;
+    if (splitVersionedName(signal->name, base_name)) {
+        for (const auto& candidate : program.signals) {
+            if (candidate.name != base_name) continue;
+            addDebugInfoLocs(debug, candidate.debug);
+            if (candidate.driver) {
+                addDebugInfoLocs(debug, candidate.driver->debug);
+                addDebugLocs(debug, candidate.driver->source_locs);
+            }
+            break;
+        }
+    }
+}
+
+void addOperandDebugLocs(DebugInfo& debug, const Program& program, const std::vector<Operand>& operands) {
+    for (const auto& operand : operands) addOperandDebugLocs(debug, program, operand);
+}
+
 bool Operand::Constant::isZero() const {
     for (std::uint64_t limb : limbs) {
         if (limb != 0) return false;

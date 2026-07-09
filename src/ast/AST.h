@@ -2,6 +2,7 @@
 
 #include "debug/DebugLoc.h"
 
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -274,6 +275,20 @@ struct FunctionAST {
 
 // --- Helpers to construct nodes ---
 
+inline DebugLoc firstDebugLoc(std::initializer_list<ExprPtr> exprs) {
+    for (const auto& expr : exprs) {
+        if (expr && expr->debug_loc.valid()) return expr->debug_loc;
+    }
+    return {};
+}
+
+inline DebugLoc firstDebugLoc(const std::vector<ExprPtr>& exprs) {
+    for (const auto& expr : exprs) {
+        if (expr && expr->debug_loc.valid()) return expr->debug_loc;
+    }
+    return {};
+}
+
 inline ExprPtr make_literal(const std::string& val, TypeInfo type = {}) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::Literal;
@@ -296,6 +311,7 @@ inline ExprPtr make_binary(const std::string& op, ExprPtr lhs, ExprPtr rhs, Type
     e->op = op;
     e->left = std::move(lhs);
     e->right = std::move(rhs);
+    e->debug_loc = firstDebugLoc({e->left, e->right});
     e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
@@ -305,6 +321,7 @@ inline ExprPtr make_unary(const std::string& op, ExprPtr operand, TypeInfo type 
     e->kind = ExprKind::UnaryOp;
     e->op = op;
     e->operand = std::move(operand);
+    e->debug_loc = firstDebugLoc({e->operand});
     e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
@@ -315,6 +332,7 @@ inline ExprPtr make_ternary(ExprPtr cond, ExprPtr t, ExprPtr f, TypeInfo type = 
     e->cond = std::move(cond);
     e->then_expr = std::move(t);
     e->else_expr = std::move(f);
+    e->debug_loc = firstDebugLoc({e->cond, e->then_expr, e->else_expr});
     e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
@@ -324,6 +342,7 @@ inline ExprPtr make_array_access(ExprPtr base, ExprPtr idx, TypeInfo type = {}) 
     e->kind = ExprKind::ArrayAccess;
     e->array_base = std::move(base);
     e->index = std::move(idx);
+    e->debug_loc = firstDebugLoc({e->array_base, e->index});
     e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
@@ -333,6 +352,7 @@ inline ExprPtr make_field_access(ExprPtr base, const std::string& field, TypeInf
     e->kind = ExprKind::FieldAccess;
     e->struct_base = std::move(base);
     e->field_name = field;
+    e->debug_loc = firstDebugLoc({e->struct_base});
     e->type = canonicalize_bool_type(std::move(type));
     return e;
 }
@@ -371,6 +391,7 @@ inline ExprPtr make_zext(ExprPtr expr, int to_width) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::ZExt;
     e->cast_expr = std::move(expr);
+    e->debug_loc = firstDebugLoc({e->cast_expr});
     e->to_width = to_width;
     e->type = make_hw_type("UInt", to_width, false);
     return e;
@@ -380,6 +401,7 @@ inline ExprPtr make_sext(ExprPtr expr, int to_width) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::SExt;
     e->cast_expr = std::move(expr);
+    e->debug_loc = firstDebugLoc({e->cast_expr});
     e->to_width = to_width;
     e->type = make_hw_type("Int", to_width, true);
     return e;
@@ -389,6 +411,7 @@ inline ExprPtr make_trunc(ExprPtr expr, int to_width, bool is_signed = false) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::Trunc;
     e->cast_expr = std::move(expr);
+    e->debug_loc = firstDebugLoc({e->cast_expr});
     e->to_width = to_width;
     e->type = make_hw_type(is_signed ? "Int" : "UInt", to_width, is_signed);
     return e;
@@ -398,6 +421,7 @@ inline ExprPtr make_slice(ExprPtr base, int hi, int lo, TypeInfo type = {}) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::Slice;
     e->base = std::move(base);
+    e->debug_loc = firstDebugLoc({e->base});
     e->hi = hi;
     e->lo = lo;
     if (type.width <= 0) type = make_hw_type("UInt", hi >= lo ? hi - lo + 1 : 0, false);
@@ -411,6 +435,7 @@ inline ExprPtr make_bit_select(ExprPtr base, int bit) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::BitSelect;
     e->base = std::move(base);
+    e->debug_loc = firstDebugLoc({e->base});
     e->bit = bit;
     e->type = make_hw_type("bool", 1, false);
     return e;
@@ -423,6 +448,7 @@ inline ExprPtr make_write_slice(ExprPtr base, int hi, int lo, ExprPtr value, Typ
     e->hi = hi;
     e->lo = lo;
     e->value = std::move(value);
+    e->debug_loc = firstDebugLoc({e->base, e->value});
     TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
     e->type = canonicalize_bool_type(std::move(out_type));
     return e;
@@ -434,6 +460,7 @@ inline ExprPtr make_write_bit(ExprPtr base, int bit, ExprPtr value, TypeInfo typ
     e->base = std::move(base);
     e->bit = bit;
     e->value = std::move(value);
+    e->debug_loc = firstDebugLoc({e->base, e->value});
     TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
     e->type = canonicalize_bool_type(std::move(out_type));
     return e;
@@ -445,6 +472,7 @@ inline ExprPtr make_dynamic_write_slice(ExprPtr base, ExprPtr index, ExprPtr val
     e->base = std::move(base);
     e->index = std::move(index);
     e->value = std::move(value);
+    e->debug_loc = firstDebugLoc({e->base, e->index, e->value});
     TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
     e->type = canonicalize_bool_type(std::move(out_type));
     return e;
@@ -456,6 +484,7 @@ inline ExprPtr make_dynamic_write_bit(ExprPtr base, ExprPtr index, ExprPtr value
     e->base = std::move(base);
     e->index = std::move(index);
     e->value = std::move(value);
+    e->debug_loc = firstDebugLoc({e->base, e->index, e->value});
     TypeInfo out_type = type.width > 0 ? type : (e->base ? e->base->type : TypeInfo{});
     e->type = canonicalize_bool_type(std::move(out_type));
     return e;
@@ -465,6 +494,7 @@ inline ExprPtr make_concat(std::vector<ExprPtr> parts) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::Concat;
     e->parts = std::move(parts);
+    e->debug_loc = firstDebugLoc(e->parts);
     int width = 0;
     bool is_signed = false;
     for (auto& p : e->parts) {
@@ -481,6 +511,7 @@ inline ExprPtr make_repeat(ExprPtr expr, int times) {
     auto e = std::make_shared<Expr>();
     e->kind = ExprKind::Repeat;
     e->operand = std::move(expr);
+    e->debug_loc = firstDebugLoc({e->operand});
     e->times = times;
     int width = (e->operand ? e->operand->type.width : 0) * times;
     bool is_signed = e->operand ? e->operand->type.is_signed : false;
@@ -492,6 +523,7 @@ inline ExprPtr make_reduce(ExprKind kind, ExprPtr expr) {
     auto e = std::make_shared<Expr>();
     e->kind = kind;
     e->operand = std::move(expr);
+    e->debug_loc = firstDebugLoc({e->operand});
     e->type = make_hw_type("bool", 1, false);
     return e;
 }

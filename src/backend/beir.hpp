@@ -181,6 +181,12 @@ struct Program {
     const Signal& signal(NodeId id) const;
 };
 
+void addDebugLoc(DebugInfo& debug, const DebugLoc& loc);
+void addDebugLocs(DebugInfo& debug, const std::vector<DebugLoc>& locs);
+void addDebugInfoLocs(DebugInfo& debug, const DebugInfo& source);
+void addOperandDebugLocs(DebugInfo& debug, const Program& program, const Operand& operand);
+void addOperandDebugLocs(DebugInfo& debug, const Program& program, const std::vector<Operand>& operands);
+
 bool sameType(const ValueType& lhs, const ValueType& rhs);
 bool isCommutativeOp(OperationKind kind, OpCode op);
 void hashCombine(std::uint64_t& seed, std::uint64_t value);

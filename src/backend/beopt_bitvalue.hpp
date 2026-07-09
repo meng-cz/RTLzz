@@ -79,7 +79,13 @@ inline Operand makeLiteralFromFacts(const Facts& facts, const ValueType& type) {
     return operand;
 }
 
-inline void setAssign(Operation& op, Operand operand, const ValueType& type, const std::string& reason) {
+inline void setAssign(Operation& op,
+                      Operand operand,
+                      const ValueType& type,
+                      const std::string& reason,
+                      const Program& program) {
+    std::vector<DebugLoc> source_locs = op.source_locs;
+    source_locs.insert(source_locs.end(), op.debug.source_locs.begin(), op.debug.source_locs.end());
     op.kind = OperationKind::Assign;
     op.op = OpCode::None;
     op.operands.clear();
@@ -92,6 +98,18 @@ inline void setAssign(Operation& op, Operand operand, const ValueType& type, con
     op.times = 0;
     op.debug.origin = DebugOrigin::Generated;
     op.debug.reason = reason;
+    op.debug.source_locs = std::move(source_locs);
+    op.debug.derived_nodes.clear();
+    op.debug.derived_names.clear();
+    for (const auto& operand_ref : op.operands) {
+        if (operand_ref.kind == OperandKind::Symbol && operand_ref.node != kInvalidNodeId) {
+            op.debug.derived_nodes.push_back(operand_ref.node);
+        } else if (!operand_ref.text.empty()) {
+            op.debug.derived_names.push_back(operand_ref.text);
+        }
+    }
+    addOperandDebugLocs(op.debug, program, op.operands);
+    op.source_locs = op.debug.source_locs;
 }
 
 inline bool sameLowBits(const Facts& facts, int width) {
@@ -109,7 +127,8 @@ inline bool rewriteOperation(Operation& op, const Program& program, const Facts&
             vectorsEqual(op.operands[0].constant.limbs, result.value.limbs, widthOf(op.type))) {
             return false;
         }
-        setAssign(op, makeLiteralFromFacts(result, op.type), op.type, "constant folded by BEIR bit-value optimization");
+        setAssign(op, makeLiteralFromFacts(result, op.type), op.type,
+                  "constant folded by BEIR bit-value optimization", program);
         return true;
     }
 
@@ -119,7 +138,7 @@ inline bool rewriteOperation(Operation& op, const Program& program, const Facts&
         int out_width = widthOf(op.type);
         int src_width = widthOf(src.type);
         if (out_width == src_width) {
-            setAssign(op, src, op.type, "removed identity width conversion");
+            setAssign(op, src, op.type, "removed identity width conversion", program);
             return true;
         }
         if (op.kind == OperationKind::Trunc && src.kind == OperandKind::Symbol) {
@@ -133,10 +152,10 @@ inline bool rewriteOperation(Operation& op, const Program& program, const Facts&
                         src_signal->driver->operands.size() == 1 &&
                         widthOf(src_signal->driver->operands[0].type) == out_width) {
                         setAssign(op, src_signal->driver->operands[0], op.type,
-                                  "removed redundant widen-then-truncate conversion chain");
+                                  "removed redundant widen-then-truncate conversion chain", program);
                         return true;
                     }
-                    setAssign(op, src, op.type, "removed truncation of known-zero high bits");
+                    setAssign(op, src, op.type, "removed truncation of known-zero high bits", program);
                     return true;
                 }
             }
@@ -150,7 +169,8 @@ inline bool rewriteOperation(Operation& op, const Program& program, const Facts&
         }
         if (src->valid && (bitKnownZero(*src, op.bit) || bitKnownOne(*src, op.bit))) {
             Operand::Constant constant = makeConstant({bitKnownOne(*src, op.bit) ? 1ULL : 0ULL}, 1);
-            setAssign(op, literalOperand(constant, op.type), op.type, "folded bit select from known bit");
+            setAssign(op, literalOperand(constant, op.type), op.type,
+                      "folded bit select from known bit", program);
             return true;
         }
     }

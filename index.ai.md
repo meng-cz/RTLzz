@@ -61,6 +61,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
 ### `src/ast/AST.h`
 - 主要功能：定义前端 AST 的类型、表达式、语句、函数和便捷构造函数。
 - 主要函数：
+  - `firstDebugLoc`：从子表达式选择第一个有效源码位置，让 lowering/展开生成的复合表达式继承源位置。
   - `is_bool_type_info`：判断 `TypeInfo` 是否表示布尔类型。
   - `canonical_bool_type`：构造规范布尔类型。
   - `canonicalize_bool_type`：将布尔等价类型规整为规范布尔类型。
@@ -570,6 +571,8 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
 - 主要功能：定义单驱动信号列表后端 IR、节点 ID、操作、类型、调试信息、facts 和可变优化图。
 - 主要函数：
   - `DebugInfo::hasSourceLoc`：判断调试信息是否包含源位置。
+  - `addDebugLoc`/`addDebugLocs`：向 `DebugInfo` 追加去重且有上限的源码位置。
+  - `addOperandDebugLocs`：从操作数对应 signal、driver 和版本化基名继承源码位置。
   - `Operand::Constant::isZero`：判断常量是否为 0。
   - `Operand::Constant::isOne`：判断常量是否为 1。
   - `Operand::Constant::isAllOnes`：判断常量是否全 1。
@@ -593,6 +596,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
 ### `src/backend/beir.cpp`
 - 主要功能：实现 BEIR 构建、文本输出、签名哈希、可变图维护和 value facts 分析。
 - 主要函数：
+  - `addDebugLoc`/`addOperandDebugLocs`：集中维护优化流程中的 DebugLoc 继承、去重和版本化信号回溯。
   - `buildProgram`：BEIR 构建入口。
   - `emitText`：BEIR 文本输出入口。
   - `Builder`：内部构建器，负责从 predicate 表达式创建信号和操作。
@@ -683,7 +687,9 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `logicType`：生成 SystemVerilog packed/unpacked 类型文本。
   - `constExpr`：生成 SystemVerilog 常量表达式。
   - `svBinaryOp`：映射 BEIR 二元 opcode 到 SystemVerilog 操作符。
-  - `emitLocList`：输出源位置注释。
+  - `emitLocList`：输出输入 C++ 源位置列表。
+  - `debugComment`：统一生成 RTL 注释，格式为 `loc: <输入 C++ 行位置>; message: <来源或生成说明>`。
+  - `signalDebug`：为无直接 driver 的版本化信号回退到基名信号源码位置。
 
 ## Debug
 

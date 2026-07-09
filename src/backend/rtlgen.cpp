@@ -196,16 +196,15 @@ private:
 
     std::string debugComment(const beir::DebugInfo& debug) const {
         std::ostringstream os;
+        os << " // loc: ";
+        emitLocList(os, debug.source_locs);
+        os << "; message: ";
+
         if (debug.origin == beir::DebugOrigin::Source) {
-            os << " // src: ";
-            emitLocList(os, debug.source_locs);
-            if (!debug.reason.empty() && debug.reason != "direct source construct") {
-                os << "; note: " << debug.reason;
-            }
+            os << (debug.reason.empty() ? "direct source construct" : debug.reason);
             return os.str();
         }
 
-        os << " // gen: ";
         os << (debug.reason.empty() ? "intermediate generated value" : debug.reason);
         if (!debug.derived_nodes.empty()) {
             os << "; from signals ";
@@ -225,16 +224,32 @@ private:
                 os << debug.derived_names[i];
             }
         }
-        if (!debug.source_locs.empty()) {
-            os << "; from src ";
-            emitLocList(os, debug.source_locs);
-        }
         return os.str();
     }
 
     beir::DebugInfo signalDebug(const beir::Signal& signal) const {
-        if (!signal.debug.reason.empty() || signal.debug.hasSourceLoc()) return signal.debug;
+        if (signal.debug.hasSourceLoc() ||
+            (!signal.debug.reason.empty() && signal.debug.reason != "signal allocated by BEIR builder")) {
+            return signal.debug;
+        }
         if (signal.driver) return signal.driver->debug;
+        std::string base;
+        if (endsWithNumber(signal.name, base)) {
+            auto it = name_to_node_.find(base);
+            if (it != name_to_node_.end()) {
+                const auto& base_signal = program_.signal(it->second);
+                beir::DebugInfo debug = signal.debug;
+                debug.source_locs.insert(debug.source_locs.end(),
+                                         base_signal.debug.source_locs.begin(),
+                                         base_signal.debug.source_locs.end());
+                if (base_signal.driver) {
+                    debug.source_locs.insert(debug.source_locs.end(),
+                                             base_signal.driver->debug.source_locs.begin(),
+                                             base_signal.driver->debug.source_locs.end());
+                }
+                if (debug.hasSourceLoc()) return debug;
+            }
+        }
         beir::DebugInfo debug;
         debug.origin = beir::DebugOrigin::Generated;
         debug.reason = "signal allocated without source location";

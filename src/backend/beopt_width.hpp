@@ -36,10 +36,14 @@ inline bool getBit(const std::vector<std::uint64_t>& limbs, int bit) {
     return ((limbs[limb] >> (bit % 64)) & 1ULL) != 0;
 }
 
-inline DebugInfo generatedDebug(std::string reason, const std::vector<Operand>& operands = {}) {
+inline DebugInfo generatedDebug(std::string reason,
+                                const std::vector<Operand>& operands = {},
+                                const Program* program = nullptr,
+                                const std::vector<DebugLoc>& inherited_locs = {}) {
     DebugInfo debug;
     debug.origin = DebugOrigin::Generated;
     debug.reason = std::move(reason);
+    addDebugLocs(debug, inherited_locs);
     for (const auto& operand : operands) {
         if (operand.kind == OperandKind::Symbol && operand.node != kInvalidNodeId) {
             debug.derived_nodes.push_back(operand.node);
@@ -47,6 +51,7 @@ inline DebugInfo generatedDebug(std::string reason, const std::vector<Operand>& 
             debug.derived_names.push_back(operand.text);
         }
     }
+    if (program) addOperandDebugLocs(debug, *program, operands);
     return debug;
 }
 
@@ -102,53 +107,90 @@ inline void clearOperationShape(Operation& op) {
     op.times = 0;
 }
 
-inline void setAssign(Operation& op, Operand operand, const ValueType& type, const std::string& reason) {
+inline std::vector<DebugLoc> inheritedLocs(const Operation& op) {
+    std::vector<DebugLoc> locs = op.source_locs;
+    locs.insert(locs.end(), op.debug.source_locs.begin(), op.debug.source_locs.end());
+    return locs;
+}
+
+inline void finishDebug(Operation& op, const std::string& reason, const Program& program, std::vector<DebugLoc> locs) {
+    op.debug = generatedDebug(reason, op.operands, &program, locs);
+    op.source_locs = op.debug.source_locs;
+}
+
+inline void setAssign(Operation& op,
+                      Operand operand,
+                      const ValueType& type,
+                      const std::string& reason,
+                      const Program& program) {
+    std::vector<DebugLoc> locs = inheritedLocs(op);
     clearOperationShape(op);
     op.kind = OperationKind::Assign;
     op.operands.push_back(std::move(operand));
     op.type = type;
-    op.debug = generatedDebug(reason, op.operands);
+    finishDebug(op, reason, program, std::move(locs));
 }
 
 inline void setResize(Operation& op,
                       OperationKind kind,
                       Operand operand,
                       const ValueType& type,
-                      const std::string& reason) {
+                      const std::string& reason,
+                      const Program& program) {
+    std::vector<DebugLoc> locs = inheritedLocs(op);
     clearOperationShape(op);
     op.kind = kind;
     op.operands.push_back(std::move(operand));
     op.type = type;
     op.to_width = widthOf(type);
-    op.debug = generatedDebug(reason, op.operands);
+    finishDebug(op, reason, program, std::move(locs));
 }
 
-inline void setSlice(Operation& op, Operand operand, int lo, int width, const ValueType& type, const std::string& reason) {
+inline void setSlice(Operation& op,
+                     Operand operand,
+                     int lo,
+                     int width,
+                     const ValueType& type,
+                     const std::string& reason,
+                     const Program& program) {
+    std::vector<DebugLoc> locs = inheritedLocs(op);
     clearOperationShape(op);
     op.kind = OperationKind::Slice;
     op.operands.push_back(std::move(operand));
     op.type = type;
     op.lo = lo;
     op.hi = lo + width - 1;
-    op.debug = generatedDebug(reason, op.operands);
+    finishDebug(op, reason, program, std::move(locs));
 }
 
-inline void setBitSelect(Operation& op, Operand operand, int bit, const ValueType& type, const std::string& reason) {
+inline void setBitSelect(Operation& op,
+                         Operand operand,
+                         int bit,
+                         const ValueType& type,
+                         const std::string& reason,
+                         const Program& program) {
+    std::vector<DebugLoc> locs = inheritedLocs(op);
     clearOperationShape(op);
     op.kind = OperationKind::BitSelect;
     op.operands.push_back(std::move(operand));
     op.type = type;
     op.bit = bit;
-    op.debug = generatedDebug(reason, op.operands);
+    finishDebug(op, reason, program, std::move(locs));
 }
 
-inline void setRepeat(Operation& op, Operand operand, int times, const ValueType& type, const std::string& reason) {
+inline void setRepeat(Operation& op,
+                      Operand operand,
+                      int times,
+                      const ValueType& type,
+                      const std::string& reason,
+                      const Program& program) {
+    std::vector<DebugLoc> locs = inheritedLocs(op);
     clearOperationShape(op);
     op.kind = OperationKind::Repeat;
     op.operands.push_back(std::move(operand));
     op.type = type;
     op.times = times;
-    op.debug = generatedDebug(reason, op.operands);
+    finishDebug(op, reason, program, std::move(locs));
 }
 
 inline void setBinary(Operation& op,
@@ -156,24 +198,32 @@ inline void setBinary(Operation& op,
                       Operand lhs,
                       Operand rhs,
                       const ValueType& type,
-                      const std::string& reason) {
+                      const std::string& reason,
+                      const Program& program) {
+    std::vector<DebugLoc> locs = inheritedLocs(op);
     clearOperationShape(op);
     op.kind = OperationKind::Binary;
     op.op = opcode;
     op.operands.push_back(std::move(lhs));
     op.operands.push_back(std::move(rhs));
     op.type = type;
-    op.debug = generatedDebug(reason, op.operands);
+    finishDebug(op, reason, program, std::move(locs));
 }
 
-inline void setSelect(Operation& op, Operand operand, int lo, int width, const ValueType& type, const std::string& reason) {
+inline void setSelect(Operation& op,
+                      Operand operand,
+                      int lo,
+                      int width,
+                      const ValueType& type,
+                      const std::string& reason,
+                      const Program& program) {
     int operand_width = widthOf(operand.type);
     if (lo == 0 && width == operand_width) {
-        setAssign(op, std::move(operand), type, reason);
+        setAssign(op, std::move(operand), type, reason, program);
     } else if (lo == 0) {
-        setResize(op, OperationKind::Trunc, std::move(operand), type, reason);
+        setResize(op, OperationKind::Trunc, std::move(operand), type, reason, program);
     } else {
-        setSlice(op, std::move(operand), lo, width, type, reason);
+        setSlice(op, std::move(operand), lo, width, type, reason, program);
     }
 }
 
@@ -218,7 +268,8 @@ inline Operand appendTemp(Program& program, ValueType type, Operation driver, st
     signal.name = makeTempName(program);
     signal.type = type;
     driver.type = type;
-    if (driver.debug.reason.empty()) driver.debug = generatedDebug(reason, driver.operands);
+    if (driver.debug.reason.empty()) driver.debug = generatedDebug(reason, driver.operands, &program);
+    driver.source_locs = driver.debug.source_locs;
     signal.debug = driver.debug;
     signal.driver = std::move(driver);
     program.signals.push_back(std::move(signal));
@@ -238,7 +289,7 @@ inline Operand appendBinaryTemp(Program& program,
                                 ValueType type,
                                 std::string reason) {
     Operation op;
-    setBinary(op, opcode, std::move(lhs), std::move(rhs), type, reason);
+    setBinary(op, opcode, std::move(lhs), std::move(rhs), type, reason, program);
     return appendTemp(program, type, std::move(op), reason);
 }
 
@@ -248,13 +299,13 @@ inline Operand appendResizeTemp(Program& program,
                                 OperationKind kind,
                                 std::string reason) {
     Operation op;
-    setResize(op, kind, std::move(operand), type, reason);
+    setResize(op, kind, std::move(operand), type, reason, program);
     return appendTemp(program, type, std::move(op), reason);
 }
 
 inline Operand appendBitSelectTemp(Program& program, Operand operand, int bit, ValueType type, std::string reason) {
     Operation op;
-    setBitSelect(op, std::move(operand), bit, type, reason);
+    setBitSelect(op, std::move(operand), bit, type, reason, program);
     return appendTemp(program, type, std::move(op), reason);
 }
 
@@ -272,7 +323,7 @@ inline Operand appendTruncTemp(Program& program, Operand operand, int width) {
     type.width = width;
     Operation op;
     setResize(op, OperationKind::Trunc, std::move(operand), type,
-              "inserted truncation for comprehensive width optimization");
+              "inserted truncation for comprehensive width optimization", program);
     Operand out = appendTemp(program, type, std::move(op), "inserted truncation for comprehensive width optimization");
     out.signed_view = signed_view;
     return out;
@@ -284,13 +335,13 @@ inline Operand appendZExtTemp(Program& program, Operand operand, int width) {
     type.width = width;
     Operation op;
     setResize(op, OperationKind::ZExt, std::move(operand), type,
-              "inserted zero extension for comprehensive width optimization");
+              "inserted zero extension for comprehensive width optimization", program);
     Operand out = appendTemp(program, type, std::move(op), "inserted zero extension for comprehensive width optimization");
     out.signed_view = signed_view;
     return out;
 }
 
-inline bool rewriteIdentity(Operation& op) {
+inline bool rewriteIdentity(Operation& op, Program& program) {
     if (op.operands.size() != 1) return false;
     const int out_width = widthOf(op.type);
     const int in_width = widthOf(op.operands[0].type);
@@ -299,11 +350,11 @@ inline bool rewriteIdentity(Operation& op) {
          op.kind == OperationKind::SExt ||
          op.kind == OperationKind::Trunc) &&
         out_width == in_width) {
-        setAssign(op, op.operands[0], op.type, "removed identity width operation");
+        setAssign(op, op.operands[0], op.type, "removed identity width operation", program);
         return true;
     }
     if (op.kind == OperationKind::Slice && op.lo == 0 && out_width == in_width) {
-        setAssign(op, op.operands[0], op.type, "removed full-width slice");
+        setAssign(op, op.operands[0], op.type, "removed full-width slice", program);
         return true;
     }
     return false;
@@ -326,20 +377,21 @@ inline bool rewriteSelectAfterWiden(Operation& op, Program& program) {
 
     if (hi < inner_width) {
         setSelect(op, std::move(inner), lo, out_width, op.type,
-                  "folded select of widened value into original operand select");
+                  "folded select of widened value into original operand select", program);
         return true;
     }
 
     if (lo == 0) {
         OperationKind replacement = widen_op.kind == OperationKind::SExt ? OperationKind::SExt : OperationKind::ZExt;
         setResize(op, replacement, std::move(inner), op.type,
-                  "folded truncate of widened value into narrower extension");
+                  "folded truncate of widened value into narrower extension", program);
         return true;
     }
 
     if (lo >= inner_width) {
         if (isZeroExtLike(widen_op.kind)) {
-            setAssign(op, zeroLiteral(op.type), op.type, "folded high zero slice of zero-extended value");
+            setAssign(op, zeroLiteral(op.type), op.type,
+                      "folded high zero slice of zero-extended value", program);
             return true;
         }
         if (widen_op.kind == OperationKind::SExt) {
@@ -348,10 +400,10 @@ inline bool rewriteSelectAfterWiden(Operation& op, Program& program) {
                                                    "extracted sign bit for high slice of sign-extended value");
             if (out_width == 1) {
                 setAssign(op, std::move(sign_bit), op.type,
-                          "folded one-bit high slice of sign-extended value");
+                          "folded one-bit high slice of sign-extended value", program);
             } else {
                 setRepeat(op, std::move(sign_bit), out_width, op.type,
-                          "folded high slice of sign-extended value into sign-bit repeat");
+                          "folded high slice of sign-extended value into sign-bit repeat", program);
             }
             return true;
         }
@@ -360,7 +412,7 @@ inline bool rewriteSelectAfterWiden(Operation& op, Program& program) {
     if (lo > 0) {
         if (widen_op.kind == OperationKind::SExt) inner.signed_view = true;
         setBinary(op, OpCode::Shr, std::move(inner), literal(static_cast<std::uint64_t>(lo), 32), op.type,
-                  "folded slice of widened value into shift");
+                  "folded slice of widened value into shift", program);
         return true;
     }
 
@@ -397,11 +449,11 @@ inline bool rewriteWidenAfterSelect(Operation& op, Program& program) {
         }
         if (selected_width >= out_width) {
             setAssign(op, std::move(shifted), op.type,
-                      "folded zero extension after full-width select into assignment");
+                      "folded zero extension after full-width select into assignment", program);
             return true;
         }
         setBinary(op, OpCode::BitAnd, std::move(shifted), maskLiteral(selected_width, out_width), op.type,
-                  "folded zero extension after select into mask");
+                  "folded zero extension after select into mask", program);
         return true;
     }
 
@@ -424,7 +476,7 @@ inline bool rewriteWidenAfterSelect(Operation& op, Program& program) {
                                         "aligned selected sign bit before sign extension");
         left.signed_view = true;
         setBinary(op, OpCode::Shr, std::move(left), literal(static_cast<std::uint64_t>(shift), 32), op.type,
-                  "folded sign extension after select into shifts");
+                  "folded sign extension after select into shifts", program);
         return true;
     }
 
@@ -432,7 +484,7 @@ inline bool rewriteWidenAfterSelect(Operation& op, Program& program) {
 }
 
 inline bool simplifyWidthOperation(Operation& op, Program& program) {
-    return rewriteIdentity(op) ||
+    return rewriteIdentity(op, program) ||
            rewriteSelectAfterWiden(op, program) ||
            rewriteWidenAfterSelect(op, program);
 }
@@ -842,7 +894,10 @@ inline bool applyComprehensiveWidths(MutableProgram& graph,
         narrowOperationResult(*signal.driver, target);
         signal.debug = signal.driver->debug = generatedDebug(
             "narrowed signal by comprehensive BEIR width optimization",
-            signal.driver->operands);
+            signal.driver->operands,
+            &program,
+            inheritedLocs(*signal.driver));
+        signal.driver->source_locs = signal.driver->debug.source_locs;
         changed = true;
     }
 

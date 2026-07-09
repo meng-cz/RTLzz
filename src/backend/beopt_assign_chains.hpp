@@ -11,10 +11,15 @@ namespace pred::beir::opt {
 
 namespace assign_chain_detail {
 
-inline DebugInfo generatedDebug(std::string reason, const std::vector<Operand>& operands) {
+inline DebugInfo generatedDebug(std::string reason,
+                                const std::vector<Operand>& operands,
+                                const Program& program,
+                                const Operation& previous) {
     DebugInfo debug;
     debug.origin = DebugOrigin::Generated;
     debug.reason = std::move(reason);
+    addDebugLocs(debug, previous.source_locs);
+    addDebugInfoLocs(debug, previous.debug);
     for (const auto& operand : operands) {
         if (operand.kind == OperandKind::Symbol && operand.node != kInvalidNodeId) {
             debug.derived_nodes.push_back(operand.node);
@@ -22,6 +27,7 @@ inline DebugInfo generatedDebug(std::string reason, const std::vector<Operand>& 
             debug.derived_names.push_back(operand.text);
         }
     }
+    addOperandDebugLocs(debug, program, operands);
     return debug;
 }
 
@@ -64,7 +70,8 @@ inline bool foldSameGuardMux(Operation& op, MutableProgram& graph) {
         sameOperand(op.operands[0], then_driver->operands[0])) {
         if (sameOperand(op.operands[1], then_driver->operands[1])) return false;
         op.operands[1] = then_driver->operands[1];
-        op.debug = generatedDebug("folded same-guard mux chain through true branch", op.operands);
+        op.debug = generatedDebug("folded same-guard mux chain through true branch", op.operands, program, op);
+        op.source_locs = op.debug.source_locs;
         return true;
     }
 
@@ -74,7 +81,8 @@ inline bool foldSameGuardMux(Operation& op, MutableProgram& graph) {
         sameOperand(op.operands[0], else_driver->operands[0])) {
         if (sameOperand(op.operands[2], else_driver->operands[2])) return false;
         op.operands[2] = else_driver->operands[2];
-        op.debug = generatedDebug("folded same-guard mux chain through false branch", op.operands);
+        op.debug = generatedDebug("folded same-guard mux chain through false branch", op.operands, program, op);
+        op.source_locs = op.debug.source_locs;
         return true;
     }
 
