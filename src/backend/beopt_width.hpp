@@ -309,6 +309,17 @@ inline Operand appendBitSelectTemp(Program& program, Operand operand, int bit, V
     return appendTemp(program, type, std::move(op), reason);
 }
 
+inline Operand appendSliceTemp(Program& program,
+                               Operand operand,
+                               int lo,
+                               int width,
+                               ValueType type,
+                               std::string reason) {
+    Operation op;
+    setSlice(op, std::move(operand), lo, width, type, reason, program);
+    return appendTemp(program, type, std::move(op), reason);
+}
+
 inline Operand appendWidthNormalizedTemp(Program& program, Operand operand, ValueType type, std::string reason) {
     int operand_width = widthOf(operand.type);
     int target_width = widthOf(type);
@@ -439,10 +450,27 @@ inline bool rewriteWidenAfterSelect(Operation& op, Program& program) {
     if (isZeroExtLike(op.kind)) {
         Operand shifted = inner;
         if (lo > 0) {
-            shifted = appendBinaryTemp(program, OpCode::Shr, std::move(inner),
-                                       literal(static_cast<std::uint64_t>(lo), 32),
-                                       op.type,
-                                       "shifted source before zero-ext select simplification");
+            int inner_width = widthOf(inner.type);
+            if (!inner.signed_view && !inner.constant.signed_view &&
+                out_width > 0 && inner_width > 0) {
+                if (lo >= inner_width) {
+                    shifted = zeroLiteral(op.type);
+                } else {
+                    int slice_width = std::min(out_width, inner_width - lo);
+                    ValueType slice_type = op.type;
+                    slice_type.width = slice_width;
+                    shifted = appendSliceTemp(program, std::move(inner), lo, slice_width, slice_type,
+                                              "sliced source before zero-ext select simplification");
+                    if (slice_width < out_width) {
+                        shifted = appendZExtTemp(program, std::move(shifted), out_width);
+                    }
+                }
+            } else {
+                shifted = appendBinaryTemp(program, OpCode::Shr, std::move(inner),
+                                           literal(static_cast<std::uint64_t>(lo), 32),
+                                           op.type,
+                                           "shifted source before zero-ext select simplification");
+            }
         } else {
             shifted = appendWidthNormalizedTemp(program, std::move(shifted), op.type,
                                                 "normalized source width before zero-ext select simplification");
