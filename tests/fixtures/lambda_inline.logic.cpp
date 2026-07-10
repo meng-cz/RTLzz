@@ -11,6 +11,9 @@ void hls_main(bool sel, Int<8> a, std::array<Int<8>, 2>& out) {
         if (sel) return;
         out[1] = x + Int<8>(3);
     };
+    auto choose = [&](bool s, const Int<8>& x) -> Int<8> {
+        return s ? (Int<8>(x.at<7,4>())) : (Int<8>(x.at<3,0>()));
+    };
     write(value(base));
-    if (sel) out[1] = base;
+    out[1] = choose(sel, base);
 }

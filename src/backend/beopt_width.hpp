@@ -827,6 +827,30 @@ inline void narrowOperationResult(Operation& op, int width) {
     }
 }
 
+inline bool rewriteNarrowedLogicalShrToSlice(Operation& op,
+                                             int width,
+                                             const Program& program) {
+    if (op.kind != OperationKind::Binary || op.op != OpCode::Shr ||
+        op.operands.size() < 2) {
+        return false;
+    }
+    const Operand lhs = op.operands[0];
+    if (lhs.signed_view || lhs.constant.signed_view) return false;
+    std::uint64_t amount = 0;
+    if (!literalU64(op.operands[1], amount) ||
+        amount > static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    int lo = static_cast<int>(amount);
+    int lhs_width = widthOf(lhs.type);
+    if (width <= 0 || lhs_width <= 0 || lo < 0 || lo + width > lhs_width) {
+        return false;
+    }
+    setSlice(op, lhs, lo, width, op.type,
+             "narrowed logical right shift into slice", program);
+    return true;
+}
+
 inline void normalizeOperationOperands(Operation& op, Program& program, const std::vector<int>& assigned) {
     int out_width = widthOf(op.type);
     auto assigned_operand = [&](std::size_t index) {
@@ -891,7 +915,9 @@ inline bool applyComprehensiveWidths(MutableProgram& graph,
         int target = std::max(1, std::min(old_width, std::min(assigned_width, demand_width)));
         if (target >= old_width || !narrowableOperation(*signal.driver)) continue;
         signal.type.width = target;
-        narrowOperationResult(*signal.driver, target);
+        if (!rewriteNarrowedLogicalShrToSlice(*signal.driver, target, program)) {
+            narrowOperationResult(*signal.driver, target);
+        }
         signal.debug = signal.driver->debug = generatedDebug(
             "narrowed signal by comprehensive BEIR width optimization",
             signal.driver->operands,

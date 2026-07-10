@@ -664,6 +664,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `analyzeAssignedWidths`：向前推断节点实际赋值位宽。
   - `analyzeDemandWidths`：反向推断节点实际被使用位宽。
   - `applyComprehensiveWidths`：按赋值宽度和需求宽度改写图。
+  - `rewriteNarrowedLogicalShrToSlice`：将常量逻辑右移后又被收窄的值规范化为静态 slice
   - `normalizeOperationOperands`：为操作插入必要的扩展或截断临时节点。
 
 ### `src/backend/beopt_cse.hpp`
