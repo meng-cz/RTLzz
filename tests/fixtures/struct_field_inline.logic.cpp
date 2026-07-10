@@ -42,11 +42,11 @@ void hls_main(Int<8> input,
               Int<8>& out_y,
               bool& out_flag,
               Int<8>& out_sum) {
-    Packet pkt;
+    Packet pkt = Packet{input, Int<8>(0), false};
 
-    pkt.x = input;
-    pkt.y = Int<8>(0);
-    pkt.flag = false;
+    // pkt.x = input;
+    // pkt.y = Int<8>(0);
+    // pkt.flag = false;
 
     fill_packet(pkt, pkt.x, sel);
 

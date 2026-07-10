@@ -55,6 +55,11 @@ static std::string includePathForSource(const std::string& source_file) {
     return escapeForQuotedPath(path);
 }
 
+static const std::unordered_map<std::string, std::vector<StructFieldInfo>>*
+    active_struct_fields = nullptr;
+static const std::unordered_map<std::string, std::vector<StructConstructorInfo>>*
+    active_struct_constructors = nullptr;
+
 static std::string normalizedPath(const std::string& path) {
     try {
         return std::filesystem::weakly_canonical(std::filesystem::absolute(path)).string();
@@ -376,6 +381,8 @@ static bool sameLiteralExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
 
 // Forward declarations
 static ExprPtr convertExpr(CXCursor cursor);
+static ExprPtr convertInitArgExpr(CXCursor cursor, const TypeInfo& fallback_type = {});
+static bool isDesignatedInitFieldCursor(CXCursor cursor, int depth = 0);
 static ExprPtr convertExprImpl(CXCursor cursor);
 static StmtPtr convertStmt(CXCursor cursor);
 static StmtPtr convertStmtImpl(CXCursor cursor);
@@ -2026,7 +2033,10 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
         call->kind = ExprKind::Call;
         call->callee = init_type.struct_name.empty() ? init_type.name : init_type.struct_name;
         call->type = init_type;
-        for (const auto& child : children) call->args.push_back(convertExpr(child));
+        for (const auto& child : children) {
+            if (isDesignatedInitFieldCursor(child)) continue;
+            call->args.push_back(convertInitArgExpr(child));
+        }
         return call;
     }
 
@@ -3164,27 +3174,125 @@ static bool isVulFixedIntType(const TypeInfo& type) {
             type.name.rfind("UInt<", 0) == 0);
 }
 
+static std::string canonicalStructLookupName(const TypeInfo& type) {
+    std::string name = type.struct_name.empty() ? type.name : type.struct_name;
+    if (name.rfind("struct ", 0) == 0) name = name.substr(7);
+    if (name.rfind("class ", 0) == 0) name = name.substr(6);
+    return name;
+}
+
+static const std::vector<StructFieldInfo>* activeStructFieldsFor(const TypeInfo& type) {
+    if (!active_struct_fields) return nullptr;
+    std::string canonical = canonicalStructLookupName(type);
+    for (const auto& key : {type.struct_name, type.name, canonical,
+                            std::string("struct ") + canonical}) {
+        if (key.empty()) continue;
+        auto it = active_struct_fields->find(key);
+        if (it != active_struct_fields->end()) return &it->second;
+    }
+    return nullptr;
+}
+
+static bool activeStructHasUserConstructor(const TypeInfo& type) {
+    if (!active_struct_constructors) return false;
+    std::string canonical = canonicalStructLookupName(type);
+    for (const auto& key : {type.struct_name, type.name, canonical,
+                            std::string("struct ") + canonical}) {
+        if (key.empty()) continue;
+        auto it = active_struct_constructors->find(key);
+        if (it != active_struct_constructors->end() && !it->second.empty()) return true;
+    }
+    return false;
+}
+
+static ExprPtr defaultValueForAggregateField(const TypeInfo& type) {
+    if (type.name == "bool" || type.hw_kind == "bool") {
+        return make_literal("false", TypeInfo{"bool", 1, false});
+    }
+    if (isVulFixedIntType(type) || type.width > 0) {
+        return make_literal("0", type);
+    }
+    if (!type.struct_name.empty() || activeStructFieldsFor(type)) {
+        auto call = std::make_shared<Expr>();
+        call->kind = ExprKind::Call;
+        call->callee = type.struct_name.empty() ? type.name : type.struct_name;
+        call->type = type;
+        return call;
+    }
+    return make_literal("0", type);
+}
+
+static ExprPtr convertInitArgExpr(CXCursor cursor, const TypeInfo& fallback_type) {
+    CXCursor referenced = clang_getCursorReferenced(cursor);
+    if (!clang_Cursor_isNull(referenced) &&
+        clang_getCursorKind(referenced) == CXCursor_Constructor) {
+        TypeInfo target_type = convertType(clang_getCursorType(cursor));
+        auto children = getChildren(cursor);
+        for (const auto& child : children) {
+            CXCursorKind kind = clang_getCursorKind(child);
+            if (kind == CXCursor_TypeRef || kind == CXCursor_TemplateRef ||
+                kind == CXCursor_Constructor || kind == CXCursor_CXXMethod ||
+                kind == CXCursor_FunctionDecl || isDesignatedInitFieldCursor(child)) {
+                continue;
+            }
+            if (!clang_isExpression(kind)) continue;
+            auto candidate = convertExpr(child);
+            if (!candidate || isOperatorOnlyExpr(candidate)) continue;
+            if (target_type.width > 0) {
+                return makeImplicitBuiltinCast(candidate, target_type);
+            }
+            return candidate;
+        }
+        return defaultValueForAggregateField(
+            fallback_type.name.empty() && fallback_type.struct_name.empty()
+                ? target_type
+                : fallback_type);
+    }
+    auto expr = convertExpr(cursor);
+    if (expr) return expr;
+    return defaultValueForAggregateField(
+        fallback_type.name.empty() && fallback_type.struct_name.empty()
+            ? convertType(clang_getCursorType(cursor))
+            : fallback_type);
+}
+
+static bool isDesignatedInitFieldCursor(CXCursor cursor, int depth) {
+    CXCursorKind kind = clang_getCursorKind(cursor);
+    if (kind == CXCursor_MemberRef) return true;
+    if (depth > 2) return false;
+    std::string text = cursorText(cursor, true);
+    auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos || text[first] != '.') return false;
+    auto children = getChildren(cursor);
+    for (const auto& child : children) {
+        if (isDesignatedInitFieldCursor(child, depth + 1)) return true;
+    }
+    return false;
+}
+
 static void collectInitArgExprs(CXCursor cursor, std::vector<ExprPtr>& out, int depth = 0) {
     if (depth > 3) return;
+    auto cursor_kind = clang_getCursorKind(cursor);
+    if (isDesignatedInitFieldCursor(cursor)) return;
     auto children = getChildren(cursor);
     if (children.empty()) {
-        if (clang_isExpression(clang_getCursorKind(cursor))) {
-            out.push_back(convertExpr(cursor));
+        if (clang_isExpression(cursor_kind)) {
+            out.push_back(convertInitArgExpr(cursor));
         }
         return;
     }
 
-    auto cursor_kind = clang_getCursorKind(cursor);
     if (cursor_kind == CXCursor_CallExpr || cursor_kind == CXCursor_InitListExpr) {
         for (auto& child : children) {
             auto kind = clang_getCursorKind(child);
             if (kind == CXCursor_TypeRef || kind == CXCursor_TemplateRef ||
                 kind == CXCursor_Constructor || kind == CXCursor_CXXMethod ||
-                kind == CXCursor_FunctionDecl) {
+                kind == CXCursor_FunctionDecl ||
+                isDesignatedInitFieldCursor(child)) {
                 continue;
             }
             if (clang_isExpression(kind)) {
-                out.push_back(convertExpr(child));
+                out.push_back(convertInitArgExpr(child));
             }
         }
         return;
@@ -3202,12 +3310,243 @@ static void collectInitArgExprs(CXCursor cursor, std::vector<ExprPtr>& out, int 
             (kind == CXCursor_DeclRefExpr || kind == CXCursor_MemberRefExpr ||
              kind == CXCursor_ArraySubscriptExpr || kind == CXCursor_CallExpr ||
              kind == CXCursor_IntegerLiteral || kind == CXCursor_CXXBoolLiteralExpr)) {
-            out.push_back(convertExpr(child));
+            out.push_back(convertInitArgExpr(child));
             had_direct_expr = true;
         }
     }
     if (had_direct_expr) return;
     for (auto& child : children) collectInitArgExprs(child, out, depth + 1);
+}
+
+static std::string designatedInitFieldName(CXCursor cursor, int depth = 0) {
+    if (depth > 2) return {};
+    CXCursorKind kind = clang_getCursorKind(cursor);
+    if (kind == CXCursor_MemberRef) return cxToStr(clang_getCursorSpelling(cursor));
+    auto children = getChildren(cursor);
+    for (const auto& child : children) {
+        auto name = designatedInitFieldName(child, depth + 1);
+        if (!name.empty()) return name;
+    }
+    return {};
+}
+
+static ExprPtr designatedInitValueExpr(CXCursor cursor, int depth = 0) {
+    if (depth > 4) return nullptr;
+    auto children = getChildren(cursor);
+    for (const auto& child : children) {
+        CXCursorKind kind = clang_getCursorKind(child);
+        if (kind == CXCursor_MemberRef) continue;
+        if (isDesignatedInitFieldCursor(child)) {
+            if (auto nested = designatedInitValueExpr(child, depth + 1)) return nested;
+            continue;
+        }
+        if (clang_isExpression(kind)) {
+            return convertInitArgExpr(child);
+        }
+        if (auto nested = designatedInitValueExpr(child, depth + 1)) return nested;
+    }
+    return nullptr;
+}
+
+static void collectDesignatedInitArgExprs(
+    CXCursor cursor,
+    std::vector<std::pair<std::string, ExprPtr>>& out,
+    int depth = 0) {
+    if (depth > 4) return;
+    auto children = getChildren(cursor);
+    CXCursorKind cursor_kind = clang_getCursorKind(cursor);
+    if (cursor_kind == CXCursor_InitListExpr) {
+        std::string pending_field;
+        for (const auto& child : children) {
+            if (isDesignatedInitFieldCursor(child)) {
+                pending_field = designatedInitFieldName(child);
+                if (auto value = designatedInitValueExpr(child)) {
+                    out.push_back({pending_field, value});
+                    pending_field.clear();
+                }
+                continue;
+            }
+            if (!pending_field.empty() && clang_isExpression(clang_getCursorKind(child))) {
+                out.push_back({pending_field, convertInitArgExpr(child)});
+                pending_field.clear();
+            }
+        }
+        return;
+    }
+    for (const auto& child : children) {
+        collectDesignatedInitArgExprs(child, out, depth + 1);
+    }
+}
+
+static std::string trimCopy(std::string text) {
+    auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+static std::vector<std::string> splitTopLevelComma(const std::string& text) {
+    std::vector<std::string> out;
+    int paren = 0;
+    int brace = 0;
+    int bracket = 0;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char ch = text[i];
+        if (ch == '(') ++paren;
+        else if (ch == ')' && paren > 0) --paren;
+        else if (ch == '{') ++brace;
+        else if (ch == '}' && brace > 0) --brace;
+        else if (ch == '[') ++bracket;
+        else if (ch == ']' && bracket > 0) --bracket;
+        else if (ch == ',' && paren == 0 && brace == 0 && bracket == 0) {
+            out.push_back(trimCopy(text.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    out.push_back(trimCopy(text.substr(start)));
+    return out;
+}
+
+static std::size_t findTopLevelEquals(const std::string& text) {
+    int paren = 0;
+    int brace = 0;
+    int bracket = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char ch = text[i];
+        if (ch == '(') ++paren;
+        else if (ch == ')' && paren > 0) --paren;
+        else if (ch == '{') ++brace;
+        else if (ch == '}' && brace > 0) --brace;
+        else if (ch == '[') ++bracket;
+        else if (ch == ']' && bracket > 0) --bracket;
+        else if (ch == '=' && paren == 0 && brace == 0 && bracket == 0) return i;
+    }
+    return std::string::npos;
+}
+
+static ExprPtr parseSimpleDesignatedRhs(const std::string& rhs, const TypeInfo& type) {
+    std::string text = trimCopy(rhs);
+    if (text == "true" || text == "false") {
+        return make_literal(text, TypeInfo{"bool", 1, false});
+    }
+    bool all_digits = !text.empty();
+    for (char ch : text) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            all_digits = false;
+            break;
+        }
+    }
+    if (all_digits) return make_literal(text, type);
+
+    auto open = text.find('(');
+    auto close = text.rfind(')');
+    if (open != std::string::npos && close != std::string::npos && close > open) {
+        std::string callee = trimCopy(text.substr(0, open));
+        std::string arg = trimCopy(text.substr(open + 1, close - open - 1));
+        if ((callee.rfind("Int<", 0) == 0 || callee.rfind("UInt<", 0) == 0 ||
+             callee == "Int" || callee == "UInt") && !arg.empty()) {
+            bool literal_arg = true;
+            for (char ch : arg) {
+                if (!std::isdigit(static_cast<unsigned char>(ch))) {
+                    literal_arg = false;
+                    break;
+                }
+            }
+            if (literal_arg) return make_literal(arg, type);
+        }
+    }
+
+    auto dot = text.find('.');
+    if (dot != std::string::npos && text.find('.', dot + 1) == std::string::npos) {
+        std::string base = trimCopy(text.substr(0, dot));
+        std::string field = trimCopy(text.substr(dot + 1));
+        if (isSimpleIdentifierText(base) && isSimpleIdentifierText(field)) {
+            return make_field_access(make_var(base), field, type);
+        }
+    }
+
+    if (isSimpleIdentifierText(text)) return make_var(text, type);
+    return nullptr;
+}
+
+static void collectDesignatedInitArgsFromText(
+    const std::string& decl_text,
+    const std::vector<StructFieldInfo>& fields,
+    std::vector<std::pair<std::string, ExprPtr>>& out) {
+    auto open = decl_text.find('{');
+    auto close = decl_text.rfind('}');
+    if (open == std::string::npos || close == std::string::npos || close <= open) return;
+    std::string body = decl_text.substr(open + 1, close - open - 1);
+    if (body.find('.') == std::string::npos) return;
+    for (const auto& item : splitTopLevelComma(body)) {
+        std::string entry = trimCopy(item);
+        if (entry.empty() || entry.front() != '.') continue;
+        auto eq = findTopLevelEquals(entry);
+        if (eq == std::string::npos) continue;
+        std::string field = trimCopy(entry.substr(1, eq - 1));
+        std::string rhs = trimCopy(entry.substr(eq + 1));
+        auto field_it = std::find_if(fields.begin(), fields.end(),
+                                     [&](const StructFieldInfo& info) {
+                                         return info.name == field;
+                                     });
+        if (field_it == fields.end()) continue;
+        if (auto value = parseSimpleDesignatedRhs(rhs, field_it->type)) {
+            out.push_back({field, value});
+        }
+    }
+}
+
+static StmtPtr expandAggregateInitDecl(
+    const StmtPtr& stmt,
+    const std::string& decl_text,
+    const std::vector<std::pair<std::string, ExprPtr>>& designated_args) {
+    if (!stmt || stmt->kind != StmtKind::Decl) return nullptr;
+    if (decl_text.find('{') == std::string::npos) return nullptr;
+    if (stmt->decl_init_args.empty() && designated_args.empty()) return nullptr;
+    const auto* fields = activeStructFieldsFor(stmt->decl_type);
+    if (!fields || fields->empty()) return nullptr;
+    if (activeStructHasUserConstructor(stmt->decl_type)) return nullptr;
+    if (stmt->decl_init_args.size() > fields->size()) return nullptr;
+    for (const auto& field : *fields) {
+        if (field.type.is_reference || field.type.is_pointer) return nullptr;
+    }
+
+    auto block = std::make_shared<Stmt>();
+    block->kind = StmtKind::Block;
+
+    auto decl = std::make_shared<Stmt>(*stmt);
+    decl->decl_init = std::nullopt;
+    decl->decl_init_args.clear();
+    decl->decl_default_constructed = false;
+    block->block_stmts.push_back(decl);
+
+    std::unordered_map<std::string, ExprPtr> designated_by_field;
+    for (const auto& [field, value] : designated_args) {
+        if (!field.empty() && value) designated_by_field[field] = value;
+    }
+
+    const bool has_designated_args = !designated_by_field.empty();
+    for (std::size_t i = 0; i < fields->size(); ++i) {
+        auto designated = designated_by_field.find((*fields)[i].name);
+        ExprPtr value = designated != designated_by_field.end()
+            ? designated->second
+            : (!has_designated_args && i < stmt->decl_init_args.size()
+                   ? stmt->decl_init_args[i]
+                   : defaultValueForAggregateField((*fields)[i].type));
+        if (!value) return nullptr;
+
+        auto assign = std::make_shared<Stmt>();
+        assign->kind = StmtKind::Assign;
+        assign->debug_loc = stmt->debug_loc;
+        assign->assign_target = make_field_access(
+            make_var(stmt->decl_name, stmt->decl_type),
+            (*fields)[i].name,
+            (*fields)[i].type);
+        assign->assign_value = value;
+        block->block_stmts.push_back(assign);
+    }
+    return block;
 }
 
 static StmtPtr convertStmtImpl(CXCursor cursor) {
@@ -3272,6 +3611,16 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                     for (auto& vc : var_children) {
                         collectInitArgExprs(vc, stmt->decl_init_args);
                     }
+                }
+                std::vector<std::pair<std::string, ExprPtr>> designated_args;
+                if (!clang_Cursor_isNull(init_expr)) {
+                    collectDesignatedInitArgExprs(init_expr, designated_args);
+                }
+                if (const auto* fields = activeStructFieldsFor(stmt->decl_type)) {
+                    collectDesignatedInitArgsFromText(decl_text, *fields, designated_args);
+                }
+                if (auto expanded = expandAggregateInitDecl(stmt, decl_text, designated_args)) {
+                    return expanded;
                 }
                 return stmt;
             }
@@ -4140,17 +4489,25 @@ static BuildResult buildASTFromSourceImpl(const std::string& source_file,
         return result;
     }
 
+    FunctionAST struct_metadata;
+    collectStructFieldLayouts(root, struct_metadata);
+    active_struct_fields = &struct_metadata.struct_fields;
+    active_struct_constructors = &struct_metadata.struct_constructors;
+
     FunctionAST func = convertFunctionDecl(found, resolved_top_function);
+    func.struct_fields = struct_metadata.struct_fields;
+    func.struct_constructors = struct_metadata.struct_constructors;
     for (const auto& param : func.params) {
         std::string invalid = invalidTopParamReason(param);
         if (!invalid.empty()) {
             result.error = invalid;
+            active_struct_fields = nullptr;
+            active_struct_constructors = nullptr;
             clang_disposeTranslationUnit(tu);
             clang_disposeIndex(index);
             return result;
         }
     }
-    collectStructFieldLayouts(root, func);
     collectLocalLambdas(found, func);
 
     std::vector<StmtPtr> global_static_decls;
@@ -4170,10 +4527,14 @@ static BuildResult buildASTFromSourceImpl(const std::string& source_file,
         if (fn.name == func.name && clang_equalCursors(fn.cursor, found)) continue;
         if (fn.name == func.name) continue;
         auto helper = std::make_shared<FunctionAST>(convertFunctionDecl(fn.cursor, fn.name));
+        helper->struct_fields = struct_metadata.struct_fields;
+        helper->struct_constructors = struct_metadata.struct_constructors;
         func.helpers.push_back(helper);
     }
 
     result.function = func;
+    active_struct_fields = nullptr;
+    active_struct_constructors = nullptr;
 
     clang_disposeTranslationUnit(tu);
     clang_disposeIndex(index);

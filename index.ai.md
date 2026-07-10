@@ -118,6 +118,8 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `checkHelperCallGraphRecursion`：检查 helper 调用图递归。
   - `registerStructMetadata`：登记结构体字段和构造函数信息。
   - `collectStructFieldLayouts`：收集结构体字段布局。
+  - `collectInitArgExprs`：收集构造/聚合初始化实参，过滤 designated initializer 的字段 designator，并为默认构造字段提供零值表达式。
+  - `expandAggregateInitDecl`：在解析阶段将无用户构造函数、无引用/指针字段的 struct 聚合初始化展开为局部声明加字段赋值，支持 `Packet{a, b}` 与 `Packet{.x = a}` 风格。
   - `collectGlobalConstInts`：收集全局常量整数。
   - `collectLocalLambdas`：收集目标函数内部 lambda。
 
