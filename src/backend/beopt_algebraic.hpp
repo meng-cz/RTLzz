@@ -30,12 +30,98 @@ inline void trim(std::vector<std::uint64_t>& limbs, int width) {
     if (!limbs.empty()) limbs.back() &= highMask(width);
 }
 
+inline bool getBit(const std::vector<std::uint64_t>& limbs, int bit) {
+    if (bit < 0) return false;
+    std::size_t limb = static_cast<std::size_t>(bit / 64);
+    return limb < limbs.size() && ((limbs[limb] >> (bit % 64)) & 1ULL) != 0;
+}
+
 inline const Operand::Constant* constantOf(const Operand& operand, const Program& program) {
     if (operand.kind == OperandKind::Literal) return &operand.constant;
     if (operand.kind != OperandKind::Symbol) return nullptr;
     const Signal* signal = program.findSignal(operand.node);
     if (!signal || !signal->value.valid || !signal->value.constant) return nullptr;
     return &signal->value.value;
+}
+
+inline ValueFacts factsOf(const Operand& operand, const Program& program) {
+    if (operand.kind == OperandKind::Literal) {
+        ValueFacts facts;
+        facts.valid = true;
+        facts.width = widthOf(operand.type);
+        facts.constant = true;
+        facts.value = operand.constant;
+        facts.value.width = facts.width;
+        trim(facts.value.limbs, facts.width);
+        facts.known_one = facts.value.limbs;
+        facts.known_zero.assign(limbCount(facts.width), std::numeric_limits<std::uint64_t>::max());
+        for (std::size_t i = 0; i < facts.known_zero.size(); ++i) {
+            std::uint64_t ones = i < facts.known_one.size() ? facts.known_one[i] : 0;
+            facts.known_zero[i] = ~ones;
+        }
+        trim(facts.known_zero, facts.width);
+        return facts;
+    }
+    if (operand.kind == OperandKind::Symbol) {
+        if (const Signal* signal = program.findSignal(operand.node)) {
+            return signal->value;
+        }
+    }
+    return {};
+}
+
+inline bool knownZeroBit(const ValueFacts& facts, int bit) {
+    return facts.valid && bit >= 0 && bit < facts.width && getBit(facts.known_zero, bit);
+}
+
+inline bool knownOneBit(const ValueFacts& facts, int bit) {
+    return facts.valid && bit >= 0 && bit < facts.width && getBit(facts.known_one, bit);
+}
+
+template <typename Pred>
+inline bool allBitsSatisfy(int width, Pred pred) {
+    if (width <= 0) return false;
+    for (int bit = 0; bit < width; ++bit) {
+        if (!pred(bit)) return false;
+    }
+    return true;
+}
+
+inline bool allKnownZero(const ValueFacts& facts, int width) {
+    return facts.valid && allBitsSatisfy(width, [&](int bit) {
+        return knownZeroBit(facts, bit);
+    });
+}
+
+inline bool bitAndLeavesLeftUnchanged(const ValueFacts& lhs,
+                                      const ValueFacts& rhs,
+                                      int width) {
+    return lhs.valid && rhs.valid && allBitsSatisfy(width, [&](int bit) {
+        return knownOneBit(rhs, bit) || knownZeroBit(lhs, bit);
+    });
+}
+
+inline bool bitOrLeavesLeftUnchanged(const ValueFacts& lhs,
+                                     const ValueFacts& rhs,
+                                     int width) {
+    return lhs.valid && rhs.valid && allBitsSatisfy(width, [&](int bit) {
+        return knownZeroBit(rhs, bit) || knownOneBit(lhs, bit);
+    });
+}
+
+inline bool sameOperand(const Operand& lhs, const Operand& rhs) {
+    if (lhs.kind != rhs.kind) return false;
+    switch (lhs.kind) {
+    case OperandKind::Symbol:
+        return lhs.node == rhs.node && lhs.signed_view == rhs.signed_view;
+    case OperandKind::Port:
+        return lhs.text == rhs.text && lhs.signed_view == rhs.signed_view;
+    case OperandKind::Literal:
+        return lhs.constant.width == rhs.constant.width &&
+               lhs.constant.signed_view == rhs.constant.signed_view &&
+               lhs.constant.limbs == rhs.constant.limbs;
+    }
+    return false;
 }
 
 inline bool isZero(const Operand& operand, const Program& program) {
@@ -114,6 +200,9 @@ inline bool rewriteBinary(Operation& op, const Program& program) {
     Operand lhs = op.operands[0];
     Operand rhs = op.operands[1];
     const ValueType type = op.type;
+    const int width = widthOf(type);
+    const ValueFacts lhs_facts = factsOf(lhs, program);
+    const ValueFacts rhs_facts = factsOf(rhs, program);
 
     switch (op.op) {
     case OpCode::Add:
@@ -147,6 +236,20 @@ inline bool rewriteBinary(Operation& op, const Program& program) {
         }
         return false;
     case OpCode::BitAnd:
+        if (bitAndLeavesLeftUnchanged(lhs_facts, rhs_facts, width)) {
+            setAssign(op, std::move(lhs), type, "removed redundant bitwise and by value facts", program);
+            return true;
+        }
+        if (bitAndLeavesLeftUnchanged(rhs_facts, lhs_facts, width)) {
+            setAssign(op, std::move(rhs), type, "removed redundant bitwise and by value facts", program);
+            return true;
+        }
+        if (allBitsSatisfy(width, [&](int bit) {
+                return knownZeroBit(lhs_facts, bit) || knownZeroBit(rhs_facts, bit);
+            })) {
+            setAssign(op, zeroOperand(type), type, "folded bitwise and to zero by value facts", program);
+            return true;
+        }
         if (isZero(lhs, program) || isZero(rhs, program)) {
             setAssign(op, zeroOperand(type), type, "folded bitwise and with zero", program);
             return true;
@@ -161,6 +264,20 @@ inline bool rewriteBinary(Operation& op, const Program& program) {
         }
         return false;
     case OpCode::BitOr:
+        if (bitOrLeavesLeftUnchanged(lhs_facts, rhs_facts, width)) {
+            setAssign(op, std::move(lhs), type, "removed redundant bitwise or by value facts", program);
+            return true;
+        }
+        if (bitOrLeavesLeftUnchanged(rhs_facts, lhs_facts, width)) {
+            setAssign(op, std::move(rhs), type, "removed redundant bitwise or by value facts", program);
+            return true;
+        }
+        if (allBitsSatisfy(width, [&](int bit) {
+                return knownOneBit(lhs_facts, bit) || knownOneBit(rhs_facts, bit);
+            })) {
+            setAssign(op, allOnesOperand(type), type, "folded bitwise or to all ones by value facts", program);
+            return true;
+        }
         if (isZero(rhs, program)) {
             setAssign(op, std::move(lhs), type, "removed bitwise or with zero", program);
             return true;
@@ -175,6 +292,32 @@ inline bool rewriteBinary(Operation& op, const Program& program) {
         }
         return false;
     case OpCode::BitXor:
+        if (sameOperand(lhs, rhs)) {
+            setAssign(op, zeroOperand(type), type, "folded bitwise xor of identical operands", program);
+            return true;
+        }
+        if (allKnownZero(rhs_facts, width)) {
+            setAssign(op, std::move(lhs), type, "removed redundant bitwise xor by value facts", program);
+            return true;
+        }
+        if (allKnownZero(lhs_facts, width)) {
+            setAssign(op, std::move(rhs), type, "removed redundant bitwise xor by value facts", program);
+            return true;
+        }
+        if (allBitsSatisfy(width, [&](int bit) {
+                return (knownZeroBit(lhs_facts, bit) && knownZeroBit(rhs_facts, bit)) ||
+                       (knownOneBit(lhs_facts, bit) && knownOneBit(rhs_facts, bit));
+            })) {
+            setAssign(op, zeroOperand(type), type, "folded bitwise xor to zero by value facts", program);
+            return true;
+        }
+        if (allBitsSatisfy(width, [&](int bit) {
+                return (knownZeroBit(lhs_facts, bit) && knownOneBit(rhs_facts, bit)) ||
+                       (knownOneBit(lhs_facts, bit) && knownZeroBit(rhs_facts, bit));
+            })) {
+            setAssign(op, allOnesOperand(type), type, "folded bitwise xor to all ones by value facts", program);
+            return true;
+        }
         if (isZero(rhs, program)) {
             setAssign(op, std::move(lhs), type, "removed bitwise xor with zero", program);
             return true;
@@ -218,6 +361,34 @@ inline bool rewriteBinary(Operation& op, const Program& program) {
     }
 }
 
+inline bool rewriteUnary(Operation& op, const Program& program) {
+    if (op.kind != OperationKind::Unary || op.operands.size() != 1) return false;
+    if (op.op != OpCode::BitNot) return false;
+
+    Operand operand = op.operands[0];
+    const ValueType type = op.type;
+    if (isZero(operand, program)) {
+        setAssign(op, allOnesOperand(type), type, "folded bitwise not of zero", program);
+        return true;
+    }
+    if (isAllOnes(operand, program)) {
+        setAssign(op, zeroOperand(type), type, "folded bitwise not of all ones", program);
+        return true;
+    }
+    if (operand.kind == OperandKind::Symbol) {
+        const Signal* signal = program.findSignal(operand.node);
+        if (signal && signal->driver &&
+            signal->driver->kind == OperationKind::Unary &&
+            signal->driver->op == OpCode::BitNot &&
+            signal->driver->operands.size() == 1) {
+            setAssign(op, signal->driver->operands[0], type,
+                      "removed double bitwise not", program);
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace algebraic_detail
 
 inline bool simplifyAlgebraicIdentities(MutableProgram& graph) {
@@ -225,7 +396,9 @@ inline bool simplifyAlgebraicIdentities(MutableProgram& graph) {
     bool changed = false;
     for (auto& signal : graph.program().signals) {
         if (!signal.driver) continue;
-        bool signal_changed = algebraic_detail::rewriteBinary(*signal.driver, graph.program());
+        bool signal_changed =
+            algebraic_detail::rewriteBinary(*signal.driver, graph.program()) ||
+            algebraic_detail::rewriteUnary(*signal.driver, graph.program());
         if (signal_changed) signal.debug = signal.driver->debug;
         changed = signal_changed || changed;
     }

@@ -57,14 +57,18 @@ def rtl_cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
     width = lj.type_width(t)
     if width <= 64:
         return f"static_cast<unsigned long long>({expr})"
-    raise RuntimeError(f"RTL harness only supports output widths <= 64, got {width}")
+    return f"hex_from_words({expr}, {width})"
 
 
 def rtl_cpp_assign_from_argv(expr: str, t: dict[str, Any], argv_index: int) -> str:
     width = lj.type_width(t)
     if width <= 64:
         return f"{expr} = std::strtoull(argv[{argv_index}], nullptr, 0);"
-    raise RuntimeError(f"RTL harness only supports input widths <= 64, got {width}")
+    words = (width + 31) // 32
+    return (
+        f"auto words_{argv_index} = parse_words(argv[{argv_index}], {width}); "
+        f"for (int i = 0; i < {words}; ++i) {expr}[i] = words_{argv_index}[i];"
+    )
 
 
 def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) -> list[str]:
@@ -72,16 +76,54 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
     input_order: list[str] = []
     lines = [
         "#include <cstdlib>",
+        "#include <cstdint>",
+        "#include <iomanip>",
         "#include <iostream>",
         "#include <memory>",
+        "#include <sstream>",
+        "#include <string>",
+        "#include <vector>",
         "#include <verilated.h>",
         f'#include "{class_name}.h"',
+        "",
+        "static std::vector<uint32_t> parse_words(const char* text, int width) {",
+        "  int nwords = (width + 31) / 32;",
+        "  std::vector<uint32_t> words(nwords, 0);",
+        "  for (const char* p = text; *p; ++p) {",
+        "    if (*p < '0' || *p > '9') continue;",
+        "    uint64_t carry = static_cast<uint64_t>(*p - '0');",
+        "    for (int i = 0; i < nwords; ++i) {",
+        "      uint64_t next = static_cast<uint64_t>(words[i]) * 10ULL + carry;",
+        "      words[i] = static_cast<uint32_t>(next & 0xffffffffULL);",
+        "      carry = next >> 32;",
+        "    }",
+        "  }",
+        "  int top_bits = width % 32;",
+        "  if (top_bits != 0 && nwords > 0) words[nwords - 1] &= ((uint32_t{1} << top_bits) - 1U);",
+        "  return words;",
+        "}",
+        "",
+        "static std::string hex_from_words(const uint32_t* words, int width) {",
+        "  int nwords = (width + 31) / 32;",
+        "  std::vector<uint32_t> copy(words, words + nwords);",
+        "  int top_bits = width % 32;",
+        "  if (top_bits != 0 && nwords > 0) copy[nwords - 1] &= ((uint32_t{1} << top_bits) - 1U);",
+        "  int top = nwords - 1;",
+        "  while (top > 0 && copy[top] == 0) --top;",
+        "  std::ostringstream os;",
+        "  os << \"0x\" << std::hex << copy[top];",
+        "  for (int i = top - 1; i >= 0; --i) {",
+        "    os << std::setw(8) << std::setfill('0') << copy[i];",
+        "  }",
+        "  return os.str();",
+        "}",
         "",
         "int main(int argc, char** argv) {",
         f"  auto top = std::make_unique<{class_name}>();",
     ]
 
     arg_index = 1
+    argc_check_index = len(lines)
     for port in program["ports"]:
         if port["direction"] != "Input":
             continue
@@ -95,7 +137,7 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
             lines.append("  " + rtl_cpp_assign_from_argv(expr, port["type"], arg_index))
             arg_index += 1
 
-    lines.insert(7, f"  if (argc != {arg_index}) return 97;")
+    lines.insert(argc_check_index, f"  if (argc != {arg_index}) return 97;")
     lines.append("  top->eval();")
 
     for port in program["ports"]:
