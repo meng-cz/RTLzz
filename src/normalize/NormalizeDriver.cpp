@@ -30,6 +30,7 @@ std::vector<StmtPtr> rewriteStmts(const std::vector<StmtPtr>& stmts, Env& env);
 const std::vector<StructFieldInfo>* structFieldsForType(const TypeInfo& type, const Env& env);
 const std::vector<StructFieldInfo>* findStructFields(const TypeInfo& type, Env& env);
 ExprPtr buildPackedStructValue(const ExprPtr& value, TypeInfo target_type, Env& env);
+ExprPtr buildPackedFlattenedPrefix(const std::string& name, Env& env);
 TypeInfo normalizeArrayType(TypeInfo type);
 int flattenedTypeWidth(const TypeInfo& type, Env& env);
 bool appendStructUnpackDecls(const StmtPtr& block,
@@ -2277,24 +2278,33 @@ std::string initializerArgForField(const StmtPtr& decl,
     return {};
 }
 
+ExprPtr arrayElementExpr(const std::string& flat_name, TypeInfo scalar_type, Env& env) {
+    if (auto packed = buildPackedFlattenedPrefix(flat_name, env)) {
+        TypeInfo packed_type = make_hw_type("UInt", packed->type.width, false);
+        return castIfWidthChanges(packed, packed_type);
+    }
+    return make_var(flat_name, scalar_type);
+}
+
 ExprPtr buildArrayMux(const std::string& name,
                       const std::vector<int>& dims,
                       const std::vector<ExprPtr>& indices,
                       size_t depth,
                       std::vector<int>& prefix,
-                      TypeInfo scalar_type) {
+                      TypeInfo scalar_type,
+                      Env& env) {
     if (depth >= indices.size() || depth >= dims.size()) {
-        return make_var(joinIndexName(name, prefix), scalar_type);
+        return arrayElementExpr(joinIndexName(name, prefix), scalar_type, env);
     }
 
     int dim = dims[depth];
     prefix.push_back(dim - 1);
-    ExprPtr result = buildArrayMux(name, dims, indices, depth + 1, prefix, scalar_type);
+    ExprPtr result = buildArrayMux(name, dims, indices, depth + 1, prefix, scalar_type, env);
     prefix.pop_back();
 
     for (int i = dim - 2; i >= 0; --i) {
         prefix.push_back(i);
-        auto value = buildArrayMux(name, dims, indices, depth + 1, prefix, scalar_type);
+        auto value = buildArrayMux(name, dims, indices, depth + 1, prefix, scalar_type, env);
         prefix.pop_back();
         auto cond = make_binary("==",
             cloneExpr(indices[depth]),
@@ -2381,16 +2391,52 @@ ExprPtr parseOpaqueHwMethodVar(const ExprPtr& e, Env& env) { // UNSAFE_TEXT_FALL
 }
 
 ExprPtr buildPackedFlattenedPrefix(const std::string& name, Env& env) {
+    std::function<ExprPtr(const std::string&, TypeInfo)> pack_value =
+        [&](const std::string& flat_name, TypeInfo type) -> ExprPtr {
+            TypeInfo arr_type = normalizeArrayType(type);
+            if (arr_type.is_array && !arr_type.array_dims.empty()) {
+                std::vector<ExprPtr> parts;
+                TypeInfo elem_type = arr_type;
+                elem_type.array_dims.erase(elem_type.array_dims.begin());
+                elem_type.is_array = !elem_type.array_dims.empty();
+                elem_type.array_size = elem_type.is_array ? elem_type.array_dims.front() : 0;
+                if (!elem_type.is_array) elem_type = scalarTypeFromArray(arr_type);
+                for (int i = 0; i < arr_type.array_dims.front(); ++i) {
+                    auto part = pack_value(flat_name + "_" + std::to_string(i), elem_type);
+                    if (!part) return nullptr;
+                    parts.push_back(part);
+                }
+                std::reverse(parts.begin(), parts.end());
+                return make_concat(std::move(parts));
+            }
+            if (const auto* fields = findStructFields(type, env)) {
+                std::vector<ExprPtr> parts;
+                for (const auto& field : *fields) {
+                    auto part = pack_value(flat_name + "_" + field.name, field.type);
+                    if (!part) return nullptr;
+                    parts.push_back(part);
+                }
+                std::reverse(parts.begin(), parts.end());
+                return make_concat(std::move(parts));
+            }
+            auto it = env.symbols.find(flat_name);
+            if (it == env.symbols.end()) return nullptr;
+            return make_var(flat_name, it->second);
+        };
+
+    auto root = env.symbols.find(name);
+    if (root != env.symbols.end()) {
+        if (auto packed = pack_value(name, root->second)) return packed;
+    }
+
     std::vector<ExprPtr> args;
-    int width = 0;
-    bool is_signed = false;
     for (int i = 0;; ++i) {
         std::string flat = name + "_" + std::to_string(i);
         auto it = env.symbols.find(flat);
         if (it == env.symbols.end()) break;
-        args.push_back(make_var(flat, it->second));
-        width += it->second.width;
-        is_signed = is_signed || it->second.is_signed;
+        auto part = pack_value(flat, it->second);
+        if (!part) return nullptr;
+        args.push_back(part);
     }
     if (args.empty()) return nullptr;
     std::reverse(args.begin(), args.end());
@@ -3069,7 +3115,12 @@ ExprPtr rewriteArrayAccess(const ExprPtr& e, Env& env) {
             env.error = "Read of uninitialized array element '" + flat + "'";
             return nullptr;
         }
-        return make_var(flat, scalarTypeFromArray(arr_type));
+        TypeInfo scalar = scalarTypeFromArray(arr_type);
+        int scalar_width = flattenedTypeWidth(scalar, env);
+        if (scalar_width > 0 && findStructFields(scalar, env)) {
+            scalar = make_hw_type("UInt", scalar_width, false);
+        }
+        return arrayElementExpr(flat, scalar, env);
     }
 
     std::vector<int> init_prefix;
@@ -3086,7 +3137,11 @@ ExprPtr rewriteArrayAccess(const ExprPtr& e, Env& env) {
 
     std::vector<int> prefix;
     TypeInfo scalar = scalarTypeFromArray(arr_type);
-    return buildArrayMux(name, arr_type.array_dims, indices, 0, prefix, scalar);
+    int scalar_width = flattenedTypeWidth(scalar, env);
+    if (scalar_width > 0 && findStructFields(scalar, env)) {
+        scalar = make_hw_type("UInt", scalar_width, false);
+    }
+    return buildArrayMux(name, arr_type.array_dims, indices, 0, prefix, scalar, env);
 }
 
 ExprPtr rewriteExpr(const ExprPtr& e, Env& env) {

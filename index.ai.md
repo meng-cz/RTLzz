@@ -213,7 +213,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `rewriteStmt`：递归重写语句并处理声明、赋值、分支、switch、return 等结构。
   - `rewriteStmts`：重写语句序列并维护 normalize 环境。
   - `rewriteTarget`：重写赋值左值。
-  - `rewriteArrayAccess`：降低数组访问为扁平元素、lookup 或 mux。
+  - `rewriteArrayAccess`：降低数组访问为扁平元素、lookup 或 mux，动态读取结构体数组元素时会先按已展开字段重新 pack。
   - `rewriteArrayAssign`：展开数组元素写入。
   - `rewriteWholeArrayAssign`：展开整数组赋值。
   - `rewriteBitSliceAssign`：降低 bit/slice 作为左值的写操作。
@@ -222,6 +222,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `lowerProxyMethodExpr`：降低特殊 proxy 方法表达式。
   - `lowerProxyProcedureCall`：降低特殊 proxy 过程调用。
   - `buildPackedStructValue`：将结构体值打包为扁平位向量。
+  - `buildPackedFlattenedPrefix`：按 struct/array 类型递归收集已展开叶子字段并打包，支持 `a[i].b`、`a.b[i].c` 等复合读取。
   - `buildPackedArrayValue`：将数组值打包为扁平位向量。
   - `flattenedTypeWidth`：计算结构体/数组展平后的总位宽。
   - `appendStructUnpackDecls`：生成结构体字段解包声明。
@@ -399,6 +400,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `buildOutputExpressionMap`：输出表达式合成入口。
   - `simplifyOutputExpr`：递归简化输出表达式。
   - `mergeWithGuard`：按 guard 合并赋值值。
+  - `flattenedSymbols`：按声明类型展开结构体/数组输出，避免标量输出名被同前缀输出误判为展开父级。
   - `controlExprForOutput`：为输出寻找配对控制信号表达式。
   - `coverageForOutput`：计算输出赋值覆盖信息。
   - `defaultValueFor`：为类型生成默认值。

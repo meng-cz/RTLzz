@@ -194,6 +194,7 @@ std::vector<std::string> flattenedSymbols(const std::unordered_map<std::string, 
     auto base_it = symbols.find(name);
     if (base_it != symbols.end()) {
         base_is_array = base_it->second.is_array;
+        if (!base_it->second.is_array && base_it->second.struct_name.empty()) return out;
     }
     for (const auto& item : symbols) {
         if (item.first.rfind(prefix, 0) != 0 || item.second.is_array) continue;
