@@ -626,7 +626,7 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
 - 主要功能：实现 BEIR 优化选项解析和 pass 调度。
 - 主要函数：
   - `parseOptions`：将字符串选项转换为 `Options`，支持 `predicate-sinking`/`no-predicate-sinking` 控制谓词下沉优化。
-  - `optimizeProgram`：依次运行赋值链、常量折叠/传播、代数化简、谓词下沉、位宽化简、CSE 和 DCE；谓词下沉每次 optimize 只执行一次，避免与后续规范化 pass 振荡。
+  - `optimizeProgram`：先运行赋值链、常量折叠/传播、代数化简、位宽化简、CSE 和 DCE 到固定点，再执行一次谓词下沉，并做一次 assign/CSE/DCE 收尾，避免谓词优化参与主固定点振荡。
 
 ### `src/backend/beopt_assign_chains.hpp`
 - 主要功能：优化连续 assign 和同 guard mux 链。

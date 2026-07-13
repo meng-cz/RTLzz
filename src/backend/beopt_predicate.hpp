@@ -2,6 +2,7 @@
 
 #include "backend/beir.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,6 +55,33 @@ inline bool samePredicate(const Predicate& lhs, const Predicate& rhs) {
     return lhs.when_true == rhs.when_true && sameOperand(lhs.guard, rhs.guard);
 }
 
+inline bool operandLess(const Operand& lhs, const Operand& rhs) {
+    if (lhs.kind != rhs.kind) return lhs.kind < rhs.kind;
+    if (lhs.node != rhs.node) return lhs.node < rhs.node;
+    if (lhs.text != rhs.text) return lhs.text < rhs.text;
+    if (lhs.signed_view != rhs.signed_view) return lhs.signed_view < rhs.signed_view;
+    if (lhs.type.width != rhs.type.width) return lhs.type.width < rhs.type.width;
+    if (lhs.type.array_dims != rhs.type.array_dims) return lhs.type.array_dims < rhs.type.array_dims;
+    if (lhs.kind != OperandKind::Literal) return false;
+    if (lhs.constant.width != rhs.constant.width) return lhs.constant.width < rhs.constant.width;
+    if (lhs.constant.signed_view != rhs.constant.signed_view) {
+        return lhs.constant.signed_view < rhs.constant.signed_view;
+    }
+    return lhs.constant.limbs < rhs.constant.limbs;
+}
+
+inline bool predicateLess(const Predicate& lhs, const Predicate& rhs) {
+    if (!sameOperand(lhs.guard, rhs.guard)) return operandLess(lhs.guard, rhs.guard);
+    return lhs.when_true < rhs.when_true;
+}
+
+inline void normalizeContext(Context& context) {
+    std::sort(context.predicates.begin(), context.predicates.end(), predicateLess);
+    context.predicates.erase(
+        std::unique(context.predicates.begin(), context.predicates.end(), samePredicate),
+        context.predicates.end());
+}
+
 inline bool sameContext(const Context& lhs, const Context& rhs) {
     if (lhs.predicates.size() != rhs.predicates.size()) return false;
     for (std::size_t i = 0; i < lhs.predicates.size(); ++i) {
@@ -74,9 +102,7 @@ inline bool hasUnconditional(const std::vector<Context>& contexts) {
 }
 
 inline bool appendContext(std::vector<Context>& contexts, Context context) {
-    constexpr std::size_t kMaxPredicatesPerContext = 4;
-    constexpr std::size_t kMaxContextsPerSignal = 32;
-    if (context.predicates.size() > kMaxPredicatesPerContext) context.predicates.clear();
+    normalizeContext(context);
     if (isUnconditional(context)) {
         if (contexts.size() == 1 && isUnconditional(contexts.front())) return false;
         contexts.clear();
@@ -86,11 +112,6 @@ inline bool appendContext(std::vector<Context>& contexts, Context context) {
     if (hasUnconditional(contexts)) return false;
     for (const auto& existing : contexts) {
         if (sameContext(existing, context)) return false;
-    }
-    if (contexts.size() >= kMaxContextsPerSignal) {
-        contexts.clear();
-        contexts.push_back(unconditionalContext());
-        return true;
     }
     contexts.push_back(std::move(context));
     return true;
@@ -104,9 +125,9 @@ inline bool appendPredicate(std::vector<Predicate>& predicates, Predicate predic
     return true;
 }
 
-inline Context branchContext(Context parent, const Operand& guard, bool when_true) {
-    appendPredicate(parent.predicates, Predicate{guard, when_true});
-    return parent;
+inline Context branchContext(const Context& parent, const Operand& guard, bool when_true) {
+    (void)parent;
+    return guardedContext(guard, when_true);
 }
 
 inline const Operation* symbolDriver(const Operand& operand, const Program& program) {

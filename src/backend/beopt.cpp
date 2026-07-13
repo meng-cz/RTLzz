@@ -74,21 +74,22 @@ Options parseOptions(const std::vector<std::string>& values) {
 Program optimizeProgram(Program program, const Options& options) {
     MutableProgram graph(std::move(program));
     bool changed = true;
-    bool predicate_sinking_done = false;
     int iteration = 0;
     while (changed && iteration++ < options.max_iterations) {
         changed = false;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.constant_folding) changed = foldConstants(graph) || changed;
         if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
-        if (options.predicate_sinking && !predicate_sinking_done) {
-            changed = sinkPredicates(graph) || changed;
-            predicate_sinking_done = true;
-        }
         if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
+    }
+    if (options.predicate_sinking && sinkPredicates(graph)) {
+        if (options.fold_assign_chains) foldAssignChains(graph);
+        if (options.common_subexpressions) mergeCommonExpressions(graph);
+        if (options.fold_assign_chains) foldAssignChains(graph);
+        if (options.dead_node_elimination) eliminateDeadNodes(graph);
     }
     return graph.finish();
 }
