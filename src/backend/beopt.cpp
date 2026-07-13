@@ -5,6 +5,7 @@
 #include "backend/beopt_constant.hpp"
 #include "backend/beopt_cse.hpp"
 #include "backend/beopt_dce.hpp"
+#include "backend/beopt_predicate.hpp"
 #include "backend/beopt_width.hpp"
 
 #include <stdexcept>
@@ -22,6 +23,7 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.algebraic_identities = true;
             options.common_subexpressions = true;
             options.dead_node_elimination = true;
+            options.predicate_sinking = true;
         } else if (value == "none") {
             options.fold_assign_chains = false;
             options.constant_folding = false;
@@ -29,6 +31,7 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.algebraic_identities = false;
             options.common_subexpressions = false;
             options.dead_node_elimination = false;
+            options.predicate_sinking = false;
         } else if (value == "assign" || value == "fold-assign") {
             options.fold_assign_chains = true;
         } else if (value == "no-assign" || value == "no-fold-assign") {
@@ -53,6 +56,10 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.algebraic_identities = true;
         } else if (value == "no-algebraic" || value == "no-arith") {
             options.algebraic_identities = false;
+        } else if (value == "predicate" || value == "predicate-sinking") {
+            options.predicate_sinking = true;
+        } else if (value == "no-predicate" || value == "no-predicate-sinking") {
+            options.predicate_sinking = false;
         } else if (value == "dce") {
             options.dead_node_elimination = true;
         } else if (value == "no-dce") {
@@ -67,12 +74,17 @@ Options parseOptions(const std::vector<std::string>& values) {
 Program optimizeProgram(Program program, const Options& options) {
     MutableProgram graph(std::move(program));
     bool changed = true;
+    bool predicate_sinking_done = false;
     int iteration = 0;
     while (changed && iteration++ < options.max_iterations) {
         changed = false;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.constant_folding) changed = foldConstants(graph) || changed;
         if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
+        if (options.predicate_sinking && !predicate_sinking_done) {
+            changed = sinkPredicates(graph) || changed;
+            predicate_sinking_done = true;
+        }
         if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;

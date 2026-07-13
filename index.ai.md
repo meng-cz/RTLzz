@@ -625,8 +625,8 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
 ### `src/backend/beopt.cpp`
 - 主要功能：实现 BEIR 优化选项解析和 pass 调度。
 - 主要函数：
-  - `parseOptions`：将字符串选项转换为 `Options`。
-  - `optimizeProgram`：依次运行赋值链、常量折叠/传播、代数化简、位宽化简、CSE 和 DCE。
+  - `parseOptions`：将字符串选项转换为 `Options`，支持 `predicate-sinking`/`no-predicate-sinking` 控制谓词下沉优化。
+  - `optimizeProgram`：依次运行赋值链、常量折叠/传播、代数化简、谓词下沉、位宽化简、CSE 和 DCE；谓词下沉每次 optimize 只执行一次，避免与后续规范化 pass 振荡。
 
 ### `src/backend/beopt_assign_chains.hpp`
 - 主要功能：优化连续 assign 和同 guard mux 链。
@@ -653,6 +653,14 @@ python3 scripts/differential_rtl.py tests/fixtures/int_range.logic.cpp --top hls
   - `constantOf`：解析操作数对应的常量。
   - `isZero`/`isOne`/`isAllOnes`：判断常量形态。
   - `setAssign`：将操作改写为 assign。
+
+### `src/backend/beopt_predicate.hpp`
+- 主要功能：执行谓词下沉优化，只在可观察边界保留 guard mux，并在中间信号仅于对应 guard 分支内被使用时省略另一侧不可观察分支。
+- 主要函数：
+  - `sinkPredicates`：基于可观察节点反向分析使用上下文，改写可安全省略默认分支的内部 `Ite`。
+  - `analyzeDemandContexts`：从端口/输出反向传播谓词需求上下文。
+  - `conditionTruthImplies`：判断 `flag && sel`、`!flag` 等谓词上下文是否蕴含目标 guard 分支。
+  - `rewriteGuardedDefault`：将 `guard ? value : default` 或 `guard ? default : value` 在仅对应分支可见时改写为直接 assign。
 
 ### `src/backend/beopt_width.hpp`
 - 主要功能：执行综合位宽优化、无效 cast/ext/trunc/slice 删除和操作数宽度归一。

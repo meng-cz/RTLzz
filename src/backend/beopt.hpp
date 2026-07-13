@@ -14,6 +14,7 @@ struct Options {
     bool constant_folding = true;
     bool width_simplification = true;
     bool algebraic_identities = true;
+    bool predicate_sinking = true;
     int max_iterations = 16;
 };
 
