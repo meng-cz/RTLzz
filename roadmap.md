@@ -6,20 +6,25 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
   2. ASTValidateAndResolve
      校验支持的 C++ 子集，解析名字/作用域/重载结果，确认 helper/lambda/struct 元数据完整且无递归或非法参数形式。
 
-  3. ScopeRename
-     给 top/helper/lambda 的局部变量、临时变量、lambda 捕获和生成变量做全局唯一命名，消除 shadowing 与 block scope 名字冲突。
-
-  4. ExpressionStatementize
+  3. ExpressionStatementize
      将复杂表达式中的 call、带副作用表达式、构造调用和求值顺序敏感表达式提升为显式临时变量和 statement-level 操作。
 
+
+
+
+## 仍需确认的步骤：
+
+  <!-- 3. ScopeRename
+     给 top/helper/lambda 的局部变量、临时变量、lambda 捕获和生成变量做全局唯一命名，消除 shadowing 与 block scope 名字冲突。
+
   5. StructuredControlNormalize
-     将 return、break、continue、switch、短路逻辑等结构化控制语义规整成后续 CFG 能无歧义表达的形式。
+     将 return、break、continue、switch、短路逻辑等结构化控制语义规整成后续 CFG 能无歧义表达的形式。 -->
 
-  6. LoopLowerOrUnroll
-     对静态可展开循环进行展开，或把循环转换为明确 CFG loop 结构；当前硬件子集可先要求所有循环在此阶段完全 unroll。
-
-  7. BuildFunctionCFGs
+  4. BuildFunctionCFGs
      为 top/helper/lambda 分别构建 per-function CFG，基本块中只保留顺序语句和 statement-level call，控制流边显式表达分支/退出。
+
+  4. LoopLowerOrUnroll
+     对静态可展开循环进行展开，当前硬件子集可先要求所有循环在此阶段完全 unroll。
 
   8. LowerFunctionExits
      在 CFG 层把每个函数的多处 return 合并为明确的 function exit blocks，并把 return value 写入显式 return slot。

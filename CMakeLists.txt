@@ -117,6 +117,9 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     add_executable(s2validate-test testv2/s2validate_test.cpp)
     target_link_libraries(s2validate-test PRIVATE predicate-expand-objects)
 
+    add_executable(s3statementize-test testv2/s3statementize_test.cpp)
+    target_link_libraries(s3statementize-test PRIVATE predicate-expand-objects)
+
     if(MSVC)
         set_property(TARGET predicate-expand PROPERTY VS_GLOBAL_TrackFileAccess false)
         set_property(TARGET predicate-expand PROPERTY
@@ -124,6 +127,10 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
         )
         set_property(TARGET s2validate-test PROPERTY VS_GLOBAL_TrackFileAccess false)
         set_property(TARGET s2validate-test PROPERTY
+            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
+        )
+        set_property(TARGET s3statementize-test PROPERTY VS_GLOBAL_TrackFileAccess false)
+        set_property(TARGET s3statementize-test PROPERTY
             MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
         )
     endif()
