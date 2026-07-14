@@ -120,6 +120,12 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     add_executable(s3statementize-test testv2/s3statementize_test.cpp)
     target_link_libraries(s3statementize-test PRIVATE predicate-expand-objects)
 
+    add_executable(s4cfg-test testv2/s4cfg_test.cpp)
+    target_link_libraries(s4cfg-test PRIVATE predicate-expand-objects)
+
+    add_executable(s4cfg-integration-test testv2/s4cfg_integration_test.cpp)
+    target_link_libraries(s4cfg-integration-test PRIVATE predicate-expand-objects)
+
     if(MSVC)
         set_property(TARGET predicate-expand PROPERTY VS_GLOBAL_TrackFileAccess false)
         set_property(TARGET predicate-expand PROPERTY
@@ -131,6 +137,14 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
         )
         set_property(TARGET s3statementize-test PROPERTY VS_GLOBAL_TrackFileAccess false)
         set_property(TARGET s3statementize-test PROPERTY
+            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
+        )
+        set_property(TARGET s4cfg-test PROPERTY VS_GLOBAL_TrackFileAccess false)
+        set_property(TARGET s4cfg-test PROPERTY
+            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
+        )
+        set_property(TARGET s4cfg-integration-test PROPERTY VS_GLOBAL_TrackFileAccess false)
+        set_property(TARGET s4cfg-integration-test PROPERTY
             MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
         )
     endif()

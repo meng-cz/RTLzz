@@ -1,0 +1,154 @@
+#include "ast/ASTBuilder.h"
+#include "s2validate/S2Validate.h"
+#include "s3statementize/S3Statementize.h"
+#include "s4cfg/S4CFG.h"
+
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <vector>
+
+using namespace pred;
+
+[[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
+    std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
+    std::exit(1);
+}
+
+#define CHECK(condition) \
+    do { \
+        if (!(condition)) failCheck(#condition, __FILE__, __LINE__); \
+    } while (false)
+
+static FunctionAST parseFixture(const std::string& file) {
+    std::vector<std::string> clang_args = {
+        "-I.",
+        "-Ithird_party/vulsim/vullib",
+        "-std=c++20",
+    };
+    auto build = buildASTFromSource(file, "hls_main", clang_args);
+    if (!build.error.empty()) {
+        std::cerr << "AST build failed for " << file << ":\n" << build.error << "\n";
+    }
+    CHECK(build.error.empty());
+    CHECK(build.function.has_value());
+    return std::move(build.function.value());
+}
+
+static std::string buildS4DebugFromSource(const std::string& file) {
+    auto ast = parseFixture(file);
+
+    pred::s2validate::ValidateOptions validate_options;
+    validate_options.debug_print = true;
+    auto validation = pred::s2validate::validateFunctionAST(ast, validate_options);
+    if (!validation.ok()) {
+        std::cerr << validation.error->formatted << "\n";
+    }
+    CHECK(validation.ok());
+
+    pred::s3statementize::StatementizeOptions s3_options;
+    s3_options.debug_print = true;
+    auto s3 = pred::s3statementize::statementizeFunctionAST(ast, s3_options);
+    if (!s3.ok()) {
+        std::cerr << s3.error->formatted << "\n";
+    }
+    CHECK(s3.ok());
+    CHECK(s3.program.has_value());
+
+    pred::s4cfg::CFGOptions s4_options;
+    s4_options.debug_print = true;
+    auto s4 = pred::s4cfg::buildCFGProgram(s3.program.value(), s4_options);
+    if (!s4.ok()) {
+        std::cerr << s4.error->formatted << "\n";
+    }
+    CHECK(s4.ok());
+    CHECK(s4.program.has_value());
+    CHECK(!s4.debug_text.empty());
+    return s4.debug_text;
+}
+
+static void expectContains(const std::string& text, const std::string& needle) {
+    if (text.find(needle) == std::string::npos) {
+        std::cerr << "Expected debug text to contain:\n" << needle
+                  << "\nActual debug text:\n" << text << "\n";
+    }
+    CHECK(text.find(needle) != std::string::npos);
+}
+
+static void expectInOrder(const std::string& text, const std::vector<std::string>& needles) {
+    std::size_t pos = 0;
+    for (const auto& needle : needles) {
+        auto found = text.find(needle, pos);
+        if (found == std::string::npos) {
+            std::cerr << "Expected in-order item:\n" << needle
+                      << "\nActual debug text:\n" << text << "\n";
+        }
+        CHECK(found != std::string::npos);
+        pos = found + needle.size();
+    }
+}
+
+static void sourceHelpersBuildFunctionCFGs() {
+    auto debug = buildS4DebugFromSource(
+        "testv2/fixtures/s4cfg/source_helpers.logic.cpp");
+
+    expectContains(debug, "s4cfg\n");
+    expectContains(debug, "top hls_main entry=bb0 exit=bb2");
+    expectContains(debug, "helper choose");
+    expectContains(debug, "helper adjust");
+    expectContains(debug, "helper touch");
+    expectContains(debug, "return_slot=__ret_choose_0");
+    expectContains(debug, "return_slot=__ret_adjust_0");
+    expectContains(debug, "call t = choose(sel, a, b)");
+    expectContains(debug, "call touch(t)");
+    expectContains(debug, "call out = adjust(sel, t)");
+    expectContains(debug, "term branch sel ?");
+    expectContains(debug, "term return __ret_");
+}
+
+static void sourceLoopsSwitchBuildsEdgesAndFallthrough() {
+    auto debug = buildS4DebugFromSource(
+        "testv2/fixtures/s4cfg/source_loops_switch.logic.cpp");
+
+    expectContains(debug, "loop 0 for");
+    expectContains(debug, "label=for_body");
+    expectContains(debug, "label=for_step");
+    expectContains(debug, "continue");
+    expectContains(debug, "break");
+    expectContains(debug, "backedge");
+    expectContains(debug, "term switch");
+    expectContains(debug, "case 0");
+    expectContains(debug, "case 1");
+    expectContains(debug, "default ->");
+}
+
+static void sourceWhileDoWhileReevaluatesConditionPreludes() {
+    auto debug = buildS4DebugFromSource(
+        "testv2/fixtures/s4cfg/source_while_dowhile.logic.cpp");
+
+    expectContains(debug, "helper keep");
+    expectContains(debug, "helper again");
+    expectContains(debug, "loop 0 while");
+    expectContains(debug, "loop 1 do_while");
+    expectContains(debug, "call __tmp_hls_main_keep_");
+    expectContains(debug, "call __tmp_hls_main_again_");
+    expectContains(debug, "continue");
+    expectContains(debug, "break");
+    expectInOrder(debug, {
+        "loop 0 while",
+        "call __tmp_hls_main_keep_",
+        "term branch __tmp_hls_main_keep_",
+    });
+    expectInOrder(debug, {
+        "loop 1 do_while",
+        "call __tmp_hls_main_again_",
+        "term branch __tmp_hls_main_again_",
+    });
+}
+
+int main() {
+    sourceHelpersBuildFunctionCFGs();
+    sourceLoopsSwitchBuildsEdgesAndFallthrough();
+    sourceWhileDoWhileReevaluatesConditionPreludes();
+    return 0;
+}
