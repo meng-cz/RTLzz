@@ -90,13 +90,29 @@ struct S1Expr {
 struct S1Stmt;
 using S1StmtPtr = std::shared_ptr<S1Stmt>;
 
+enum class S1StmtKind {
+    Decl,
+    Assign,
+    Construct,
+    If,
+    For,
+    While,
+    DoWhile,
+    Switch,
+    Block,
+    Break,
+    Continue,
+    Return,
+    ExprStmt,
+};
+
 struct S1CaseClause {
     std::optional<S1ExprPtr> value;
     std::vector<S1StmtPtr> body;
 };
 
 struct S1Stmt {
-    StmtKind kind = StmtKind::ExprStmt;
+    S1StmtKind kind = S1StmtKind::ExprStmt;
     DebugLoc debug_loc;
 
     S1ExprPtr assign_target;
@@ -104,15 +120,18 @@ struct S1Stmt {
 
     TypeInfo decl_type;
     std::string decl_name;
-    std::optional<S1ExprPtr> decl_init;
-    std::vector<S1ExprPtr> decl_init_args;
     bool decl_default_constructed = false;
+
+    S1ExprPtr construct_target;
+    std::string construct_callee;
+    std::vector<S1ExprPtr> construct_args;
+    TypeInfo construct_type;
 
     S1ExprPtr if_cond;
     std::vector<S1StmtPtr> if_then;
     std::vector<S1StmtPtr> if_else;
 
-    S1StmtPtr for_init;
+    std::vector<S1StmtPtr> for_init;
     S1ExprPtr for_cond;
     S1ExprPtr for_step;
     std::vector<S1StmtPtr> for_body;

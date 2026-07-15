@@ -22,11 +22,7 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
      在 CFG 层通过 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation 来内联 helper/lambda 调用。
 
   7. AggregateFlatten
-     将 struct、array、aggregate init/copy、field access、array access、动态索引读写全部降低为确定的 scalar leaf 变量、mux 或 guarded write。
-
-  12. LValueLowering
-     将剩余复杂左值操作，如 bit/slice 写、动态位写、proxy lvalue、array element write，降低为显式读改写或 leaf assignment。
-
+     将 struct、array、aggregate init/copy、field access、array access、动态索引读写全部降低为确定的 scalar leaf 变量、mux 或 guarded write。处理复杂左值，生成显式的 leaf assignment。
 
 
 ## 仍需确认的步骤：

@@ -887,29 +887,85 @@ std::vector<CaseClause> legacyCaseView(const std::vector<s1apinorm::S1CaseClause
 StmtPtr legacyStmtView(const s1apinorm::S1StmtPtr& stmt) {
     if (!stmt) return nullptr;
     auto out = std::make_shared<Stmt>();
-    out->kind = stmt->kind;
     out->debug_loc = stmt->debug_loc;
-    out->assign_target = legacyExprView(stmt->assign_target);
-    out->assign_value = legacyExprView(stmt->assign_value);
-    out->decl_type = stmt->decl_type;
-    out->decl_name = stmt->decl_name;
-    if (stmt->decl_init) out->decl_init = legacyExprView(stmt->decl_init.value());
-    for (const auto& arg : stmt->decl_init_args) out->decl_init_args.push_back(legacyExprView(arg));
-    out->decl_default_constructed = stmt->decl_default_constructed;
-    out->if_cond = legacyExprView(stmt->if_cond);
-    out->if_then = legacyStmtListView(stmt->if_then);
-    out->if_else = legacyStmtListView(stmt->if_else);
-    out->for_init = legacyStmtView(stmt->for_init);
-    out->for_cond = legacyExprView(stmt->for_cond);
-    out->for_step = legacyExprView(stmt->for_step);
-    out->for_body = legacyStmtListView(stmt->for_body);
-    out->while_cond = legacyExprView(stmt->while_cond);
-    out->while_body = legacyStmtListView(stmt->while_body);
-    out->switch_expr = legacyExprView(stmt->switch_expr);
-    out->switch_cases = legacyCaseView(stmt->switch_cases);
-    out->block_stmts = legacyStmtListView(stmt->block_stmts);
-    if (stmt->return_value) out->return_value = legacyExprView(stmt->return_value.value());
-    out->expr_stmt = legacyExprView(stmt->expr_stmt);
+    switch (stmt->kind) {
+    case s1apinorm::S1StmtKind::Decl:
+        out->kind = StmtKind::Decl;
+        out->decl_type = stmt->decl_type;
+        out->decl_name = stmt->decl_name;
+        out->decl_default_constructed = stmt->decl_default_constructed;
+        break;
+    case s1apinorm::S1StmtKind::Assign:
+        out->kind = StmtKind::Assign;
+        out->assign_target = legacyExprView(stmt->assign_target);
+        out->assign_value = legacyExprView(stmt->assign_value);
+        break;
+    case s1apinorm::S1StmtKind::Construct: {
+        out->kind = StmtKind::Assign;
+        out->assign_target = legacyExprView(stmt->construct_target);
+        auto call = std::make_shared<Expr>();
+        call->kind = ExprKind::Call;
+        call->debug_loc = stmt->debug_loc;
+        call->type = stmt->construct_type;
+        call->callee = stmt->construct_callee;
+        for (const auto& arg : stmt->construct_args) call->args.push_back(legacyExprView(arg));
+        out->assign_value = std::move(call);
+        break;
+    }
+    case s1apinorm::S1StmtKind::If:
+        out->kind = StmtKind::If;
+        out->if_cond = legacyExprView(stmt->if_cond);
+        out->if_then = legacyStmtListView(stmt->if_then);
+        out->if_else = legacyStmtListView(stmt->if_else);
+        break;
+    case s1apinorm::S1StmtKind::For:
+        out->kind = StmtKind::For;
+        if (!stmt->for_init.empty()) {
+            out->for_init = legacyStmtView(stmt->for_init.front());
+        }
+        out->for_cond = legacyExprView(stmt->for_cond);
+        out->for_step = legacyExprView(stmt->for_step);
+        out->for_body = legacyStmtListView(stmt->for_body);
+        for (auto it = stmt->for_init.rbegin();
+             it != stmt->for_init.rend() && std::next(it) != stmt->for_init.rend();
+             ++it) {
+            out->for_body.insert(out->for_body.begin(), legacyStmtView(*it));
+        }
+        break;
+    case s1apinorm::S1StmtKind::While:
+        out->kind = StmtKind::While;
+        out->while_cond = legacyExprView(stmt->while_cond);
+        out->while_body = legacyStmtListView(stmt->while_body);
+        break;
+    case s1apinorm::S1StmtKind::DoWhile:
+        out->kind = StmtKind::DoWhile;
+        out->while_cond = legacyExprView(stmt->while_cond);
+        out->while_body = legacyStmtListView(stmt->while_body);
+        break;
+    case s1apinorm::S1StmtKind::Switch:
+        out->kind = StmtKind::Switch;
+        out->switch_expr = legacyExprView(stmt->switch_expr);
+        out->switch_cases = legacyCaseView(stmt->switch_cases);
+        break;
+    case s1apinorm::S1StmtKind::Block:
+        out->kind = StmtKind::Block;
+        out->block_stmts = legacyStmtListView(stmt->block_stmts);
+        break;
+    case s1apinorm::S1StmtKind::Break:
+        out->kind = StmtKind::Break;
+        break;
+    case s1apinorm::S1StmtKind::Continue:
+        out->kind = StmtKind::Continue;
+        break;
+    case s1apinorm::S1StmtKind::Return:
+        out->kind = StmtKind::Return;
+        if (stmt->return_value) out->return_value = legacyExprView(stmt->return_value.value());
+        break;
+    case s1apinorm::S1StmtKind::ExprStmt:
+        out->kind = StmtKind::ExprStmt;
+        out->expr_stmt = legacyExprView(stmt->expr_stmt);
+        break;
+    }
     return out;
 }
 

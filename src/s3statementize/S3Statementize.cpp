@@ -357,15 +357,17 @@ void collectNamesExpr(const ExprPtr& expr, std::unordered_set<std::string>& out)
 
 void collectNamesStmt(const s1apinorm::S1StmtPtr& stmt, std::unordered_set<std::string>& out) {
     if (!stmt) return;
-    if (stmt->kind == StmtKind::Decl && !stmt->decl_name.empty()) out.insert(stmt->decl_name);
+    if (stmt->kind == s1apinorm::S1StmtKind::Decl && !stmt->decl_name.empty()) {
+        out.insert(stmt->decl_name);
+    }
     collectNamesExpr(stmt->assign_target, out);
     collectNamesExpr(stmt->assign_value, out);
-    if (stmt->decl_init) collectNamesExpr(stmt->decl_init.value(), out);
-    for (const auto& arg : stmt->decl_init_args) collectNamesExpr(arg, out);
+    collectNamesExpr(stmt->construct_target, out);
+    for (const auto& arg : stmt->construct_args) collectNamesExpr(arg, out);
     collectNamesExpr(stmt->if_cond, out);
     for (const auto& child : stmt->if_then) collectNamesStmt(child, out);
     for (const auto& child : stmt->if_else) collectNamesStmt(child, out);
-    if (stmt->for_init) collectNamesStmt(stmt->for_init, out);
+    for (const auto& child : stmt->for_init) collectNamesStmt(child, out);
     collectNamesExpr(stmt->for_cond, out);
     collectNamesExpr(stmt->for_step, out);
     for (const auto& child : stmt->for_body) collectNamesStmt(child, out);
@@ -1618,56 +1620,25 @@ private:
         ErrorContextGuard guard("s3statementize", stmt->debug_loc, "lowering S1 statement");
         std::vector<S3StmtPtr> out;
         switch (stmt->kind) {
-        case StmtKind::Decl: {
+        case s1apinorm::S1StmtKind::Decl: {
             SymbolId decl_symbol = createSymbol(ctx_, stmt->decl_name, stmt->decl_type);
             out.push_back(makeDecl(stmt->decl_name, decl_symbol,
                                    stmt->decl_type, stmt->debug_loc));
             ctx_.used_names.insert(stmt->decl_name);
-            if (stmt->decl_init) {
-                if (stmt->decl_init.value()->kind == s1apinorm::S1ExprKind::Call) {
-                    auto init = stmt->decl_init.value();
-                    auto args = lowerArgs(init->args, out);
-                    auto target = varLValue(stmt->decl_name, decl_symbol,
-                                            stmt->decl_type, stmt->debug_loc);
-                    if (isConstructorCall(init, ctx_)) {
-                        out.push_back(makeConstruct(std::move(target), init->callee,
-                                                    std::move(args), init->type,
-                                                    init->debug_loc));
-                    } else {
-                        out.push_back(makeCall(std::move(target), init->callee,
-                                               std::move(args), init->type,
-                                               init->debug_loc));
-                    }
-                } else {
-                    auto value = lowerExpr(stmt->decl_init.value());
-                    out.insert(out.end(), value.prelude.begin(), value.prelude.end());
-                    out.push_back(makeAssign(varLValue(stmt->decl_name, decl_symbol,
-                                                       stmt->decl_type,
-                                                       stmt->debug_loc),
-                                             std::move(value.operand), stmt->debug_loc));
-                }
-            } else if (!stmt->decl_init_args.empty()) {
-                auto args = lowerArgs(stmt->decl_init_args, out);
-                out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
-                                                      stmt->decl_type,
-                                                      stmt->debug_loc),
-                                            !stmt->decl_type.struct_name.empty()
-                                                ? stmt->decl_type.struct_name
-                                                : stmt->decl_type.name,
-                                            std::move(args), stmt->decl_type,
-                                            stmt->debug_loc));
-            } else if (stmt->decl_default_constructed) {
-                out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
-                                                      stmt->decl_type,
-                                                      stmt->debug_loc),
-                                            !stmt->decl_type.struct_name.empty()
-                                                ? stmt->decl_type.struct_name
-                                                : stmt->decl_type.name,
-                                            {}, stmt->decl_type, stmt->debug_loc));
-            }
             return out;
         }
-        case StmtKind::Assign: {
+        case s1apinorm::S1StmtKind::Construct: {
+            auto args = lowerArgs(stmt->construct_args, out);
+            auto target = lowerLValue(stmt->construct_target);
+            out.insert(out.end(), target.prelude.begin(), target.prelude.end());
+            out.push_back(makeConstruct(std::move(target.lvalue),
+                                        stmt->construct_callee,
+                                        std::move(args),
+                                        stmt->construct_type,
+                                        stmt->debug_loc));
+            return out;
+        }
+        case s1apinorm::S1StmtKind::Assign: {
             if (stmt->assign_value &&
                 stmt->assign_value->kind == s1apinorm::S1ExprKind::Call) {
                 auto args = lowerArgs(stmt->assign_value->args, out);
@@ -1723,7 +1694,7 @@ private:
                                      stmt->debug_loc));
             return out;
         }
-        case StmtKind::If: {
+        case s1apinorm::S1StmtKind::If: {
             auto cond = lowerExpr(stmt->if_cond);
             out.insert(out.end(), cond.prelude.begin(), cond.prelude.end());
             auto s = std::make_shared<S3Stmt>();
@@ -1741,13 +1712,13 @@ private:
             out.push_back(s);
             return out;
         }
-        case StmtKind::Block: {
+        case s1apinorm::S1StmtKind::Block: {
             ScopeGuard guard(ctx_, S3ScopeKind::Block, "block");
             auto nested = lowerStmtList(stmt->block_stmts);
             out.insert(out.end(), nested.begin(), nested.end());
             return out;
         }
-        case StmtKind::Return: {
+        case s1apinorm::S1StmtKind::Return: {
             auto s = std::make_shared<S3Stmt>();
             s->kind = S3StmtKind::Return;
             s->debug_loc = stmt->debug_loc;
@@ -1759,7 +1730,7 @@ private:
             out.push_back(s);
             return out;
         }
-        case StmtKind::ExprStmt: {
+        case s1apinorm::S1StmtKind::ExprStmt: {
             if (stmt->expr_stmt &&
                 stmt->expr_stmt->kind == s1apinorm::S1ExprKind::Call) {
                 auto args = lowerArgs(stmt->expr_stmt->args, out);
@@ -1786,12 +1757,12 @@ private:
             out.push_back(s);
             return out;
         }
-        case StmtKind::For: {
+        case s1apinorm::S1StmtKind::For: {
             ScopeGuard loop_guard(ctx_, S3ScopeKind::Loop, "for");
             auto s = std::make_shared<S3Stmt>();
             s->kind = S3StmtKind::For;
             s->debug_loc = stmt->debug_loc;
-            if (stmt->for_init) s->for_init = lowerStmt(stmt->for_init);
+            s->for_init = lowerStmtList(stmt->for_init);
             if (stmt->for_cond) {
                 auto cond = lowerExpr(stmt->for_cond);
                 s->condition_prelude = std::move(cond.prelude);
@@ -1813,25 +1784,25 @@ private:
             out.push_back(s);
             return out;
         }
-        case StmtKind::While:
-        case StmtKind::DoWhile: {
+        case s1apinorm::S1StmtKind::While:
+        case s1apinorm::S1StmtKind::DoWhile: {
             ScopeGuard loop_guard(ctx_, S3ScopeKind::Loop,
-                                  stmt->kind == StmtKind::While ? "while" : "do_while");
+                                  stmt->kind == s1apinorm::S1StmtKind::While ? "while" : "do_while");
             auto s = std::make_shared<S3Stmt>();
-            s->kind = stmt->kind == StmtKind::While ? S3StmtKind::While : S3StmtKind::DoWhile;
+            s->kind = stmt->kind == s1apinorm::S1StmtKind::While ? S3StmtKind::While : S3StmtKind::DoWhile;
             s->debug_loc = stmt->debug_loc;
             auto cond = lowerExpr(stmt->while_cond);
             s->condition_prelude = std::move(cond.prelude);
             s->condition = std::move(cond.operand);
             {
                 ScopeGuard body_guard(ctx_, S3ScopeKind::LoopBody,
-                                      stmt->kind == StmtKind::While ? "while_body" : "do_body");
+                                      stmt->kind == s1apinorm::S1StmtKind::While ? "while_body" : "do_body");
                 s->loop_body = lowerStmtList(stmt->while_body);
             }
             out.push_back(s);
             return out;
         }
-        case StmtKind::Switch: {
+        case s1apinorm::S1StmtKind::Switch: {
             auto selector = lowerExpr(stmt->switch_expr);
             out.insert(out.end(), selector.prelude.begin(), selector.prelude.end());
             auto s = std::make_shared<S3Stmt>();
@@ -1855,14 +1826,14 @@ private:
             out.push_back(s);
             return out;
         }
-        case StmtKind::Break: {
+        case s1apinorm::S1StmtKind::Break: {
             auto s = std::make_shared<S3Stmt>();
             s->kind = S3StmtKind::Break;
             s->debug_loc = stmt->debug_loc;
             out.push_back(s);
             return out;
         }
-        case StmtKind::Continue: {
+        case s1apinorm::S1StmtKind::Continue: {
             auto s = std::make_shared<S3Stmt>();
             s->kind = S3StmtKind::Continue;
             s->debug_loc = stmt->debug_loc;

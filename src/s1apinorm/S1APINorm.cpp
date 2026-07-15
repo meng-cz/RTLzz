@@ -43,6 +43,12 @@ std::string canonicalCallee(std::string name) {
     return name;
 }
 
+std::string canonicalTypeName(std::string name) {
+    if (name.rfind("struct ", 0) == 0) name = name.substr(7);
+    if (name.rfind("class ", 0) == 0) name = name.substr(6);
+    return canonicalCallee(std::move(name));
+}
+
 bool isDynamicRangeAt(const Expr& expr) {
     return expr.intrinsic == IntrinsicKind::DynamicRangeAt ||
            expr.callee == "__dynamic_range_at";
@@ -278,7 +284,10 @@ private:
                                              NormStats& stats) {
         std::vector<S1StmtPtr> out;
         out.reserve(input.size());
-        for (const auto& stmt : input) out.push_back(normalizeStmt(stmt, stats));
+        for (const auto& stmt : input) {
+            auto normalized = normalizeStmt(stmt, stats);
+            out.insert(out.end(), normalized.begin(), normalized.end());
+        }
         return out;
     }
 
@@ -295,57 +304,181 @@ private:
         return out;
     }
 
-    S1StmtPtr normalizeStmt(const StmtPtr& stmt, NormStats& stats) {
-        if (!stmt) return nullptr;
+    std::vector<S1StmtPtr> normalizeStmt(const StmtPtr& stmt, NormStats& stats) {
+        if (!stmt) return {};
         ErrorContextGuard guard("s1apinorm", stmt->debug_loc, "normalizing statement");
         auto out = std::make_shared<S1Stmt>();
-        out->kind = stmt->kind;
         out->debug_loc = stmt->debug_loc;
         switch (stmt->kind) {
         case StmtKind::Assign:
+            out->kind = S1StmtKind::Assign;
             normalizeAssign(*out, stmt, stats);
-            return out;
+            return {out};
         case StmtKind::Decl:
-            out->decl_type = stmt->decl_type;
-            out->decl_name = stmt->decl_name;
-            out->decl_default_constructed = stmt->decl_default_constructed;
-            if (stmt->decl_init) out->decl_init = normalizeExpr(stmt->decl_init.value(), stats);
-            for (const auto& arg : stmt->decl_init_args) {
-                out->decl_init_args.push_back(normalizeExpr(arg, stats));
-            }
-            return out;
+            return normalizeDecl(stmt, stats);
         case StmtKind::If:
+            out->kind = S1StmtKind::If;
             out->if_cond = normalizeExpr(stmt->if_cond, stats);
             out->if_then = normalizeStmtList(stmt->if_then, stats);
             out->if_else = normalizeStmtList(stmt->if_else, stats);
-            return out;
+            return {out};
         case StmtKind::For:
+            out->kind = S1StmtKind::For;
             out->for_init = normalizeStmt(stmt->for_init, stats);
             out->for_cond = normalizeExpr(stmt->for_cond, stats);
             out->for_step = normalizeExpr(stmt->for_step, stats);
             out->for_body = normalizeStmtList(stmt->for_body, stats);
-            return out;
+            return {out};
         case StmtKind::While:
-        case StmtKind::DoWhile:
+            out->kind = S1StmtKind::While;
             out->while_cond = normalizeExpr(stmt->while_cond, stats);
             out->while_body = normalizeStmtList(stmt->while_body, stats);
-            return out;
+            return {out};
+        case StmtKind::DoWhile:
+            out->kind = S1StmtKind::DoWhile;
+            out->while_cond = normalizeExpr(stmt->while_cond, stats);
+            out->while_body = normalizeStmtList(stmt->while_body, stats);
+            return {out};
         case StmtKind::Switch:
+            out->kind = S1StmtKind::Switch;
             out->switch_expr = normalizeExpr(stmt->switch_expr, stats);
             out->switch_cases = normalizeCases(stmt->switch_cases, stats);
-            return out;
+            return {out};
         case StmtKind::Block:
+            out->kind = S1StmtKind::Block;
             out->block_stmts = normalizeStmtList(stmt->block_stmts, stats);
-            return out;
+            return {out};
         case StmtKind::Return:
+            out->kind = S1StmtKind::Return;
             if (stmt->return_value) out->return_value = normalizeExpr(stmt->return_value.value(), stats);
-            return out;
+            return {out};
         case StmtKind::ExprStmt:
+            out->kind = S1StmtKind::ExprStmt;
             out->expr_stmt = normalizeExpr(stmt->expr_stmt, stats);
-            return out;
+            return {out};
         case StmtKind::Break:
+            out->kind = S1StmtKind::Break;
+            return {out};
         case StmtKind::Continue:
+            out->kind = S1StmtKind::Continue;
+            return {out};
+        }
+        return {out};
+    }
+
+    S1ExprPtr makeVarRef(const std::string& name, TypeInfo type, DebugLoc loc) {
+        auto expr = std::make_shared<S1Expr>();
+        expr->kind = S1ExprKind::VarRef;
+        expr->var_name = name;
+        expr->type = std::move(type);
+        expr->debug_loc = std::move(loc);
+        return expr;
+    }
+
+    std::shared_ptr<S1Stmt> makeDeclStmt(const StmtPtr& stmt) {
+        auto out = std::make_shared<S1Stmt>();
+        out->kind = S1StmtKind::Decl;
+        out->debug_loc = stmt->debug_loc;
+        out->decl_type = stmt->decl_type;
+        out->decl_name = stmt->decl_name;
+        out->decl_default_constructed = stmt->decl_default_constructed;
+        return out;
+    }
+
+    std::shared_ptr<S1Stmt> makeAssignStmt(S1ExprPtr target, S1ExprPtr value, DebugLoc loc) {
+        auto out = std::make_shared<S1Stmt>();
+        out->kind = S1StmtKind::Assign;
+        out->debug_loc = std::move(loc);
+        out->assign_target = std::move(target);
+        out->assign_value = std::move(value);
+        return out;
+    }
+
+    std::shared_ptr<S1Stmt> makeConstructStmt(S1ExprPtr target,
+                                              std::string callee,
+                                              std::vector<S1ExprPtr> args,
+                                              TypeInfo type,
+                                              DebugLoc loc) {
+        auto out = std::make_shared<S1Stmt>();
+        out->kind = S1StmtKind::Construct;
+        out->debug_loc = std::move(loc);
+        out->construct_target = std::move(target);
+        out->construct_callee = std::move(callee);
+        out->construct_args = std::move(args);
+        out->construct_type = std::move(type);
+        return out;
+    }
+
+    std::vector<S1ExprPtr> normalizeExprList(const std::vector<ExprPtr>& input,
+                                             NormStats& stats) {
+        std::vector<S1ExprPtr> out;
+        out.reserve(input.size());
+        for (const auto& expr : input) out.push_back(normalizeExpr(expr, stats));
+        return out;
+    }
+
+    bool isConstructorInit(const ExprPtr& init, const TypeInfo& decl_type) const {
+        if (!init || init->kind != ExprKind::Call) return false;
+        std::string callee = canonicalTypeName(init->callee);
+        std::vector<std::string> type_names;
+        if (!decl_type.struct_name.empty()) type_names.push_back(decl_type.struct_name);
+        if (!decl_type.name.empty()) type_names.push_back(decl_type.name);
+        if (!init->type.struct_name.empty()) type_names.push_back(init->type.struct_name);
+        if (!init->type.name.empty()) type_names.push_back(init->type.name);
+        if (decl_type.hw_kind == "Int" || decl_type.hw_kind == "UInt" ||
+            decl_type.hw_kind == "bool") {
+            type_names.push_back(decl_type.hw_kind);
+        }
+        for (const auto& name : type_names) {
+            if (!name.empty() && callee == canonicalTypeName(name)) return true;
+        }
+        return false;
+    }
+
+    std::vector<S1StmtPtr> normalizeDecl(const StmtPtr& stmt, NormStats& stats) {
+        std::vector<S1StmtPtr> out;
+        out.push_back(makeDeclStmt(stmt));
+
+        auto target = makeVarRef(stmt->decl_name, stmt->decl_type, stmt->debug_loc);
+        if (stmt->decl_init) {
+            if (isConstructorInit(stmt->decl_init.value(), stmt->decl_type)) {
+                auto init = stmt->decl_init.value();
+                out.push_back(makeConstructStmt(
+                    std::move(target),
+                    init->callee,
+                    normalizeExprList(init->args, stats),
+                    stmt->decl_type,
+                    init->debug_loc));
+            } else {
+                out.push_back(makeAssignStmt(
+                    std::move(target),
+                    normalizeExpr(stmt->decl_init.value(), stats),
+                    stmt->debug_loc));
+            }
             return out;
+        }
+
+        if (!stmt->decl_init_args.empty()) {
+            out.push_back(makeConstructStmt(
+                std::move(target),
+                !stmt->decl_type.struct_name.empty()
+                    ? stmt->decl_type.struct_name
+                    : stmt->decl_type.name,
+                normalizeExprList(stmt->decl_init_args, stats),
+                stmt->decl_type,
+                stmt->debug_loc));
+            return out;
+        }
+
+        if (stmt->decl_default_constructed) {
+            out.push_back(makeConstructStmt(
+                std::move(target),
+                !stmt->decl_type.struct_name.empty()
+                    ? stmt->decl_type.struct_name
+                    : stmt->decl_type.name,
+                {},
+                stmt->decl_type,
+                stmt->debug_loc));
         }
         return out;
     }

@@ -40,6 +40,27 @@ static TypeInfo boolType() {
     return make_bool_type();
 }
 
+static TypeInfo pairType() {
+    TypeInfo type;
+    type.name = "Pair";
+    type.struct_name = "Pair";
+    return type;
+}
+
+static TypeInfo boxType() {
+    TypeInfo type;
+    type.name = "Box";
+    type.struct_name = "Box";
+    return type;
+}
+
+static TypeInfo arrayOf(TypeInfo elem, int size) {
+    elem.is_array = true;
+    elem.array_size = size;
+    elem.array_dims = {size};
+    return elem;
+}
+
 static TypeInfo voidType() {
     TypeInfo type;
     type.name = "void";
@@ -79,6 +100,22 @@ static StmtPtr assign(ExprPtr target, ExprPtr value) {
     stmt->kind = StmtKind::Assign;
     stmt->assign_target = std::move(target);
     stmt->assign_value = std::move(value);
+    return stmt;
+}
+
+static StmtPtr decl(const std::string& name, TypeInfo type, ExprPtr init = nullptr) {
+    auto stmt = std::make_shared<Stmt>();
+    stmt->kind = StmtKind::Decl;
+    stmt->decl_name = name;
+    stmt->decl_type = std::move(type);
+    if (init) stmt->decl_init = std::move(init);
+    return stmt;
+}
+
+static StmtPtr ret(ExprPtr value = nullptr) {
+    auto stmt = std::make_shared<Stmt>();
+    stmt->kind = StmtKind::Return;
+    if (value) stmt->return_value = std::move(value);
     return stmt;
 }
 
@@ -171,7 +208,7 @@ static bool containsHardwareOpStmt(const pred::s1apinorm::S1StmtPtr& stmt,
         containsHardwareOpExpr(stmt->if_cond, op) ||
         containsHardwareOpList(stmt->if_then, op) ||
         containsHardwareOpList(stmt->if_else, op) ||
-        containsHardwareOpStmt(stmt->for_init, op) ||
+        containsHardwareOpList(stmt->for_init, op) ||
         containsHardwareOpExpr(stmt->for_cond, op) ||
         containsHardwareOpExpr(stmt->for_step, op) ||
         containsHardwareOpList(stmt->for_body, op) ||
@@ -179,12 +216,12 @@ static bool containsHardwareOpStmt(const pred::s1apinorm::S1StmtPtr& stmt,
         containsHardwareOpList(stmt->while_body, op) ||
         containsHardwareOpExpr(stmt->switch_expr, op) ||
         containsHardwareOpList(stmt->block_stmts, op) ||
-        containsHardwareOpExpr(stmt->expr_stmt, op)) {
+        containsHardwareOpExpr(stmt->expr_stmt, op) ||
+        containsHardwareOpExpr(stmt->construct_target, op)) {
         return true;
     }
-    if (stmt->decl_init && containsHardwareOpExpr(stmt->decl_init.value(), op)) return true;
     if (stmt->return_value && containsHardwareOpExpr(stmt->return_value.value(), op)) return true;
-    for (const auto& arg : stmt->decl_init_args) {
+    for (const auto& arg : stmt->construct_args) {
         if (containsHardwareOpExpr(arg, op)) return true;
     }
     for (const auto& clause : stmt->switch_cases) {
@@ -349,6 +386,174 @@ static void dynamicRangeReadStaysHardwareOp() {
     validateAfterS1(top);
 }
 
+static void declarationInitCallBecomesDeclThenAssignCall() {
+    auto top = baseTop();
+    top.params.push_back(valueParam("seed", int8()));
+    top.params.push_back(outputParam("out", int8()));
+    top.struct_fields["Pair"] = {
+        StructFieldInfo{"n", int8()},
+        StructFieldInfo{"m", int8()},
+    };
+
+    auto helper = std::make_shared<FunctionAST>();
+    helper->name = "make_pair";
+    helper->return_type = pairType();
+    helper->params.push_back(valueParam("seed", int8()));
+    helper->body.push_back(decl("tmp", pairType()));
+    helper->body.push_back(ret(make_var("tmp", pairType())));
+    top.helpers.push_back(helper);
+
+    top.body.push_back(decl("p", pairType(),
+                            call("make_pair", {make_var("seed", int8())}, pairType())));
+    top.body.push_back(assign(
+        make_var("out", int8()),
+        make_field_access(make_var("p", pairType()), "n", int8())));
+
+    auto norm = normalizeS1Ok(top);
+    CHECK(norm.body.size() == 3);
+    CHECK(norm.body[0]->kind == pred::s1apinorm::S1StmtKind::Decl);
+    CHECK(norm.body[0]->decl_name == "p");
+    CHECK(norm.body[1]->kind == pred::s1apinorm::S1StmtKind::Assign);
+    CHECK(norm.body[1]->assign_target->kind == pred::s1apinorm::S1ExprKind::VarRef);
+    CHECK(norm.body[1]->assign_target->var_name == "p");
+    CHECK(norm.body[1]->assign_value->kind == pred::s1apinorm::S1ExprKind::Call);
+    CHECK(norm.body[1]->assign_value->callee == "make_pair");
+    CHECK(norm.body[2]->kind == pred::s1apinorm::S1StmtKind::Assign);
+    validateAfterS1(top);
+}
+
+static void declarationInitArgsBecomeConstructStmt() {
+    auto top = baseTop();
+    top.params.push_back(outputParam("out", int8()));
+    auto init = decl("n", int8());
+    init->decl_init_args.push_back(make_literal("1", int8()));
+    top.body.push_back(init);
+    top.body.push_back(assign(make_var("out", int8()), make_var("n", int8())));
+
+    auto norm = normalizeS1Ok(top);
+    CHECK(norm.body.size() == 3);
+    CHECK(norm.body[0]->kind == pred::s1apinorm::S1StmtKind::Decl);
+    CHECK(norm.body[1]->kind == pred::s1apinorm::S1StmtKind::Construct);
+    CHECK(norm.body[1]->construct_target->kind == pred::s1apinorm::S1ExprKind::VarRef);
+    CHECK(norm.body[1]->construct_target->var_name == "n");
+    CHECK(norm.body[1]->construct_args.size() == 1);
+    CHECK(norm.body[2]->kind == pred::s1apinorm::S1StmtKind::Assign);
+    validateAfterS1(top);
+}
+
+static void aggregateDeclarationInitFromFieldAndArrayBecomeAssigns() {
+    auto top = baseTop();
+    auto pair_array = arrayOf(pairType(), 2);
+    top.params.push_back(valueParam("idx", int8()));
+    top.params.push_back(outputParam("out", int8()));
+    top.struct_fields["Pair"] = {
+        StructFieldInfo{"n", int8()},
+        StructFieldInfo{"m", int8()},
+    };
+    top.struct_fields["Box"] = {
+        StructFieldInfo{"member", pairType()},
+    };
+
+    top.body.push_back(decl("box", boxType()));
+    top.body.push_back(decl("arr", pair_array));
+    top.body.push_back(decl(
+        "from_member",
+        pairType(),
+        make_field_access(make_var("box", boxType()), "member", pairType())));
+    top.body.push_back(decl(
+        "from_index",
+        pairType(),
+        make_array_access(make_var("arr", pair_array), make_var("idx", int8()),
+                          pairType())));
+    top.body.push_back(assign(
+        make_var("out", int8()),
+        make_binary("+",
+                    make_field_access(make_var("from_member", pairType()), "n", int8()),
+                    make_field_access(make_var("from_index", pairType()), "m", int8()),
+                    int8())));
+
+    auto norm = normalizeS1Ok(top);
+    CHECK(norm.body.size() == 7);
+    CHECK(norm.body[0]->kind == pred::s1apinorm::S1StmtKind::Decl);
+    CHECK(norm.body[0]->decl_name == "box");
+    CHECK(norm.body[1]->kind == pred::s1apinorm::S1StmtKind::Decl);
+    CHECK(norm.body[1]->decl_name == "arr");
+
+    CHECK(norm.body[2]->kind == pred::s1apinorm::S1StmtKind::Decl);
+    CHECK(norm.body[2]->decl_name == "from_member");
+    CHECK(norm.body[3]->kind == pred::s1apinorm::S1StmtKind::Assign);
+    CHECK(norm.body[3]->assign_target->kind == pred::s1apinorm::S1ExprKind::VarRef);
+    CHECK(norm.body[3]->assign_target->var_name == "from_member");
+    CHECK(norm.body[3]->assign_value->kind == pred::s1apinorm::S1ExprKind::FieldAccess);
+    CHECK(norm.body[3]->assign_value->field_name == "member");
+
+    CHECK(norm.body[4]->kind == pred::s1apinorm::S1StmtKind::Decl);
+    CHECK(norm.body[4]->decl_name == "from_index");
+    CHECK(norm.body[5]->kind == pred::s1apinorm::S1StmtKind::Assign);
+    CHECK(norm.body[5]->assign_target->kind == pred::s1apinorm::S1ExprKind::VarRef);
+    CHECK(norm.body[5]->assign_target->var_name == "from_index");
+    CHECK(norm.body[5]->assign_value->kind == pred::s1apinorm::S1ExprKind::ArrayAccess);
+    CHECK(norm.body[5]->assign_value->index->kind == pred::s1apinorm::S1ExprKind::VarRef);
+    CHECK(norm.body[5]->assign_value->index->var_name == "idx");
+    CHECK(norm.body[6]->kind == pred::s1apinorm::S1StmtKind::Assign);
+
+    auto validation = pred::s2validate::validateFunctionAST(norm);
+    if (!validation.ok()) std::cerr << validation.error->formatted << "\n";
+    CHECK(validation.ok());
+
+    auto s3 = pred::s3statementize::statementizeFunctionAST(norm);
+    if (!s3.ok()) std::cerr << s3.error->formatted << "\n";
+    CHECK(s3.ok());
+    CHECK(s3.program.has_value());
+}
+
+static void sourceAggregateDeclarationInitsFollowParsedConstructorShape() {
+    auto ast = parseFixture("testv2/fixtures/s1apinorm/source_aggregate_decl_init.logic.cpp");
+    auto norm = normalizeS1Ok(ast);
+
+    bool saw_from_member = false;
+    bool saw_from_index = false;
+    for (std::size_t i = 1; i < norm.body.size(); ++i) {
+        const auto& prev = norm.body[i - 1];
+        const auto& stmt = norm.body[i];
+        if (!prev || !stmt ||
+            prev->kind != pred::s1apinorm::S1StmtKind::Decl ||
+            stmt->kind != pred::s1apinorm::S1StmtKind::Construct ||
+            !stmt->construct_target ||
+            stmt->construct_target->kind != pred::s1apinorm::S1ExprKind::VarRef) {
+            continue;
+        }
+        if (prev->decl_name == "from_member") {
+            CHECK(stmt->construct_target->var_name == "from_member");
+            CHECK(stmt->construct_callee == "Pair");
+            CHECK(stmt->construct_args.size() == 1);
+            CHECK(stmt->construct_args[0]->kind == pred::s1apinorm::S1ExprKind::FieldAccess);
+            CHECK(stmt->construct_args[0]->field_name == "member");
+            saw_from_member = true;
+        }
+        if (prev->decl_name == "from_index") {
+            CHECK(stmt->construct_target->var_name == "from_index");
+            CHECK(stmt->construct_callee == "Pair");
+            CHECK(stmt->construct_args.size() == 1);
+            CHECK(stmt->construct_args[0]->kind == pred::s1apinorm::S1ExprKind::ArrayAccess);
+            CHECK(stmt->construct_args[0]->index->kind == pred::s1apinorm::S1ExprKind::VarRef);
+            CHECK(stmt->construct_args[0]->index->var_name == "idx");
+            saw_from_index = true;
+        }
+    }
+    CHECK(saw_from_member);
+    CHECK(saw_from_index);
+
+    auto validation = pred::s2validate::validateFunctionAST(norm);
+    if (!validation.ok()) std::cerr << validation.error->formatted << "\n";
+    CHECK(validation.ok());
+
+    auto s3 = pred::s3statementize::statementizeFunctionAST(norm);
+    if (!s3.ok()) std::cerr << s3.error->formatted << "\n";
+    CHECK(s3.ok());
+    CHECK(s3.program.has_value());
+}
+
 static void sourceAtAPIsPassThroughS2() {
     auto ast = parseFixture("testv2/fixtures/s1apinorm/source_at.logic.cpp");
     auto norm = normalizeS1Ok(ast);
@@ -413,6 +618,10 @@ int main() {
     dynamicRangeWriteBecomesHardwareExpr();
     residualZExtCallBecomesHardwareExpr();
     dynamicRangeReadStaysHardwareOp();
+    declarationInitCallBecomesDeclThenAssignCall();
+    declarationInitArgsBecomeConstructStmt();
+    aggregateDeclarationInitFromFieldAndArrayBecomeAssigns();
+    sourceAggregateDeclarationInitsFollowParsedConstructorShape();
     sourceAtAPIsPassThroughS2();
     sourcePickAPIsBecomeDynamicHardwareOps();
     return 0;
