@@ -36,7 +36,12 @@ static FunctionAST parseFixture(const std::string& file) {
     return std::move(build.function.value());
 }
 
-static std::string buildS5DebugFromSource(const std::string& file) {
+struct S5SourceRun {
+    std::string debug;
+    std::size_t summary_count = 0;
+};
+
+static S5SourceRun runS5FromSource(const std::string& file) {
     auto ast = parseFixture(file);
 
     auto validation = pred::s2validate::validateFunctionAST(ast);
@@ -60,12 +65,11 @@ static std::string buildS5DebugFromSource(const std::string& file) {
     CHECK(s5.ok());
     CHECK(s5.program.has_value());
     CHECK(!s5.debug_text.empty());
-    CHECK(s5.summaries.size() == 6);
     CHECK(s5.program->top.loop_regions.empty());
     for (const auto& block : s5.program->top.blocks) {
         CHECK(block->loop_stack.empty());
     }
-    return s5.debug_text;
+    return S5SourceRun{s5.debug_text, s5.summaries.size()};
 }
 
 static void expectContains(const std::string& text, const std::string& needle) {
@@ -95,9 +99,11 @@ static std::size_t countSubstring(const std::string& text, const std::string& ne
 }
 
 static void sourceLoopsUnrollThroughS5() {
-    auto debug = buildS5DebugFromSource(
+    auto run = runS5FromSource(
         "testv2/fixtures/s5unroll/source_control.logic.cpp");
+    const auto& debug = run.debug;
 
+    CHECK(run.summary_count == 6);
     CHECK(countSubstring(debug, "unrolled hls_main loop=") == 6);
     expectContains(debug, "iterations=2");
     expectContains(debug, "iterations=3");
@@ -106,12 +112,37 @@ static void sourceLoopsUnrollThroughS5() {
     expectContains(debug, "Eq(1,");
     expectContains(debug, "Eq(2,");
     expectContains(debug, "Eq(3,");
+    expectContains(debug, "decl __s5_loop_enable_");
+    expectContains(debug, "assign __s5_loop_enable_");
+    expectContains(debug, " = false");
+    expectContains(debug, "term branch __s5_loop_enable_");
+    expectContains(debug, "term branch stop ?");
     expectNotContains(debug, " loop 0 pre_test ");
+    expectNotContains(debug, "backedge");
+    expectNotContains(debug, "continue:");
+}
+
+static void sourceNestedDynamicControlUnrollsThroughS5() {
+    auto run = runS5FromSource(
+        "testv2/fixtures/s5unroll/source_nested_dynamic_control.logic.cpp");
+    const auto& debug = run.debug;
+
+    CHECK(run.summary_count == 2);
+    CHECK(countSubstring(debug, "unrolled hls_main loop=") == 2);
+    expectContains(debug, "iterations=2");
+    expectContains(debug, "iterations=3");
+    CHECK(countSubstring(debug, "decl __s5_loop_enable_") >= 2);
+    CHECK(countSubstring(debug, " = false") >= 2);
+    expectContains(debug, "term branch skip_outer ?");
+    expectContains(debug, "term branch stop_outer ?");
+    expectContains(debug, "term branch skip_inner ?");
+    expectContains(debug, "term branch stop_inner ?");
     expectNotContains(debug, "backedge");
     expectNotContains(debug, "continue:");
 }
 
 int main() {
     sourceLoopsUnrollThroughS5();
+    sourceNestedDynamicControlUnrollsThroughS5();
     return 0;
 }

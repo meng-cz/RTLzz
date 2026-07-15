@@ -1,7 +1,7 @@
 #include <cstdint>
 #include <fixint.hpp>
 
-void hls_main(Int<8> step, Int<8>& out) {
+void hls_main(Int<8> step, bool stop, Int<8>& out) {
     Int<8> acc = Int<8>(0);
 
     for (uint32_t i = 0; i < 3; ++i) {
@@ -15,7 +15,7 @@ void hls_main(Int<8> step, Int<8>& out) {
     }
 
     for (uint32_t i = 0; i < 4; ++i) {
-        if (i == 2) {
+        if (stop) {
             break;
         }
         acc = acc + step;

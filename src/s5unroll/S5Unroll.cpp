@@ -1005,9 +1005,131 @@ void removeLoopId(std::vector<LoopRegionId>& stack, LoopRegionId id) {
     stack.erase(std::remove(stack.begin(), stack.end(), id), stack.end());
 }
 
+std::vector<LoopRegionId> parentLoopStack(const FunctionCFG& fn, const LoopRegion& region) {
+    std::vector<LoopRegionId> out;
+    if (region.body >= 0 && region.body < static_cast<BlockId>(fn.blocks.size())) {
+        out = fn.blocks[static_cast<std::size_t>(region.body)]->loop_stack;
+    }
+    removeLoopId(out, region.id);
+    return out;
+}
+
 bool edgeTargetsLoopBreak(const CFGEdge& edge, const LoopRegion& region) {
     return edge.to == region.exit &&
            (edge.kind == EdgeKind::Break || edge.label == "break");
+}
+
+bool loopHasBreak(const FunctionCFG& fn,
+                  const LoopRegion& region,
+                  const std::set<BlockId>& loop_blocks) {
+    for (BlockId id : loop_blocks) {
+        if (id == region.condition || id == region.condition_prelude) continue;
+        const auto& block = *fn.blocks[static_cast<std::size_t>(id)];
+        for (const auto& edge : block.successors) {
+            if (edgeTargetsLoopBreak(edge, region)) return true;
+        }
+    }
+    return false;
+}
+
+TypeInfo boolType() {
+    TypeInfo type;
+    type.name = "bool";
+    type.width = 1;
+    type.is_signed = false;
+    type.is_hw_int = true;
+    type.hw_kind = "bool";
+    return type;
+}
+
+std::string uniqueSymbolName(const FunctionCFG& fn, const std::string& base) {
+    std::unordered_set<std::string> used;
+    for (const auto& symbol : fn.symbols) used.insert(symbol.name);
+    for (int i = 0;; ++i) {
+        std::string candidate = base + std::to_string(i);
+        if (!used.count(candidate)) return candidate;
+    }
+}
+
+SymbolId createLoopEnableSymbol(FunctionCFG& fn, const LoopRegion& region) {
+    SymbolInfo info;
+    info.id = static_cast<SymbolId>(fn.symbols.size());
+    info.name = uniqueSymbolName(fn,
+        "__s5_loop_enable_" + std::to_string(region.id) + "_");
+    info.type = boolType();
+    info.declaring_scope = 0;
+    if (fn.s3_scopes.empty()) {
+        info.valid_scope_ids.push_back(0);
+    } else {
+        info.valid_scope_ids.reserve(fn.s3_scopes.size());
+        for (const auto& scope : fn.s3_scopes) info.valid_scope_ids.push_back(scope.id);
+    }
+    fn.symbols.push_back(info);
+    return info.id;
+}
+
+const SymbolInfo& symbolInfo(const FunctionCFG& fn, SymbolId symbol) {
+    if (symbol < 0 || symbol >= static_cast<SymbolId>(fn.symbols.size())) {
+        fail("Internal error: invalid symbol id");
+    }
+    return fn.symbols[static_cast<std::size_t>(symbol)];
+}
+
+LValue symbolLValue(const FunctionCFG& fn, SymbolId symbol) {
+    const auto& info = symbolInfo(fn, symbol);
+    LValue out;
+    out.root = info.name;
+    out.root_symbol = symbol;
+    out.type = info.type;
+    return out;
+}
+
+Operand symbolOperand(const FunctionCFG& fn, SymbolId symbol) {
+    const auto& info = symbolInfo(fn, symbol);
+    Operand out;
+    out.kind = OperandKind::Var;
+    out.var_name = info.name;
+    out.var_symbol = symbol;
+    out.type = info.type;
+    return out;
+}
+
+Operand boolLiteral(bool value) {
+    Operand out;
+    out.kind = OperandKind::Literal;
+    out.type = boolType();
+    out.literal_value = value ? "true" : "false";
+    return out;
+}
+
+S3StmtPtr makeSymbolDecl(const FunctionCFG& fn, SymbolId symbol) {
+    const auto& info = symbolInfo(fn, symbol);
+    auto stmt = std::make_shared<S3Stmt>();
+    stmt->kind = S3StmtKind::Decl;
+    stmt->decl_name = info.name;
+    stmt->decl_symbol = symbol;
+    stmt->decl_type = info.type;
+    return stmt;
+}
+
+S3StmtPtr makeSymbolAssign(const FunctionCFG& fn, SymbolId symbol, Operand value) {
+    auto stmt = std::make_shared<S3Stmt>();
+    stmt->kind = S3StmtKind::Assign;
+    stmt->target = symbolLValue(fn, symbol);
+    stmt->value = std::move(value);
+    return stmt;
+}
+
+BasicBlock* appendSyntheticBlock(FunctionCFG& fn,
+                                 std::vector<ScopeId> scope_stack,
+                                 std::vector<LoopRegionId> loop_stack) {
+    auto block = std::make_unique<BasicBlock>();
+    block->id = static_cast<BlockId>(fn.blocks.size());
+    block->scope_stack = std::move(scope_stack);
+    block->loop_stack = std::move(loop_stack);
+    auto* out = block.get();
+    fn.blocks.push_back(std::move(block));
+    return out;
 }
 
 void rewriteTermTarget(Terminator& term, BlockId old_target, BlockId new_target) {
@@ -1038,13 +1160,13 @@ void rewriteCloneTerminatorTargets(Terminator& term,
                                    const std::unordered_map<BlockId, BlockId>& map,
                                    const LoopRegion& region,
                                    BlockId next_entry,
-                                   BlockId loop_exit) {
+                                   BlockId break_target) {
     auto translate = [&](BlockId target) {
         auto it = map.find(target);
         if (it != map.end()) return it->second;
         if (target == region.condition_prelude) return next_entry;
         if (target == region.condition) return next_entry;
-        if (target == region.exit) return loop_exit;
+        if (target == region.exit) return break_target;
         return target;
     };
     term.jump_target = translate(term.jump_target);
@@ -1096,6 +1218,7 @@ int unrollForLoop(FunctionCFG& fn,
                   const LoopAnalysis& analysis,
                   const UnrollOptions& options) {
     auto loop_blocks = blocksInLoop(fn, region.id);
+    bool has_break = loopHasBreak(fn, region, loop_blocks);
     std::vector<BlockId> body_blocks;
     for (BlockId id : loop_blocks) {
         if (id == region.condition || id == region.condition_prelude) continue;
@@ -1110,6 +1233,10 @@ int unrollForLoop(FunctionCFG& fn,
     std::vector<std::unordered_map<BlockId, BlockId>> body_maps;
     body_maps.resize(analysis.values.size());
     int cloned_blocks = 0;
+    std::vector<BlockId> guard_blocks;
+    std::vector<BlockId> break_blocks;
+    BlockId enable_init = -1;
+    SymbolId enable_symbol = -1;
 
     for (std::size_t iter = 0; iter < analysis.values.size(); ++iter) {
         std::unordered_map<ScopeId, ScopeId> scope_map;
@@ -1134,19 +1261,76 @@ int unrollForLoop(FunctionCFG& fn,
         }
     }
 
-    for (std::size_t iter = 0; iter < analysis.values.size(); ++iter) {
-        BlockId next_entry = iter + 1 < analysis.values.size()
-            ? body_maps[iter + 1][region.body]
-            : region.exit;
-        for (const auto& [old, cloned_id] : body_maps[iter]) {
-            auto& cloned = *fn.blocks[static_cast<std::size_t>(cloned_id)];
-            rewriteCloneTerminatorTargets(cloned.terminator, body_maps[iter],
-                                          region, next_entry,
-                                          region.exit);
+    if (has_break && !analysis.values.empty()) {
+        enable_symbol = createLoopEnableSymbol(fn, region);
+        std::vector<LoopRegionId> synthetic_loops = parentLoopStack(fn, region);
+        std::vector<ScopeId> synthetic_scopes;
+        if (region.body >= 0 && region.body < static_cast<BlockId>(fn.blocks.size())) {
+            synthetic_scopes = fn.blocks[static_cast<std::size_t>(region.body)]->scope_stack;
+        }
+
+        auto* init = appendSyntheticBlock(fn, synthetic_scopes, synthetic_loops);
+        enable_init = init->id;
+        init->stmts.push_back(CFGStmt{CFGStmtKind::Decl,
+                                      makeSymbolDecl(fn, enable_symbol)});
+        init->stmts.push_back(CFGStmt{CFGStmtKind::Assign,
+                                      makeSymbolAssign(fn, enable_symbol,
+                                                       boolLiteral(true))});
+        ++cloned_blocks;
+
+        guard_blocks.reserve(analysis.values.size());
+        break_blocks.reserve(analysis.values.size());
+        for (std::size_t iter = 0; iter < analysis.values.size(); ++iter) {
+            auto* guard = appendSyntheticBlock(fn, synthetic_scopes, synthetic_loops);
+            guard_blocks.push_back(guard->id);
+            ++cloned_blocks;
+            auto* breaker = appendSyntheticBlock(fn, synthetic_scopes, synthetic_loops);
+            breaker->stmts.push_back(
+                CFGStmt{CFGStmtKind::Assign,
+                        makeSymbolAssign(fn, enable_symbol, boolLiteral(false))});
+            break_blocks.push_back(breaker->id);
+            ++cloned_blocks;
+        }
+        if (cloned_blocks > options.max_total_cloned_blocks) {
+            fail("Unrolled CFG exceeds max_total_cloned_blocks");
         }
     }
 
-    BlockId first = analysis.values.empty() ? region.exit : body_maps.front()[region.body];
+    for (std::size_t iter = 0; iter < analysis.values.size(); ++iter) {
+        BlockId next_entry = -1;
+        if (iter + 1 < analysis.values.size()) {
+            next_entry = has_break ? guard_blocks[iter + 1]
+                                   : body_maps[iter + 1][region.body];
+        } else {
+            next_entry = region.exit;
+        }
+        BlockId break_target = has_break ? break_blocks[iter] : region.exit;
+        for (const auto& [old, cloned_id] : body_maps[iter]) {
+            auto& cloned = *fn.blocks[static_cast<std::size_t>(cloned_id)];
+            rewriteCloneTerminatorTargets(cloned.terminator, body_maps[iter],
+                                          region, next_entry, break_target);
+        }
+        if (has_break) {
+            auto& guard = *fn.blocks[static_cast<std::size_t>(guard_blocks[iter])];
+            guard.terminator.kind = TermKind::Branch;
+            guard.terminator.condition = symbolOperand(fn, enable_symbol);
+            guard.terminator.true_target = body_maps[iter][region.body];
+            guard.terminator.false_target = next_entry;
+
+            auto& breaker = *fn.blocks[static_cast<std::size_t>(break_blocks[iter])];
+            breaker.terminator.kind = TermKind::Jump;
+            breaker.terminator.jump_target = next_entry;
+        }
+    }
+
+    if (has_break && !analysis.values.empty()) {
+        auto& init = *fn.blocks[static_cast<std::size_t>(enable_init)];
+        init.terminator.kind = TermKind::Jump;
+        init.terminator.jump_target = guard_blocks.front();
+    }
+
+    BlockId first = analysis.values.empty() ? region.exit :
+        (has_break ? enable_init : body_maps.front()[region.body]);
     rewriteExternalPreds(fn, region, first);
     rebuildEdges(fn);
     return cloned_blocks;

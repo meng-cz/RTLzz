@@ -52,6 +52,15 @@ static ParamDecl outputParam(const std::string& name, TypeInfo type) {
     return out;
 }
 
+static ParamDecl inputParam(const std::string& name, TypeInfo type) {
+    ParamDecl out;
+    out.name = name;
+    out.type = std::move(type);
+    out.passing = ParamPassingKind::Value;
+    out.direction = ParamDirection::Input;
+    return out;
+}
+
 static StmtPtr assign(ExprPtr target, ExprPtr value) {
     auto stmt = std::make_shared<Stmt>();
     stmt->kind = StmtKind::Assign;
@@ -160,6 +169,23 @@ static void expectNotContains(const std::string& text, const std::string& needle
     CHECK(text.find(needle) == std::string::npos);
 }
 
+static std::size_t countSubstring(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    std::size_t pos = 0;
+    while ((pos = text.find(needle, pos)) != std::string::npos) {
+        ++count;
+        pos += needle.size();
+    }
+    return count;
+}
+
+static void expectBreakEnableFlag(const std::string& debug) {
+    expectContains(debug, "decl __s5_loop_enable_");
+    expectContains(debug, "assign __s5_loop_enable_");
+    expectContains(debug, " = false");
+    expectContains(debug, "term branch __s5_loop_enable_");
+}
+
 static void verifyNoLoopMetadata(const pred::s4cfg::CFGProgram& program) {
     auto verify_fn = [](const pred::s4cfg::FunctionCFG& fn) {
         CHECK(fn.loop_regions.empty());
@@ -216,6 +242,45 @@ static void nestedLoopsAreUnrolledInsideOut() {
     expectContains(run.debug, "Add(1, 2)");
 }
 
+static void nestedDynamicContinueAndBreakAreMasked() {
+    auto top = baseTop();
+    top.params.insert(top.params.begin(), inputParam("stop_inner", boolType()));
+    top.params.insert(top.params.begin(), inputParam("skip_inner", boolType()));
+    top.params.insert(top.params.begin(), inputParam("stop_outer", boolType()));
+    top.params.insert(top.params.begin(), inputParam("skip_outer", boolType()));
+    top.body.push_back(forStmt("i", 0, 2, {
+        ifStmt(make_var("skip_outer", boolType()), {continueStmt()}),
+        ifStmt(make_var("stop_outer", boolType()), {breakStmt()}),
+        forStmt("j", 0, 3, {
+            ifStmt(make_var("skip_inner", boolType()), {continueStmt()}),
+            ifStmt(make_var("stop_inner", boolType()), {breakStmt()}),
+            assign(make_var("out", uint32Type()),
+                   make_binary("+",
+                               make_var("i", uint32Type()),
+                               make_var("j", uint32Type()),
+                               uint32Type())),
+        }),
+    }));
+
+    auto run = runS5(top);
+    CHECK(run.result.summaries.size() == 2);
+    CHECK(run.result.summaries[0].iterations == 3);
+    CHECK(run.result.summaries[1].iterations == 2);
+    verifyNoLoopMetadata(run.result.program.value());
+    CHECK(countSubstring(run.debug, "decl __s5_loop_enable_") >= 2);
+    CHECK(countSubstring(run.debug, " = false") >= 2);
+    expectContains(run.debug, "term branch skip_outer ?");
+    expectContains(run.debug, "term branch stop_outer ?");
+    expectContains(run.debug, "term branch skip_inner ?");
+    expectContains(run.debug, "term branch stop_inner ?");
+    expectContains(run.debug, "Add(0, 0)");
+    expectContains(run.debug, "Add(0, 2)");
+    expectContains(run.debug, "Add(1, 0)");
+    expectContains(run.debug, "Add(1, 2)");
+    expectNotContains(run.debug, "continue:");
+    expectNotContains(run.debug, "backedge");
+}
+
 static void breakInLoopBodyKeepsExitPathAndRemovesBackedge() {
     auto top = baseTop();
     top.body.push_back(forStmt("i", 0, 5, {
@@ -227,9 +292,29 @@ static void breakInLoopBodyKeepsExitPathAndRemovesBackedge() {
     CHECK(run.result.summaries.size() == 1);
     CHECK(run.result.summaries[0].iterations == 5);
     verifyNoLoopMetadata(run.result.program.value());
+    expectBreakEnableFlag(run.debug);
     expectContains(run.debug, "Eq(2,");
     expectContains(run.debug, "assign out = 0");
     expectContains(run.debug, "assign out = 4");
+    expectNotContains(run.debug, "backedge");
+}
+
+static void dynamicBreakInBranchMasksLaterIterations() {
+    auto top = baseTop();
+    top.params.insert(top.params.begin(), inputParam("stop", boolType()));
+    top.body.push_back(forStmt("i", 0, 4, {
+        ifStmt(make_var("stop", boolType()), {breakStmt()}),
+        assign(make_var("out", uint32Type()), make_var("i", uint32Type())),
+    }));
+
+    auto run = runS5(top);
+    CHECK(run.result.summaries.size() == 1);
+    CHECK(run.result.summaries[0].iterations == 4);
+    verifyNoLoopMetadata(run.result.program.value());
+    expectBreakEnableFlag(run.debug);
+    expectContains(run.debug, "term branch stop ?");
+    expectContains(run.debug, "assign out = 0");
+    expectContains(run.debug, "assign out = 3");
     expectNotContains(run.debug, "backedge");
 }
 
@@ -263,6 +348,7 @@ static void breakAndContinueInBranchesAreBothHandled() {
     CHECK(run.result.summaries.size() == 1);
     CHECK(run.result.summaries[0].iterations == 5);
     verifyNoLoopMetadata(run.result.program.value());
+    expectBreakEnableFlag(run.debug);
     expectContains(run.debug, "Eq(1,");
     expectContains(run.debug, "Eq(3,");
     expectContains(run.debug, "assign out = 0");
@@ -274,7 +360,9 @@ static void breakAndContinueInBranchesAreBothHandled() {
 int main() {
     simpleLoopUnrollsToLiteralIterations();
     nestedLoopsAreUnrolledInsideOut();
+    nestedDynamicContinueAndBreakAreMasked();
     breakInLoopBodyKeepsExitPathAndRemovesBackedge();
+    dynamicBreakInBranchMasksLaterIterations();
     continueInLoopBodyTargetsNextUnrolledIteration();
     breakAndContinueInBranchesAreBothHandled();
     return 0;
