@@ -1,6 +1,7 @@
 #include "s7flatten/S7Flatten.h"
 
 #include <algorithm>
+#include <memory>
 #include <sstream>
 #include <unordered_set>
 #include <utility>
@@ -101,39 +102,36 @@ std::optional<int> literalIndex(const Operand& operand) {
     return std::nullopt;
 }
 
-FlatOperand unknownOperand(TypeInfo type = {}, DebugLoc loc = {}) {
-    FlatOperand out;
-    out.kind = FlatOperandKind::Unknown;
-    out.type = std::move(type);
-    out.debug_loc = std::move(loc);
-    return out;
-}
-
-FlatOperand literalOperand(const Operand& operand) {
-    FlatOperand out;
-    out.kind = FlatOperandKind::Literal;
+S7Operand literalOperand(const Operand& operand) {
+    S7Operand out;
+    out.kind = S7OperandKind::Literal;
     out.type = operand.type;
     out.debug_loc = operand.debug_loc;
     out.literal_value = operand.literal_value;
     return out;
 }
 
-FlatOperand varOperand(const LeafInfo& leaf) {
-    FlatOperand out;
-    out.kind = FlatOperandKind::Var;
+struct LeafInfo {
+    SymbolId id = -1;
+    std::string name;
+    TypeInfo type;
+    std::vector<std::string> path;
+    DebugLoc debug_loc;
+};
+
+struct SymbolLeafMap {
+    SymbolId source_symbol = -1;
+    std::string source_name;
+    TypeInfo source_type;
+    std::vector<LeafInfo> leaves;
+};
+
+S7Operand varOperand(const LeafInfo& leaf) {
+    S7Operand out;
+    out.kind = S7OperandKind::Var;
     out.type = leaf.type;
     out.debug_loc = leaf.debug_loc;
-    out.var_name = leaf.name;
-    out.var_symbol = leaf.id;
-    return out;
-}
-
-FlatOperand varOperand(const SymbolInfo& symbol) {
-    FlatOperand out;
-    out.kind = FlatOperandKind::Var;
-    out.type = symbol.type;
-    out.var_name = symbol.name;
-    out.var_symbol = symbol.id;
+    out.symbol = leaf.id;
     return out;
 }
 
@@ -165,12 +163,12 @@ struct Selection {
 };
 
 struct DynamicSelection {
-    FlatOperand index;
+    S7Operand index;
     std::vector<Selection> choices;
 };
 
 struct Value {
-    std::vector<FlatOperand> operands;
+    std::vector<S7Operand> operands;
     std::shared_ptr<DynamicSelection> dynamic;
     TypeInfo type;
     DebugLoc debug_loc;
@@ -178,7 +176,7 @@ struct Value {
 
 struct Context {
     const InlinedFunction& input;
-    FlattenedFunction output;
+    FlattenedCFG output;
     const std::unordered_map<std::string, std::vector<StructFieldInfo>>& struct_fields;
     const std::unordered_map<std::string, std::vector<StructConstructorInfo>>& constructors;
     FlattenOptions options;
@@ -259,19 +257,17 @@ std::vector<LeafInfo> createLeaves(Context& ctx, const SymbolInfo& source) {
     std::vector<LeafInfo> leaves;
     leaves.reserve(templates.size());
     for (const auto& one : templates) {
-        SymbolInfo symbol;
+        S7Symbol symbol;
         symbol.id = static_cast<SymbolId>(ctx.output.symbols.size());
-        symbol.name = one.path.empty() ? source.name : pathName(source.name, one.path);
+        symbol.debug_name = one.path.empty() ? source.name : pathName(source.name, one.path);
         symbol.type = one.type;
-        symbol.declaring_scope = -1;
-        symbol.source_valid_scope_ids.clear();
-        symbol.is_param = source.is_param;
-        symbol.is_temp = source.is_temp;
+        symbol.role = source.is_temp ? S7SymbolRole::Temp :
+            (source.is_param ? S7SymbolRole::Port : S7SymbolRole::Local);
         ctx.output.symbols.push_back(symbol);
 
         LeafInfo leaf;
         leaf.id = symbol.id;
-        leaf.name = symbol.name;
+        leaf.name = symbol.debug_name;
         leaf.type = symbol.type;
         leaf.path = one.path;
         leaves.push_back(std::move(leaf));
@@ -279,13 +275,84 @@ std::vector<LeafInfo> createLeaves(Context& ctx, const SymbolInfo& source) {
     return leaves;
 }
 
-const SymbolInfo& sourceSymbol(const InlinedFunction& fn, SymbolId id) {
-    if (id < 0 || id >= static_cast<SymbolId>(fn.symbols.size())) {
-        fail("Invalid source symbol id in S7");
+S7UnaryOp convertUnaryOp(UnaryOp op) {
+    switch (op) {
+    case UnaryOp::LogicalNot: return S7UnaryOp::LogicalNot;
+    case UnaryOp::BitNot: return S7UnaryOp::BitNot;
+    case UnaryOp::Negate: return S7UnaryOp::Negate;
+    case UnaryOp::Plus: return S7UnaryOp::Plus;
     }
-    const auto& symbol = fn.symbols[static_cast<std::size_t>(id)];
-    if (symbol.id != id) fail("Broken source symbol table invariant in S7");
-    return symbol;
+    fail("Unknown unary op in S7");
+}
+
+S7BinaryOp convertBinaryOp(BinaryOp op) {
+    switch (op) {
+    case BinaryOp::Add: return S7BinaryOp::Add;
+    case BinaryOp::Sub: return S7BinaryOp::Sub;
+    case BinaryOp::Mul: return S7BinaryOp::Mul;
+    case BinaryOp::Div: return S7BinaryOp::Div;
+    case BinaryOp::Mod: return S7BinaryOp::Mod;
+    case BinaryOp::Shl: return S7BinaryOp::Shl;
+    case BinaryOp::Shr: return S7BinaryOp::Shr;
+    case BinaryOp::BitAnd: return S7BinaryOp::BitAnd;
+    case BinaryOp::BitOr: return S7BinaryOp::BitOr;
+    case BinaryOp::BitXor: return S7BinaryOp::BitXor;
+    case BinaryOp::LogicalAnd: return S7BinaryOp::LogicalAnd;
+    case BinaryOp::LogicalOr: return S7BinaryOp::LogicalOr;
+    case BinaryOp::Eq: return S7BinaryOp::Eq;
+    case BinaryOp::Ne: return S7BinaryOp::Ne;
+    case BinaryOp::Lt: return S7BinaryOp::Lt;
+    case BinaryOp::Le: return S7BinaryOp::Le;
+    case BinaryOp::Gt: return S7BinaryOp::Gt;
+    case BinaryOp::Ge: return S7BinaryOp::Ge;
+    }
+    fail("Unknown binary op in S7");
+}
+
+S7HardwareOp convertHardwareOp(HardwareOp op) {
+    switch (op) {
+    case HardwareOp::ZExt: return S7HardwareOp::ZExt;
+    case HardwareOp::SExt: return S7HardwareOp::SExt;
+    case HardwareOp::Trunc: return S7HardwareOp::Trunc;
+    case HardwareOp::Slice: return S7HardwareOp::Slice;
+    case HardwareOp::BitSelect: return S7HardwareOp::BitSelect;
+    case HardwareOp::DynamicSlice: return S7HardwareOp::DynamicSlice;
+    case HardwareOp::DynamicBitSelect: return S7HardwareOp::DynamicBitSelect;
+    case HardwareOp::WriteSlice: return S7HardwareOp::WriteSlice;
+    case HardwareOp::WriteBit: return S7HardwareOp::WriteBit;
+    case HardwareOp::DynamicWriteSlice: return S7HardwareOp::DynamicWriteSlice;
+    case HardwareOp::DynamicWriteBit: return S7HardwareOp::DynamicWriteBit;
+    case HardwareOp::Concat: return S7HardwareOp::Concat;
+    case HardwareOp::Repeat: return S7HardwareOp::Repeat;
+    case HardwareOp::ReduceOr: return S7HardwareOp::ReduceOr;
+    case HardwareOp::ReduceAnd: return S7HardwareOp::ReduceAnd;
+    case HardwareOp::ReduceXor: return S7HardwareOp::ReduceXor;
+    }
+    fail("Unknown hardware op in S7");
+}
+
+S7OpKind convertOpKind(OpExpr::Kind kind) {
+    switch (kind) {
+    case OpExpr::Kind::Unary: return S7OpKind::Unary;
+    case OpExpr::Kind::Binary: return S7OpKind::Binary;
+    case OpExpr::Kind::Ternary: return S7OpKind::Ternary;
+    case OpExpr::Kind::Cast: return S7OpKind::Cast;
+    case OpExpr::Kind::Hardware: return S7OpKind::Hardware;
+    }
+    fail("Unknown op kind in S7");
+}
+
+S7TermKind convertTermKind(TermKind kind) {
+    switch (kind) {
+    case TermKind::Jump: return S7TermKind::Jump;
+    case TermKind::Branch: return S7TermKind::Branch;
+    case TermKind::Switch: return S7TermKind::Switch;
+    case TermKind::Exit: return S7TermKind::Exit;
+    case TermKind::Unreachable: return S7TermKind::Unreachable;
+    case TermKind::Return:
+        return S7TermKind::Exit;
+    }
+    fail("Unknown terminator kind in S7");
 }
 
 const SymbolLeafMap& leafMap(const Context& ctx, SymbolId source) {
@@ -322,9 +389,9 @@ std::optional<int> indexTokenValue(const std::string& token) {
     }
 }
 
-FlatOperand flattenOperand(Context& ctx,
+S7Operand flattenOperand(Context& ctx,
                            const Operand& operand,
-                           std::vector<FlattenedStmtPtr>& out);
+                           std::vector<S7Stmt>& out);
 
 Selection resolveAccesses(Context& ctx,
                           const std::vector<LeafInfo>& leaves,
@@ -332,7 +399,7 @@ Selection resolveAccesses(Context& ctx,
                           std::size_t access_i,
                           std::vector<std::string> prefix,
                           DebugLoc loc,
-                          std::vector<FlattenedStmtPtr>& out) {
+                          std::vector<S7Stmt>& out) {
     for (; access_i < accesses.size(); ++access_i) {
         const auto& access = accesses[access_i];
         if (access.kind == LValueAccessKind::Field) {
@@ -345,7 +412,7 @@ Selection resolveAccesses(Context& ctx,
             continue;
         }
 
-        FlatOperand index = flattenOperand(ctx, *access.index, out);
+        S7Operand index = flattenOperand(ctx, *access.index, out);
         std::vector<LeafInfo> candidates = filterLeaves(leaves, prefix);
         if (candidates.empty()) fail("Dynamic index has no candidate leaves", loc);
         int max_index = -1;
@@ -415,7 +482,7 @@ bool hasNestedDynamic(const DynamicSelection& dyn) {
 
 Selection resolveLValue(Context& ctx,
                         const LValue& lv,
-                        std::vector<FlattenedStmtPtr>& out) {
+                        std::vector<S7Stmt>& out) {
     const auto& map = leafMap(ctx, lv.root_symbol);
     auto selection = resolveAccesses(ctx, map.leaves, lv.accesses, 0, {},
                                      lv.debug_loc, out);
@@ -423,47 +490,21 @@ Selection resolveLValue(Context& ctx,
     return selection;
 }
 
-FlattenedStmtPtr makeDecl(const LeafInfo& leaf, DebugLoc loc = {}) {
-    auto stmt = std::make_shared<FlattenedStmt>();
-    stmt->kind = FlatStmtKind::Decl;
-    stmt->debug_loc = std::move(loc);
-    stmt->decl_name = leaf.name;
-    stmt->decl_symbol = leaf.id;
-    stmt->decl_type = leaf.type;
+S7Stmt makeAssign(const LeafInfo& leaf, S7Operand value, DebugLoc loc = {}) {
+    S7Stmt stmt;
+    stmt.kind = S7StmtKind::Assign;
+    stmt.debug_loc = std::move(loc);
+    stmt.target = leaf.id;
+    stmt.value = std::move(value);
     return stmt;
 }
 
-FlattenedStmtPtr makeAssign(const LeafInfo& leaf, FlatOperand value, DebugLoc loc = {}) {
-    auto stmt = std::make_shared<FlattenedStmt>();
-    stmt->kind = FlatStmtKind::Assign;
-    stmt->debug_loc = std::move(loc);
-    stmt->target_symbol = leaf.id;
-    stmt->target_name = leaf.name;
-    stmt->target_type = leaf.type;
-    stmt->value = std::move(value);
-    return stmt;
-}
-
-FlattenedStmtPtr makeAssign(SymbolId target, std::string name, TypeInfo type,
-                            FlatOperand value, DebugLoc loc = {}) {
-    auto stmt = std::make_shared<FlattenedStmt>();
-    stmt->kind = FlatStmtKind::Assign;
-    stmt->debug_loc = std::move(loc);
-    stmt->target_symbol = target;
-    stmt->target_name = std::move(name);
-    stmt->target_type = std::move(type);
-    stmt->value = std::move(value);
-    return stmt;
-}
-
-FlattenedStmtPtr makeOp(const LeafInfo& leaf, FlatOpExpr op, DebugLoc loc = {}) {
-    auto stmt = std::make_shared<FlattenedStmt>();
-    stmt->kind = FlatStmtKind::Op;
-    stmt->debug_loc = std::move(loc);
-    stmt->target_symbol = leaf.id;
-    stmt->target_name = leaf.name;
-    stmt->target_type = leaf.type;
-    stmt->op = std::move(op);
+S7Stmt makeOp(const LeafInfo& leaf, S7Operation op, DebugLoc loc = {}) {
+    S7Stmt stmt;
+    stmt.kind = S7StmtKind::Op;
+    stmt.debug_loc = std::move(loc);
+    stmt.target = leaf.id;
+    stmt.op = std::move(op);
     return stmt;
 }
 
@@ -471,65 +512,62 @@ LeafInfo createTemp(Context& ctx, TypeInfo type, const std::string& hint) {
     if (static_cast<int>(ctx.output.symbols.size() + 1) > ctx.options.max_leaf_symbols) {
         fail("S7 leaf symbol limit exceeded while creating temporary");
     }
-    SymbolInfo symbol;
+    S7Symbol symbol;
     symbol.id = static_cast<SymbolId>(ctx.output.symbols.size());
-    symbol.name = "__s7_flatten_" + hint + "_" + std::to_string(ctx.temp_counter++);
+    symbol.debug_name = "__s7_flatten_" + hint + "_" + std::to_string(ctx.temp_counter++);
     symbol.type = canonicalize_bool_type(std::move(type));
-    symbol.is_temp = true;
+    symbol.role = S7SymbolRole::Temp;
     ctx.output.symbols.push_back(symbol);
 
     LeafInfo leaf;
     leaf.id = symbol.id;
-    leaf.name = symbol.name;
+    leaf.name = symbol.debug_name;
     leaf.type = symbol.type;
     return leaf;
 }
 
-FlattenedStmtPtr makeLookup(const LeafInfo& target,
-                            FlatOperand index,
-                            std::vector<FlatOperand> elements,
+S7Stmt makeLookup(const LeafInfo& target,
+                            S7Operand index,
+                            std::vector<S7Operand> elements,
                             DebugLoc loc = {}) {
-    auto stmt = std::make_shared<FlattenedStmt>();
-    stmt->kind = FlatStmtKind::Lookup;
-    stmt->debug_loc = std::move(loc);
-    stmt->target_symbol = target.id;
-    stmt->target_name = target.name;
-    stmt->target_type = target.type;
-    stmt->lookup_index = std::move(index);
-    stmt->lookup_elements = std::move(elements);
+    S7Stmt stmt;
+    stmt.kind = S7StmtKind::Lookup;
+    stmt.debug_loc = std::move(loc);
+    stmt.target = target.id;
+    stmt.lookup_index = std::move(index);
+    stmt.lookup_elements = std::move(elements);
     return stmt;
 }
 
-FlattenedStmtPtr makeLookupWrite(std::vector<LeafInfo> targets,
-                                 FlatOperand index,
-                                 FlatOperand value,
-                                 std::vector<FlatOperand> old_values,
+S7Stmt makeLookupWrite(std::vector<LeafInfo> targets,
+                                 S7Operand index,
+                                 S7Operand value,
+                                 std::vector<S7Operand> old_values,
                                  DebugLoc loc = {}) {
-    auto stmt = std::make_shared<FlattenedStmt>();
-    stmt->kind = FlatStmtKind::LookupWrite;
-    stmt->debug_loc = std::move(loc);
-    stmt->lookup_index = std::move(index);
-    stmt->lookup_value = std::move(value);
-    stmt->lookup_elements = std::move(old_values);
+    S7Stmt stmt;
+    stmt.kind = S7StmtKind::LookupWrite;
+    stmt.debug_loc = std::move(loc);
+    stmt.lookup_index = std::move(index);
+    stmt.lookup_value = std::move(value);
+    stmt.lookup_elements = std::move(old_values);
     for (const auto& leaf : targets) {
-        stmt->lookup_write_target_symbols.push_back(leaf.id);
-        stmt->lookup_write_target_names.push_back(leaf.name);
+        stmt.lookup_write_targets.push_back(leaf.id);
     }
     return stmt;
 }
 
-FlatOperand materializeSelectionRead(Context& ctx,
+S7Operand materializeSelectionRead(Context& ctx,
                                      const Selection& selection,
                                      std::size_t leaf_index,
-                                     std::vector<FlattenedStmtPtr>& out,
+                                     std::vector<S7Stmt>& out,
                                      DebugLoc loc);
 
-FlatOperand materializeDynamicRead(Context& ctx,
+S7Operand materializeDynamicRead(Context& ctx,
                                    const DynamicSelection& dyn,
                                    std::size_t leaf_index,
-                                   std::vector<FlattenedStmtPtr>& out,
+                                   std::vector<S7Stmt>& out,
                                    DebugLoc loc) {
-    std::vector<FlatOperand> elements;
+    std::vector<S7Operand> elements;
     elements.reserve(dyn.choices.size());
     TypeInfo type;
     for (const auto& choice : dyn.choices) {
@@ -538,7 +576,6 @@ FlatOperand materializeDynamicRead(Context& ctx,
         elements.push_back(std::move(elem));
     }
     LeafInfo temp = createTemp(ctx, type, "lookup");
-    out.push_back(makeDecl(temp, loc));
     out.push_back(makeLookup(temp, dyn.index, std::move(elements), loc));
     ++ctx.summary.dynamic_reads;
     return varOperand(temp);
@@ -548,9 +585,9 @@ void materializeDynamicReadInto(Context& ctx,
                                 const DynamicSelection& dyn,
                                 std::size_t leaf_index,
                                 const LeafInfo& target,
-                                std::vector<FlattenedStmtPtr>& out,
+                                std::vector<S7Stmt>& out,
                                 DebugLoc loc) {
-    std::vector<FlatOperand> elements;
+    std::vector<S7Operand> elements;
     elements.reserve(dyn.choices.size());
     for (const auto& choice : dyn.choices) {
         elements.push_back(materializeSelectionRead(ctx, choice, leaf_index, out, loc));
@@ -559,10 +596,10 @@ void materializeDynamicReadInto(Context& ctx,
     ++ctx.summary.dynamic_reads;
 }
 
-FlatOperand materializeSelectionRead(Context& ctx,
+S7Operand materializeSelectionRead(Context& ctx,
                                      const Selection& selection,
                                      std::size_t leaf_index,
-                                     std::vector<FlattenedStmtPtr>& out,
+                                     std::vector<S7Stmt>& out,
                                      DebugLoc loc) {
     if (selection.dynamic) {
         return materializeDynamicRead(ctx, *selection.dynamic, leaf_index, out, loc);
@@ -573,7 +610,7 @@ FlatOperand materializeSelectionRead(Context& ctx,
     return varOperand(selection.leaves[leaf_index]);
 }
 
-Value flattenValue(Context& ctx, const Operand& operand, std::vector<FlattenedStmtPtr>& out) {
+Value flattenValue(Context& ctx, const Operand& operand, std::vector<S7Stmt>& out) {
     Value value;
     value.type = operand.type;
     value.debug_loc = operand.debug_loc;
@@ -599,9 +636,9 @@ Value flattenValue(Context& ctx, const Operand& operand, std::vector<FlattenedSt
     return value;
 }
 
-FlatOperand flattenOperand(Context& ctx,
+S7Operand flattenOperand(Context& ctx,
                            const Operand& operand,
-                           std::vector<FlattenedStmtPtr>& out) {
+                           std::vector<S7Stmt>& out) {
     Value value = flattenValue(ctx, operand, out);
     if (value.dynamic) {
         return materializeDynamicRead(ctx, *value.dynamic, 0, out, operand.debug_loc);
@@ -613,11 +650,11 @@ FlatOperand flattenOperand(Context& ctx,
     return value.operands.front();
 }
 
-std::vector<FlatOperand> flattenOpOperands(Context& ctx,
+std::vector<S7Operand> flattenOpOperands(Context& ctx,
                                            const std::vector<Operand>& operands,
-                                           std::vector<FlattenedStmtPtr>& out,
+                                           std::vector<S7Stmt>& out,
                                            DebugLoc loc) {
-    std::vector<FlatOperand> flat;
+    std::vector<S7Operand> flat;
     flat.reserve(operands.size());
     for (const auto& operand : operands) {
         Value value = flattenValue(ctx, operand, out);
@@ -636,36 +673,34 @@ std::vector<FlatOperand> flattenOpOperands(Context& ctx,
 std::vector<LeafInfo> createTempLeavesLike(Context& ctx,
                                            const std::vector<LeafInfo>& source,
                                            const std::string& hint,
-                                           std::vector<FlattenedStmtPtr>& out,
+                                           std::vector<S7Stmt>& out,
                                            DebugLoc loc) {
     std::vector<LeafInfo> temps;
     temps.reserve(source.size());
     for (const auto& leaf : source) {
         LeafInfo temp = createTemp(ctx, leaf.type, hint);
-        out.push_back(makeDecl(temp, loc));
         temps.push_back(std::move(temp));
     }
     return temps;
 }
 
-FlatOperand makeLookupTemp(Context& ctx,
-                           FlatOperand index,
-                           std::vector<FlatOperand> elements,
+S7Operand makeLookupTemp(Context& ctx,
+                           S7Operand index,
+                           std::vector<S7Operand> elements,
                            DebugLoc loc,
-                           std::vector<FlattenedStmtPtr>& out) {
+                           std::vector<S7Stmt>& out) {
     TypeInfo type = elements.empty() ? TypeInfo{} : elements.front().type;
     LeafInfo temp = createTemp(ctx, type, "lookup");
-    out.push_back(makeDecl(temp, loc));
     out.push_back(makeLookup(temp, std::move(index), std::move(elements), loc));
     ++ctx.summary.dynamic_reads;
     return varOperand(temp);
 }
 
-std::vector<FlatOperand> applySelectionWrite(Context& ctx,
+std::vector<S7Operand> applySelectionWrite(Context& ctx,
                                              const Selection& selection,
-                                             const std::vector<FlatOperand>& values,
+                                             const std::vector<S7Operand>& values,
                                              bool actual_targets,
-                                             std::vector<FlattenedStmtPtr>& out,
+                                             std::vector<S7Stmt>& out,
                                              DebugLoc loc) {
     if (!selection.dynamic) {
         if (selection.leaves.size() != values.size()) {
@@ -675,7 +710,7 @@ std::vector<FlatOperand> applySelectionWrite(Context& ctx,
             for (std::size_t i = 0; i < selection.leaves.size(); ++i) {
                 out.push_back(makeAssign(selection.leaves[i], values[i], loc));
             }
-            std::vector<FlatOperand> result;
+            std::vector<S7Operand> result;
             result.reserve(selection.leaves.size());
             for (const auto& leaf : selection.leaves) result.push_back(varOperand(leaf));
             return result;
@@ -692,11 +727,11 @@ std::vector<FlatOperand> applySelectionWrite(Context& ctx,
 
     if (!hasNestedDynamic(dyn)) {
         std::size_t choice_count = dyn.choices.size();
-        std::vector<FlatOperand> result(choice_count * width);
+        std::vector<S7Operand> result(choice_count * width);
         for (std::size_t leaf_i = 0; leaf_i < width; ++leaf_i) {
             std::vector<LeafInfo> old_targets;
             old_targets.reserve(choice_count);
-            std::vector<FlatOperand> old_values;
+            std::vector<S7Operand> old_values;
             old_values.reserve(choice_count);
             for (const auto& choice : dyn.choices) {
                 if (leaf_i >= choice.leaves.size()) {
@@ -718,7 +753,7 @@ std::vector<FlatOperand> applySelectionWrite(Context& ctx,
         return result;
     }
 
-    std::vector<std::vector<FlatOperand>> candidates;
+    std::vector<std::vector<S7Operand>> candidates;
     std::vector<std::vector<LeafInfo>> old_leaf_groups;
     candidates.reserve(dyn.choices.size());
     old_leaf_groups.reserve(dyn.choices.size());
@@ -740,20 +775,20 @@ std::vector<FlatOperand> applySelectionWrite(Context& ctx,
         old_leaf_groups.push_back(std::move(old_leaves));
     }
 
-    std::vector<FlatOperand> result(dyn.choices.size() * child_leaf_count);
+    std::vector<S7Operand> result(dyn.choices.size() * child_leaf_count);
     for (std::size_t leaf_i = 0; leaf_i < child_leaf_count; ++leaf_i) {
-        std::vector<FlatOperand> candidate_values;
+        std::vector<S7Operand> candidate_values;
         candidate_values.reserve(candidates.size());
         std::vector<LeafInfo> old_targets;
         old_targets.reserve(old_leaf_groups.size());
-        std::vector<FlatOperand> old_values;
+        std::vector<S7Operand> old_values;
         old_values.reserve(old_leaf_groups.size());
         for (std::size_t choice_i = 0; choice_i < candidates.size(); ++choice_i) {
             candidate_values.push_back(candidates[choice_i][leaf_i]);
             old_targets.push_back(old_leaf_groups[choice_i][leaf_i]);
             old_values.push_back(varOperand(old_leaf_groups[choice_i][leaf_i]));
         }
-        FlatOperand selected_value = makeLookupTemp(ctx, dyn.index, std::move(candidate_values),
+        S7Operand selected_value = makeLookupTemp(ctx, dyn.index, std::move(candidate_values),
                                                     loc, out);
         std::vector<LeafInfo> targets = actual_targets
             ? old_targets
@@ -771,13 +806,13 @@ std::vector<FlatOperand> applySelectionWrite(Context& ctx,
 void lowerAssign(Context& ctx,
                  const LValue& target,
                  const Operand& value,
-                 std::vector<FlattenedStmtPtr>& out,
+                 std::vector<S7Stmt>& out,
                  DebugLoc loc) {
     Selection lhs = resolveLValue(ctx, target, out);
     Value rhs = flattenValue(ctx, value, out);
     if (lhs.dynamic) {
         std::size_t width = selectionWidth(lhs);
-        std::vector<FlatOperand> values;
+        std::vector<S7Operand> values;
         values.reserve(width);
         if (rhs.dynamic) {
             for (std::size_t i = 0; i < width; ++i) {
@@ -810,11 +845,11 @@ void lowerAssign(Context& ctx,
 
 void lowerOp(Context& ctx,
              const S3Stmt& stmt,
-             std::vector<FlattenedStmtPtr>& out) {
+             std::vector<S7Stmt>& out) {
     Selection target = resolveLValue(ctx, stmt.target, out);
     if (stmt.op.kind == OpExpr::Kind::Ternary && target.leaves.size() > 1) {
         if (stmt.op.operands.size() != 3) fail("Malformed ternary op", stmt.debug_loc);
-        FlatOperand cond = flattenOperand(ctx, stmt.op.operands[0], out);
+        S7Operand cond = flattenOperand(ctx, stmt.op.operands[0], out);
         Value then_value = flattenValue(ctx, stmt.op.operands[1], out);
         Value else_value = flattenValue(ctx, stmt.op.operands[2], out);
         if (then_value.dynamic || else_value.dynamic) {
@@ -825,9 +860,8 @@ void lowerOp(Context& ctx,
             fail("Aggregate ternary shape mismatch", stmt.debug_loc);
         }
         for (std::size_t i = 0; i < target.leaves.size(); ++i) {
-            FlatOpExpr op;
-            op.kind = FlatOpExpr::Kind::Ternary;
-            op.type = target.leaves[i].type;
+            S7Operation op;
+            op.kind = S7OpKind::Ternary;
             op.debug_loc = stmt.op.debug_loc;
             op.operands.push_back(cond);
             op.operands.push_back(then_value.operands[i]);
@@ -838,13 +872,12 @@ void lowerOp(Context& ctx,
     }
     if (target.dynamic) fail("Operation target may not be a dynamic array element", stmt.debug_loc);
     if (target.leaves.size() != 1) fail("Non-ternary operation target is aggregate", stmt.debug_loc);
-    FlatOpExpr op;
-    op.kind = static_cast<FlatOpExpr::Kind>(stmt.op.kind);
-    op.type = stmt.op.type;
+    S7Operation op;
+    op.kind = convertOpKind(stmt.op.kind);
     op.debug_loc = stmt.op.debug_loc;
-    op.unary_op = stmt.op.unary_op;
-    op.binary_op = stmt.op.binary_op;
-    op.hardware_op = stmt.op.hardware_op;
+    op.unary_op = convertUnaryOp(stmt.op.unary_op);
+    op.binary_op = convertBinaryOp(stmt.op.binary_op);
+    op.hardware_op = convertHardwareOp(stmt.op.hardware_op);
     op.cast_type = stmt.op.cast_type;
     op.hi = stmt.op.hi;
     op.lo = stmt.op.lo;
@@ -855,11 +888,11 @@ void lowerOp(Context& ctx,
     out.push_back(makeOp(target.leaves.front(), std::move(op), stmt.debug_loc));
 }
 
-std::optional<std::vector<FlatOperand>> argsByConstructorMetadata(
+std::optional<std::vector<S7Operand>> argsByConstructorMetadata(
     Context& ctx,
     const S3Stmt& stmt,
     const std::vector<LeafInfo>& target_leaves,
-    std::vector<FlattenedStmtPtr>& out) {
+    std::vector<S7Stmt>& out) {
     auto it = ctx.constructors.find(stmt.callee);
     if (it == ctx.constructors.end()) {
         it = ctx.constructors.find(canonicalName(stmt.callee));
@@ -873,24 +906,23 @@ std::optional<std::vector<FlatOperand>> argsByConstructorMetadata(
         }
     }
     if (!matched) return std::nullopt;
-    std::unordered_map<std::string, FlatOperand> by_param;
+    std::unordered_map<std::string, S7Operand> by_param;
     for (std::size_t i = 0; i < matched->param_names.size(); ++i) {
         by_param[matched->param_names[i]] = flattenOperand(ctx, stmt.args[i], out);
     }
-    std::vector<FlatOperand> values;
+    std::vector<S7Operand> values;
     values.reserve(target_leaves.size());
     for (const auto& leaf : target_leaves) {
         if (leaf.path.empty()) return std::nullopt;
         const std::string& field = leaf.path.front();
         auto map_it = matched->field_to_param.find(field);
         if (map_it == matched->field_to_param.end()) {
-            values.push_back(unknownOperand(leaf.type, stmt.debug_loc));
-            continue;
+            fail("Constructor metadata does not bind field '" + field + "'", stmt.debug_loc);
         }
         auto param_it = by_param.find(map_it->second);
         if (param_it == by_param.end()) {
-            values.push_back(unknownOperand(leaf.type, stmt.debug_loc));
-            continue;
+            fail("Constructor metadata references missing parameter '" +
+                 map_it->second + "'", stmt.debug_loc);
         }
         values.push_back(param_it->second);
     }
@@ -899,7 +931,7 @@ std::optional<std::vector<FlatOperand>> argsByConstructorMetadata(
 
 void lowerConstruct(Context& ctx,
                     const S3Stmt& stmt,
-                    std::vector<FlattenedStmtPtr>& out) {
+                    std::vector<S7Stmt>& out) {
     Selection target = resolveLValue(ctx, stmt.target, out);
     if (target.dynamic) fail("Construct target may not be dynamic array element", stmt.debug_loc);
     if (target.leaves.empty()) return;
@@ -920,7 +952,7 @@ void lowerConstruct(Context& ctx,
         }
         return;
     }
-    std::vector<FlatOperand> values;
+    std::vector<S7Operand> values;
     for (const auto& arg : stmt.args) {
         Value v = flattenValue(ctx, arg, out);
         if (v.dynamic) fail("Constructor argument may not be dynamic aggregate read", stmt.debug_loc);
@@ -936,15 +968,12 @@ void lowerConstruct(Context& ctx,
 
 void lowerStmt(Context& ctx,
                const CFGStmt& cfg_stmt,
-               std::vector<FlattenedStmtPtr>& out) {
+               std::vector<S7Stmt>& out) {
     if (!cfg_stmt.stmt) return;
     const S3Stmt& stmt = *cfg_stmt.stmt;
     switch (stmt.kind) {
-    case S3StmtKind::Decl: {
-        const auto& map = leafMap(ctx, stmt.decl_symbol);
-        for (const auto& leaf : map.leaves) out.push_back(makeDecl(leaf, stmt.debug_loc));
+    case S3StmtKind::Decl:
         return;
-    }
     case S3StmtKind::Assign:
         lowerAssign(ctx, stmt.target, stmt.value, out, stmt.debug_loc);
         return;
@@ -954,15 +983,8 @@ void lowerStmt(Context& ctx,
     case S3StmtKind::Construct:
         lowerConstruct(ctx, stmt, out);
         return;
-    case S3StmtKind::Eval: {
-        auto value = flattenOperand(ctx, stmt.value, out);
-        auto flat = std::make_shared<FlattenedStmt>();
-        flat->kind = FlatStmtKind::Eval;
-        flat->debug_loc = stmt.debug_loc;
-        flat->value = std::move(value);
-        out.push_back(flat);
+    case S3StmtKind::Eval:
         return;
-    }
     case S3StmtKind::Call:
         fail("S7 expects all calls to be inlined before flatten", stmt.debug_loc);
     default:
@@ -970,23 +992,11 @@ void lowerStmt(Context& ctx,
     }
 }
 
-FlattenedEdge flattenEdge(Context& ctx,
-                          const CFGEdge& edge,
-                          std::vector<FlattenedStmtPtr>& prelude) {
-    FlattenedEdge out;
-    out.from = edge.from;
-    out.to = edge.to;
-    out.kind = edge.kind;
-    out.label = edge.label;
-    if (edge.case_value) out.case_value = flattenOperand(ctx, edge.case_value.value(), prelude);
-    return out;
-}
-
-FlattenedTerminator flattenTerminator(Context& ctx,
+S7Terminator flattenTerminator(Context& ctx,
                                       const Terminator& term,
-                                      std::vector<FlattenedStmtPtr>& prelude) {
-    FlattenedTerminator out;
-    out.kind = term.kind;
+                                      std::vector<S7Stmt>& prelude) {
+    S7Terminator out;
+    out.kind = convertTermKind(term.kind);
     out.jump_target = term.jump_target;
     out.true_target = term.true_target;
     out.false_target = term.false_target;
@@ -998,19 +1008,14 @@ FlattenedTerminator flattenTerminator(Context& ctx,
     case TermKind::Switch:
         out.switch_value = flattenOperand(ctx, term.switch_value, prelude);
         for (const auto& target : term.switch_targets) {
-            FlattenedSwitchTarget ft;
+            S7SwitchTarget ft;
             ft.target = target.target;
             if (target.value) ft.value = flattenOperand(ctx, target.value.value(), prelude);
             out.switch_targets.push_back(std::move(ft));
         }
         break;
     case TermKind::Return:
-        if (term.return_value) {
-            Value value = flattenValue(ctx, term.return_value.value(), prelude);
-            if (value.dynamic) fail("Return value may not be dynamic aggregate read");
-            if (value.operands.size() != 1) fail("Aggregate return reached S7");
-            out.return_value = value.operands.front();
-        }
+        if (term.return_value) fail("Return value reached S7 after S6 inline");
         break;
     case TermKind::Jump:
     case TermKind::Unreachable:
@@ -1022,10 +1027,8 @@ FlattenedTerminator flattenTerminator(Context& ctx,
 
 void buildSymbolMaps(Context& ctx) {
     ctx.output.name = ctx.input.name;
-    ctx.output.return_type = ctx.input.return_type;
     ctx.output.entry = ctx.input.entry;
     ctx.output.exit = ctx.input.exit;
-    ctx.output.params = ctx.input.params;
 
     std::unordered_set<SymbolId> param_symbols;
     for (const auto& param : ctx.input.params) {
@@ -1046,29 +1049,35 @@ void buildSymbolMaps(Context& ctx) {
         if (map.leaves.size() > 1) ++ctx.summary.aggregate_symbols;
         ctx.summary.leaf_symbols += static_cast<int>(map.leaves.size());
         if (param_symbols.count(symbol.id)) {
-            FlattenedPort port;
-            port.source_name = symbol.name;
-            port.source_type = symbol.type;
-            port.leaves = map.leaves;
+            ParamDirection direction = ParamDirection::Input;
+            ParamPassingKind passing = ParamPassingKind::Value;
             for (const auto& param : ctx.input.params) {
                 if (param.name == symbol.name) {
-                    port.direction = param.direction;
-                    port.passing = param.passing;
+                    direction = param.direction;
+                    passing = param.passing;
                     break;
                 }
             }
-            ctx.output.ports.push_back(std::move(port));
+            for (const auto& leaf : map.leaves) {
+                if (leaf.id >= 0 && leaf.id < static_cast<SymbolId>(ctx.output.symbols.size())) {
+                    ctx.output.symbols[static_cast<std::size_t>(leaf.id)].role = S7SymbolRole::Port;
+                }
+                S7Port port;
+                port.symbol = leaf.id;
+                port.direction = direction;
+                port.passing = passing;
+                ctx.output.ports.push_back(port);
+            }
         }
-        ctx.output.symbol_leaf_maps.push_back(map);
         ctx.maps[symbol.id] = std::move(map);
     }
 }
 
-FlattenedFunction flattenFunction(const InlinedFunction& fn,
-                                  const std::unordered_map<std::string, std::vector<StructFieldInfo>>& structs,
-                                  const std::unordered_map<std::string, std::vector<StructConstructorInfo>>& constructors,
-                                  const FlattenOptions& options,
-                                  FlattenSummary& summary) {
+FlattenedCFG flattenFunction(const InlinedFunction& fn,
+                             const std::unordered_map<std::string, std::vector<StructFieldInfo>>& structs,
+                             const std::unordered_map<std::string, std::vector<StructConstructorInfo>>& constructors,
+                             const FlattenOptions& options,
+                             FlattenSummary& summary) {
     Context ctx{fn, {}, structs, constructors, options};
     ctx.summary.function_name = fn.name;
     if (fn.return_slot || fn.return_slot_symbol >= 0) {
@@ -1077,146 +1086,148 @@ FlattenedFunction flattenFunction(const InlinedFunction& fn,
     buildSymbolMaps(ctx);
     for (const auto& block : fn.blocks) {
         if (!block) continue;
-        auto out_block = std::make_unique<FlattenedBasicBlock>();
-        out_block->id = block->id;
-        for (const auto& stmt : block->stmts) lowerStmt(ctx, stmt, out_block->stmts);
-        out_block->terminator = flattenTerminator(ctx, block->terminator, out_block->stmts);
-        for (const auto& edge : block->successors) {
-            out_block->successors.push_back(flattenEdge(ctx, edge, out_block->stmts));
-        }
-        for (const auto& edge : block->predecessors) {
-            out_block->predecessors.push_back(flattenEdge(ctx, edge, out_block->stmts));
-        }
+        S7BasicBlock out_block;
+        out_block.id = block->id;
+        for (const auto& stmt : block->stmts) lowerStmt(ctx, stmt, out_block.stmts);
+        out_block.terminator = flattenTerminator(ctx, block->terminator, out_block.stmts);
         ctx.output.blocks.push_back(std::move(out_block));
     }
     summary = ctx.summary;
     return std::move(ctx.output);
 }
 
-std::string operandText(const FlatOperand& operand) {
+const S7Symbol& symbolAt(const FlattenedCFG& fn, SymbolId id) {
+    if (id < 0 || id >= static_cast<SymbolId>(fn.symbols.size())) {
+        fail("Invalid S7 symbol reference");
+    }
+    return fn.symbols[static_cast<std::size_t>(id)];
+}
+
+std::string symbolName(const FlattenedCFG& fn, SymbolId id) {
+    return symbolAt(fn, id).debug_name;
+}
+
+std::string operandText(const FlattenedCFG& fn, const S7Operand& operand) {
     switch (operand.kind) {
-    case FlatOperandKind::Literal: return operand.literal_value;
-    case FlatOperandKind::Var: return operand.var_name;
-    case FlatOperandKind::Unknown: return "unknown";
+    case S7OperandKind::Literal: return operand.literal_value;
+    case S7OperandKind::Var: return symbolName(fn, operand.symbol);
     }
     return "<operand>";
 }
 
-std::string unaryName(UnaryOp op) {
+std::string unaryName(S7UnaryOp op) {
     switch (op) {
-    case UnaryOp::LogicalNot: return "LogicalNot";
-    case UnaryOp::BitNot: return "BitNot";
-    case UnaryOp::Negate: return "Negate";
-    case UnaryOp::Plus: return "Plus";
+    case S7UnaryOp::LogicalNot: return "LogicalNot";
+    case S7UnaryOp::BitNot: return "BitNot";
+    case S7UnaryOp::Negate: return "Negate";
+    case S7UnaryOp::Plus: return "Plus";
     }
     return "Unary";
 }
 
-std::string binaryName(BinaryOp op) {
+std::string binaryName(S7BinaryOp op) {
     switch (op) {
-    case BinaryOp::Add: return "Add";
-    case BinaryOp::Sub: return "Sub";
-    case BinaryOp::Mul: return "Mul";
-    case BinaryOp::Div: return "Div";
-    case BinaryOp::Mod: return "Mod";
-    case BinaryOp::Shl: return "Shl";
-    case BinaryOp::Shr: return "Shr";
-    case BinaryOp::BitAnd: return "BitAnd";
-    case BinaryOp::BitOr: return "BitOr";
-    case BinaryOp::BitXor: return "BitXor";
-    case BinaryOp::LogicalAnd: return "LogicalAnd";
-    case BinaryOp::LogicalOr: return "LogicalOr";
-    case BinaryOp::Eq: return "Eq";
-    case BinaryOp::Ne: return "Ne";
-    case BinaryOp::Lt: return "Lt";
-    case BinaryOp::Le: return "Le";
-    case BinaryOp::Gt: return "Gt";
-    case BinaryOp::Ge: return "Ge";
+    case S7BinaryOp::Add: return "Add";
+    case S7BinaryOp::Sub: return "Sub";
+    case S7BinaryOp::Mul: return "Mul";
+    case S7BinaryOp::Div: return "Div";
+    case S7BinaryOp::Mod: return "Mod";
+    case S7BinaryOp::Shl: return "Shl";
+    case S7BinaryOp::Shr: return "Shr";
+    case S7BinaryOp::BitAnd: return "BitAnd";
+    case S7BinaryOp::BitOr: return "BitOr";
+    case S7BinaryOp::BitXor: return "BitXor";
+    case S7BinaryOp::LogicalAnd: return "LogicalAnd";
+    case S7BinaryOp::LogicalOr: return "LogicalOr";
+    case S7BinaryOp::Eq: return "Eq";
+    case S7BinaryOp::Ne: return "Ne";
+    case S7BinaryOp::Lt: return "Lt";
+    case S7BinaryOp::Le: return "Le";
+    case S7BinaryOp::Gt: return "Gt";
+    case S7BinaryOp::Ge: return "Ge";
     }
     return "Binary";
 }
 
-std::string hardwareName(HardwareOp op) {
+std::string hardwareName(S7HardwareOp op) {
     switch (op) {
-    case HardwareOp::ZExt: return "ZExt";
-    case HardwareOp::SExt: return "SExt";
-    case HardwareOp::Trunc: return "Trunc";
-    case HardwareOp::Slice: return "Slice";
-    case HardwareOp::BitSelect: return "BitSelect";
-    case HardwareOp::DynamicSlice: return "DynamicSlice";
-    case HardwareOp::DynamicBitSelect: return "DynamicBitSelect";
-    case HardwareOp::WriteSlice: return "WriteSlice";
-    case HardwareOp::WriteBit: return "WriteBit";
-    case HardwareOp::DynamicWriteSlice: return "DynamicWriteSlice";
-    case HardwareOp::DynamicWriteBit: return "DynamicWriteBit";
-    case HardwareOp::Concat: return "Concat";
-    case HardwareOp::Repeat: return "Repeat";
-    case HardwareOp::ReduceOr: return "ReduceOr";
-    case HardwareOp::ReduceAnd: return "ReduceAnd";
-    case HardwareOp::ReduceXor: return "ReduceXor";
+    case S7HardwareOp::ZExt: return "ZExt";
+    case S7HardwareOp::SExt: return "SExt";
+    case S7HardwareOp::Trunc: return "Trunc";
+    case S7HardwareOp::Slice: return "Slice";
+    case S7HardwareOp::BitSelect: return "BitSelect";
+    case S7HardwareOp::DynamicSlice: return "DynamicSlice";
+    case S7HardwareOp::DynamicBitSelect: return "DynamicBitSelect";
+    case S7HardwareOp::WriteSlice: return "WriteSlice";
+    case S7HardwareOp::WriteBit: return "WriteBit";
+    case S7HardwareOp::DynamicWriteSlice: return "DynamicWriteSlice";
+    case S7HardwareOp::DynamicWriteBit: return "DynamicWriteBit";
+    case S7HardwareOp::Concat: return "Concat";
+    case S7HardwareOp::Repeat: return "Repeat";
+    case S7HardwareOp::ReduceOr: return "ReduceOr";
+    case S7HardwareOp::ReduceAnd: return "ReduceAnd";
+    case S7HardwareOp::ReduceXor: return "ReduceXor";
     }
     return "Hardware";
 }
 
-std::string opText(const FlatOpExpr& op) {
+std::string opText(const FlattenedCFG& fn, const S7Operation& op) {
     std::ostringstream os;
-    if (op.kind == FlatOpExpr::Kind::Unary) os << unaryName(op.unary_op);
-    else if (op.kind == FlatOpExpr::Kind::Binary) os << binaryName(op.binary_op);
-    else if (op.kind == FlatOpExpr::Kind::Ternary) os << "Ternary";
-    else if (op.kind == FlatOpExpr::Kind::Cast) os << "Cast";
+    if (op.kind == S7OpKind::Unary) os << unaryName(op.unary_op);
+    else if (op.kind == S7OpKind::Binary) os << binaryName(op.binary_op);
+    else if (op.kind == S7OpKind::Ternary) os << "Ternary";
+    else if (op.kind == S7OpKind::Cast) os << "Cast";
     else os << hardwareName(op.hardware_op);
     os << "(";
     for (std::size_t i = 0; i < op.operands.size(); ++i) {
         if (i) os << ", ";
-        os << operandText(op.operands[i]);
+        os << operandText(fn, op.operands[i]);
     }
     os << ")";
     return os.str();
 }
 
-std::string termKindName(TermKind kind) {
+std::string termKindName(S7TermKind kind) {
     switch (kind) {
-    case TermKind::Jump: return "jump";
-    case TermKind::Branch: return "branch";
-    case TermKind::Switch: return "switch";
-    case TermKind::Return: return "return";
-    case TermKind::Unreachable: return "unreachable";
-    case TermKind::Exit: return "exit";
+    case S7TermKind::Jump: return "jump";
+    case S7TermKind::Branch: return "branch";
+    case S7TermKind::Switch: return "switch";
+    case S7TermKind::Unreachable: return "unreachable";
+    case S7TermKind::Exit: return "exit";
     }
     return "term";
 }
 
-std::string stmtText(const FlattenedStmt& stmt) {
+std::string stmtText(const FlattenedCFG& fn, const S7Stmt& stmt) {
     std::ostringstream os;
     switch (stmt.kind) {
-    case FlatStmtKind::Decl:
-        os << "decl " << stmt.decl_name;
+    case S7StmtKind::Assign:
+        os << "assign " << symbolName(fn, stmt.target) << " = "
+           << operandText(fn, stmt.value);
         break;
-    case FlatStmtKind::Assign:
-        os << "assign " << stmt.target_name << " = " << operandText(stmt.value);
+    case S7StmtKind::Op:
+        os << "op " << symbolName(fn, stmt.target) << " = " << opText(fn, stmt.op);
         break;
-    case FlatStmtKind::Op:
-        os << "op " << stmt.target_name << " = " << opText(stmt.op);
-        break;
-    case FlatStmtKind::Lookup:
-        os << "lookup " << stmt.target_name << " = lookup("
-           << operandText(stmt.lookup_index);
-        for (const auto& elem : stmt.lookup_elements) os << ", " << operandText(elem);
-        os << ")";
-        break;
-    case FlatStmtKind::LookupWrite:
-        os << "lookupwrite [";
-        for (std::size_t i = 0; i < stmt.lookup_write_target_names.size(); ++i) {
-            if (i) os << ", ";
-            os << stmt.lookup_write_target_names[i];
+    case S7StmtKind::Lookup:
+        os << "lookup " << symbolName(fn, stmt.target) << " = lookup("
+           << operandText(fn, stmt.lookup_index);
+        for (const auto& elem : stmt.lookup_elements) {
+            os << ", " << operandText(fn, elem);
         }
-        os << "] = lookupwrite(" << operandText(stmt.lookup_index)
-           << ", " << operandText(stmt.lookup_value);
-        for (const auto& elem : stmt.lookup_elements) os << ", " << operandText(elem);
         os << ")";
         break;
-    case FlatStmtKind::Eval:
-        os << "eval " << operandText(stmt.value);
+    case S7StmtKind::LookupWrite:
+        os << "lookupwrite [";
+        for (std::size_t i = 0; i < stmt.lookup_write_targets.size(); ++i) {
+            if (i) os << ", ";
+            os << symbolName(fn, stmt.lookup_write_targets[i]);
+        }
+        os << "] = lookupwrite(" << operandText(fn, stmt.lookup_index)
+           << ", " << operandText(fn, stmt.lookup_value);
+        for (const auto& elem : stmt.lookup_elements) {
+            os << ", " << operandText(fn, elem);
+        }
+        os << ")";
         break;
     }
     return os.str();
@@ -1224,7 +1235,7 @@ std::string stmtText(const FlattenedStmt& stmt) {
 
 } // namespace
 
-std::string debugPrint(const FlattenedProgram& program,
+std::string debugPrint(const S7FlattenedProgram& program,
                        const std::vector<FlattenSummary>& summaries) {
     std::ostringstream os;
     os << "s7flatten\n";
@@ -1237,36 +1248,28 @@ std::string debugPrint(const FlattenedProgram& program,
     }
     const auto& fn = program.top;
     os << "top " << fn.name << " entry=bb" << fn.entry << " exit=bb" << fn.exit << "\n";
+    os << "symbols\n";
+    for (const auto& symbol : fn.symbols) {
+        os << "  %" << symbol.id << " " << symbol.debug_name << "\n";
+    }
     os << "ports\n";
     for (const auto& port : fn.ports) {
-        os << "  " << port.source_name << " ->";
-        for (const auto& leaf : port.leaves) os << " " << leaf.name;
-        os << "\n";
-    }
-    os << "leaf_maps\n";
-    for (const auto& map : fn.symbol_leaf_maps) {
-        os << "  " << map.source_name << " ->";
-        for (const auto& leaf : map.leaves) os << " " << leaf.name;
-        os << "\n";
+        os << "  " << symbolName(fn, port.symbol) << "\n";
     }
     for (const auto& block : fn.blocks) {
-        if (!block) continue;
-        os << "  bb" << block->id << "\n";
-        for (const auto& stmt : block->stmts) {
-            if (stmt) os << "    " << stmtText(*stmt) << "\n";
+        os << "  bb" << block.id << "\n";
+        for (const auto& stmt : block.stmts) {
+            os << "    " << stmtText(fn, stmt) << "\n";
         }
-        os << "    term " << termKindName(block->terminator.kind);
-        if (block->terminator.kind == TermKind::Branch) {
-            os << " " << operandText(block->terminator.condition)
-               << " ? bb" << block->terminator.true_target
-               << " : bb" << block->terminator.false_target;
-        } else if (block->terminator.kind == TermKind::Jump) {
-            os << " bb" << block->terminator.jump_target;
-        } else if (block->terminator.kind == TermKind::Switch) {
-            os << " " << operandText(block->terminator.switch_value);
-        } else if (block->terminator.kind == TermKind::Return &&
-                   block->terminator.return_value) {
-            os << " " << operandText(block->terminator.return_value.value());
+        os << "    term " << termKindName(block.terminator.kind);
+        if (block.terminator.kind == S7TermKind::Branch) {
+            os << " " << operandText(fn, block.terminator.condition)
+               << " ? bb" << block.terminator.true_target
+               << " : bb" << block.terminator.false_target;
+        } else if (block.terminator.kind == S7TermKind::Jump) {
+            os << " bb" << block.terminator.jump_target;
+        } else if (block.terminator.kind == S7TermKind::Switch) {
+            os << " " << operandText(fn, block.terminator.switch_value);
         }
         os << "\n";
     }
@@ -1278,9 +1281,7 @@ FlattenResult flattenProgram(const InlinedCFGProgram& program,
     try {
         FlattenResult result;
         FlattenSummary summary;
-        FlattenedProgram out;
-        out.struct_fields = program.struct_fields;
-        out.struct_constructors = program.struct_constructors;
+        S7FlattenedProgram out;
         out.top = flattenFunction(program.top, program.struct_fields,
                                   program.struct_constructors, options, summary);
         result.summaries.push_back(summary);
@@ -1306,7 +1307,7 @@ FlattenResult flattenProgram(const InlinedCFGProgram& program,
     }
 }
 
-FlattenedProgram flattenProgramOrThrow(const InlinedCFGProgram& program,
+S7FlattenedProgram flattenProgramOrThrow(const InlinedCFGProgram& program,
                                        const FlattenOptions& options) {
     auto result = flattenProgram(program, options);
     if (!result.ok()) {

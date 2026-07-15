@@ -24,11 +24,11 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
   7. AggregateFlatten
      将 struct、array、aggregate init/copy、field access、array access、动态索引读写全部降低为确定的 scalar leaf 变量、mux 或 guarded write。处理复杂左值，生成显式的 leaf assignment。
 
+  8. OperationNormalize
+     规范化 Int/UInt/builtin 整数语义、宽度扩展/截断、cast、slice、bit、concat、repeat、reduce、比较和算术操作。
+
 
 ## 仍需确认的步骤：
-
-  13. OperationNormalize
-     规范化 Int/UInt/builtin 整数语义、宽度扩展/截断、cast、slice、bit、concat、repeat、reduce、比较和算术操作。
 
   14. EffectAndDefaultPolicy
      处理输出端口默认值、写使能默认 false、ReqHelper/RegProxy/BRAM/Queue 等特殊硬件 side effect 的默认和配对策略。

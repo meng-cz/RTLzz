@@ -95,6 +95,11 @@ static TypeInfo rowArray2() {
     return arrayOf(rowType(), 2);
 }
 
+static bool flatScalar(const TypeInfo& type) {
+    return !type.is_array && !type.is_pointer && !type.is_reference &&
+           type.struct_name.empty();
+}
+
 static s3statementize::SymbolInfo symbol(s3statementize::SymbolId id,
                                          const std::string& name,
                                          TypeInfo type,
@@ -264,6 +269,15 @@ static std::string flattenDebug(s6inline::InlinedCFGProgram program) {
     CHECK(result.ok());
     CHECK(result.program.has_value());
     CHECK(!result.debug_text.empty());
+    const auto& fn = result.program->top;
+    for (std::size_t i = 0; i < fn.symbols.size(); ++i) {
+        CHECK(fn.symbols[i].id == static_cast<s7flatten::SymbolId>(i));
+        CHECK(flatScalar(fn.symbols[i].type));
+    }
+    for (const auto& port : fn.ports) {
+        CHECK(port.symbol >= 0);
+        CHECK(port.symbol < static_cast<s7flatten::SymbolId>(fn.symbols.size()));
+    }
     return result.debug_text;
 }
 
@@ -473,8 +487,10 @@ static void fieldReadAndAggregateCopyFlatten() {
         assign(lv(syms[1]), var(syms[0]))});
 
     auto debug = flattenDebug(std::move(program));
-    CHECK(debug.find("a -> a__n a__m") != std::string::npos);
-    CHECK(debug.find("dst -> dst__n dst__m") != std::string::npos);
+    CHECK(debug.find(" a__n\n") != std::string::npos);
+    CHECK(debug.find(" a__m\n") != std::string::npos);
+    CHECK(debug.find(" dst__n\n") != std::string::npos);
+    CHECK(debug.find(" dst__m\n") != std::string::npos);
     CHECK(debug.find("op tmp = Add(a__n, b)") != std::string::npos);
     CHECK(debug.find("assign dst__n = a__n") != std::string::npos);
     CHECK(debug.find("assign dst__m = a__m") != std::string::npos);
@@ -494,7 +510,9 @@ static void staticAndDynamicArrayAccessFlatten() {
         assign(index(syms[5], var(syms[6]), int8()), var(syms[3]))});
 
     auto debug = flattenDebug(std::move(program));
-    CHECK(debug.find("arr -> arr__idx_0 arr__idx_1 arr__idx_2") != std::string::npos);
+    CHECK(debug.find(" arr__idx_0\n") != std::string::npos);
+    CHECK(debug.find(" arr__idx_1\n") != std::string::npos);
+    CHECK(debug.find(" arr__idx_2\n") != std::string::npos);
     CHECK(debug.find("assign c = arr__idx_1") != std::string::npos);
     CHECK(debug.find("lookup c = lookup(idx, arr__idx_0, arr__idx_1, arr__idx_2)") != std::string::npos);
     CHECK(debug.find("lookupwrite [arr__idx_0, arr__idx_1, arr__idx_2] = lookupwrite(idx, c, arr__idx_0, arr__idx_1, arr__idx_2)") != std::string::npos);
@@ -576,8 +594,13 @@ static void nestedStructArrayAccessFlatten() {
     program.top.blocks.push_back(std::move(block));
 
     auto debug = flattenDebug(std::move(program));
-    CHECK(debug.find("pkt -> pkt__lanes__idx_0__n pkt__lanes__idx_0__m pkt__lanes__idx_1__n pkt__lanes__idx_1__m pkt__tail") != std::string::npos);
-    CHECK(debug.find("box -> box__pkts__idx_0__lanes__idx_0__n box__pkts__idx_0__lanes__idx_0__m") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_0__n\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_0__m\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_1__n\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_1__m\n") != std::string::npos);
+    CHECK(debug.find(" pkt__tail\n") != std::string::npos);
+    CHECK(debug.find(" box__pkts__idx_0__lanes__idx_0__n\n") != std::string::npos);
+    CHECK(debug.find(" box__pkts__idx_0__lanes__idx_0__m\n") != std::string::npos);
     CHECK(debug.find("assign out = pkt__lanes__idx_1__m") != std::string::npos);
     CHECK(debug.find("lookup out = lookup(idx, pkt__lanes__idx_0__n, pkt__lanes__idx_1__n)") != std::string::npos);
     CHECK(debug.find("lookupwrite [pkt__lanes__idx_0__m, pkt__lanes__idx_1__m] = lookupwrite(idx, out, pkt__lanes__idx_0__m, pkt__lanes__idx_1__m)") != std::string::npos);
@@ -640,7 +663,10 @@ static void multiDynamicIndexReadAndWriteFlatten() {
     program.top.blocks.push_back(std::move(block));
 
     auto debug = flattenDebug(std::move(program));
-    CHECK(debug.find("rows -> rows__idx_0__c__idx_0 rows__idx_0__c__idx_1 rows__idx_1__c__idx_0 rows__idx_1__c__idx_1") != std::string::npos);
+    CHECK(debug.find(" rows__idx_0__c__idx_0\n") != std::string::npos);
+    CHECK(debug.find(" rows__idx_0__c__idx_1\n") != std::string::npos);
+    CHECK(debug.find(" rows__idx_1__c__idx_0\n") != std::string::npos);
+    CHECK(debug.find(" rows__idx_1__c__idx_1\n") != std::string::npos);
     CHECK(debug.find("lookup __s7_flatten_lookup_") != std::string::npos);
     CHECK(debug.find("lookup out = lookup(i, __s7_flatten_lookup_") != std::string::npos);
     CHECK(debug.find("lookupwrite [__s7_flatten_lookupwrite_") != std::string::npos);
@@ -650,9 +676,13 @@ static void multiDynamicIndexReadAndWriteFlatten() {
 
 static void sourcePipelineFlattensStructAndArray() {
     auto debug = runSourceToS7("testv2/fixtures/s7flatten/source_flatten.logic.cpp");
-    CHECK(debug.find("a -> a__n a__m") != std::string::npos);
-    CHECK(debug.find("b -> b__n b__m") != std::string::npos);
-    CHECK(debug.find("arr -> arr__idx_0 arr__idx_1 arr__idx_2") != std::string::npos);
+    CHECK(debug.find(" a__n\n") != std::string::npos);
+    CHECK(debug.find(" a__m\n") != std::string::npos);
+    CHECK(debug.find(" b__n\n") != std::string::npos);
+    CHECK(debug.find(" b__m\n") != std::string::npos);
+    CHECK(debug.find(" arr__idx_0\n") != std::string::npos);
+    CHECK(debug.find(" arr__idx_1\n") != std::string::npos);
+    CHECK(debug.find(" arr__idx_2\n") != std::string::npos);
     CHECK(debug.find("lookup ") != std::string::npos);
     CHECK(debug.find("lookupwrite [arr__idx_0, arr__idx_1, arr__idx_2]") != std::string::npos);
     CHECK(debug.find(".n") == std::string::npos);
@@ -662,9 +692,15 @@ static void sourcePipelineFlattensStructAndArray() {
 
 static void sourcePipelineFlattensComplexAggregateCalls() {
     auto debug = runSourceToS7("testv2/fixtures/s7flatten/source_complex_aggregates.logic.cpp");
-    CHECK(debug.find("pkt -> pkt__lanes__idx_0__n pkt__lanes__idx_0__m pkt__lanes__idx_1__n pkt__lanes__idx_1__m pkt__tail") != std::string::npos);
-    CHECK(debug.find("chosen -> chosen__n chosen__m") != std::string::npos);
-    CHECK(debug.find("box -> box__pkts__idx_0__lanes__idx_0__n box__pkts__idx_0__lanes__idx_0__m") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_0__n\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_0__m\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_1__n\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_1__m\n") != std::string::npos);
+    CHECK(debug.find(" pkt__tail\n") != std::string::npos);
+    CHECK(debug.find(" chosen__n\n") != std::string::npos);
+    CHECK(debug.find(" chosen__m\n") != std::string::npos);
+    CHECK(debug.find(" box__pkts__idx_0__lanes__idx_0__n\n") != std::string::npos);
+    CHECK(debug.find(" box__pkts__idx_0__lanes__idx_0__m\n") != std::string::npos);
     CHECK(debug.find("__s6_make_packet_") != std::string::npos);
     CHECK(debug.find("__s6_select_") != std::string::npos);
     CHECK(debug.find("__s6_touch_packet_") != std::string::npos);
@@ -678,8 +714,13 @@ static void sourcePipelineFlattensComplexAggregateCalls() {
 
 static void astPipelineFlattensAggregateLambdaCalls() {
     auto debug = runASTToS7(makeAggregateLambdaProgram());
-    CHECK(debug.find("pkt -> pkt__lanes__idx_0__n pkt__lanes__idx_0__m pkt__lanes__idx_1__n pkt__lanes__idx_1__m pkt__tail") != std::string::npos);
-    CHECK(debug.find("chosen -> chosen__n chosen__m") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_0__n\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_0__m\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_1__n\n") != std::string::npos);
+    CHECK(debug.find(" pkt__lanes__idx_1__m\n") != std::string::npos);
+    CHECK(debug.find(" pkt__tail\n") != std::string::npos);
+    CHECK(debug.find(" chosen__n\n") != std::string::npos);
+    CHECK(debug.find(" chosen__m\n") != std::string::npos);
     CHECK(debug.find("__s6_make_packet_") != std::string::npos);
     CHECK(debug.find("__s6_select_lambda_") != std::string::npos);
     CHECK(debug.find("lookup __s6_select_lambda_") != std::string::npos);

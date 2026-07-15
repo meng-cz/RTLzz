@@ -3,49 +3,110 @@
 #include "debug/RTLZZException.h"
 #include "s6inline/S6Inline.h"
 
-#include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace pred::s7flatten {
 
-using BlockId = s4cfg::BlockId;
-using SymbolId = s3statementize::SymbolId;
+using BlockId = int;
+using SymbolId = int;
 
-enum class FlatOperandKind {
-    Literal,
-    Var,
-    Unknown,
+enum class S7SymbolRole {
+    Local,
+    Port,
+    Temp,
 };
 
-struct FlatOperand {
-    FlatOperandKind kind = FlatOperandKind::Unknown;
+struct S7Symbol {
+    SymbolId id = -1;
+    TypeInfo type;
+    std::string debug_name;
+    S7SymbolRole role = S7SymbolRole::Local;
+};
+
+struct S7Port {
+    SymbolId symbol = -1;
+    ParamDirection direction = ParamDirection::Input;
+    ParamPassingKind passing = ParamPassingKind::Value;
+};
+
+enum class S7OperandKind {
+    Literal,
+    Var,
+};
+
+struct S7Operand {
+    S7OperandKind kind = S7OperandKind::Literal;
     TypeInfo type;
     DebugLoc debug_loc;
     std::string literal_value;
-    std::string var_name;
-    SymbolId var_symbol = -1;
+    SymbolId symbol = -1;
 };
 
-struct FlatOpExpr {
-    enum class Kind {
-        Unary,
-        Binary,
-        Ternary,
-        Cast,
-        Hardware,
-    };
+enum class S7UnaryOp {
+    LogicalNot,
+    BitNot,
+    Negate,
+    Plus,
+};
 
-    Kind kind = Kind::Unary;
-    TypeInfo type;
+enum class S7BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Shl,
+    Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    LogicalAnd,
+    LogicalOr,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+};
+
+enum class S7HardwareOp {
+    ZExt,
+    SExt,
+    Trunc,
+    Slice,
+    BitSelect,
+    DynamicSlice,
+    DynamicBitSelect,
+    WriteSlice,
+    WriteBit,
+    DynamicWriteSlice,
+    DynamicWriteBit,
+    Concat,
+    Repeat,
+    ReduceOr,
+    ReduceAnd,
+    ReduceXor,
+};
+
+enum class S7OpKind {
+    Unary,
+    Binary,
+    Ternary,
+    Cast,
+    Hardware,
+};
+
+struct S7Operation {
+    S7OpKind kind = S7OpKind::Unary;
     DebugLoc debug_loc;
-    s3statementize::UnaryOp unary_op = s3statementize::UnaryOp::Plus;
-    s3statementize::BinaryOp binary_op = s3statementize::BinaryOp::Add;
-    s3statementize::HardwareOp hardware_op = s3statementize::HardwareOp::Concat;
+    S7UnaryOp unary_op = S7UnaryOp::Plus;
+    S7BinaryOp binary_op = S7BinaryOp::Add;
+    S7HardwareOp hardware_op = S7HardwareOp::Concat;
     TypeInfo cast_type;
-    std::vector<FlatOperand> operands;
+    std::vector<S7Operand> operands;
     int hi = -1;
     int lo = -1;
     int bit = -1;
@@ -53,114 +114,68 @@ struct FlatOpExpr {
     int to_width = 0;
 };
 
-enum class FlatStmtKind {
-    Decl,
+enum class S7StmtKind {
     Assign,
     Op,
     Lookup,
     LookupWrite,
-    Eval,
 };
 
-struct FlattenedStmt {
-    FlatStmtKind kind = FlatStmtKind::Eval;
+struct S7Stmt {
+    S7StmtKind kind = S7StmtKind::Assign;
     DebugLoc debug_loc;
 
-    TypeInfo decl_type;
-    std::string decl_name;
-    SymbolId decl_symbol = -1;
+    SymbolId target = -1;
+    S7Operand value;
+    S7Operation op;
 
-    SymbolId target_symbol = -1;
-    std::string target_name;
-    TypeInfo target_type;
-    FlatOperand value;
-    FlatOpExpr op;
-
-    FlatOperand lookup_index;
-    std::vector<FlatOperand> lookup_elements;
-
-    // `lookupwrite` updates a full scalar leaf array in one statement:
-    // targets[k] receives the array after assigning `lookup_value` at
-    // `lookup_index`. The old array values are `lookup_elements`.
-    std::vector<SymbolId> lookup_write_target_symbols;
-    std::vector<std::string> lookup_write_target_names;
-    FlatOperand lookup_value;
+    S7Operand lookup_index;
+    std::vector<S7Operand> lookup_elements;
+    std::vector<SymbolId> lookup_write_targets;
+    S7Operand lookup_value;
 };
 
-using FlattenedStmtPtr = std::shared_ptr<FlattenedStmt>;
-
-struct FlattenedEdge {
-    BlockId from = -1;
-    BlockId to = -1;
-    s4cfg::EdgeKind kind = s4cfg::EdgeKind::Jump;
-    std::string label;
-    std::optional<FlatOperand> case_value;
-};
-
-struct FlattenedSwitchTarget {
-    std::optional<FlatOperand> value;
+struct S7SwitchTarget {
+    std::optional<S7Operand> value;
     BlockId target = -1;
 };
 
-struct FlattenedTerminator {
-    s4cfg::TermKind kind = s4cfg::TermKind::Unreachable;
-    FlatOperand condition;
+enum class S7TermKind {
+    Jump,
+    Branch,
+    Switch,
+    Exit,
+    Unreachable,
+};
+
+struct S7Terminator {
+    S7TermKind kind = S7TermKind::Unreachable;
+    S7Operand condition;
     BlockId jump_target = -1;
     BlockId true_target = -1;
     BlockId false_target = -1;
-    FlatOperand switch_value;
-    std::vector<FlattenedSwitchTarget> switch_targets;
+    S7Operand switch_value;
+    std::vector<S7SwitchTarget> switch_targets;
     BlockId default_target = -1;
-    std::optional<FlatOperand> return_value;
 };
 
-struct FlattenedBasicBlock {
+struct S7BasicBlock {
     BlockId id = -1;
-    std::vector<FlattenedStmtPtr> stmts;
-    FlattenedTerminator terminator;
-    std::vector<FlattenedEdge> successors;
-    std::vector<FlattenedEdge> predecessors;
+    std::vector<S7Stmt> stmts;
+    S7Terminator terminator;
 };
 
-struct LeafInfo {
-    SymbolId id = -1;
+struct FlattenedCFG {
     std::string name;
-    TypeInfo type;
-    std::vector<std::string> path;
-    DebugLoc debug_loc;
-};
-
-struct SymbolLeafMap {
-    SymbolId source_symbol = -1;
-    std::string source_name;
-    TypeInfo source_type;
-    std::vector<LeafInfo> leaves;
-};
-
-struct FlattenedPort {
-    std::string source_name;
-    TypeInfo source_type;
-    ParamDirection direction = ParamDirection::Input;
-    ParamPassingKind passing = ParamPassingKind::Value;
-    std::vector<LeafInfo> leaves;
-};
-
-struct FlattenedFunction {
-    std::string name;
-    TypeInfo return_type;
-    std::vector<ParamDecl> params;
-    std::vector<s3statementize::SymbolInfo> symbols;
-    std::vector<FlattenedPort> ports;
-    std::vector<SymbolLeafMap> symbol_leaf_maps;
+    std::vector<S7Symbol> symbols;
+    std::vector<S7Port> ports;
     BlockId entry = -1;
     BlockId exit = -1;
-    std::vector<std::unique_ptr<FlattenedBasicBlock>> blocks;
+    std::vector<S7BasicBlock> blocks;
 };
 
-struct FlattenedProgram {
-    FlattenedFunction top;
-    std::unordered_map<std::string, std::vector<StructFieldInfo>> struct_fields;
-    std::unordered_map<std::string, std::vector<StructConstructorInfo>> struct_constructors;
+struct S7FlattenedProgram {
+    FlattenedCFG top;
 };
 
 struct FlattenWarning {
@@ -188,7 +203,7 @@ struct FlattenSummary {
 };
 
 struct FlattenResult {
-    std::optional<FlattenedProgram> program;
+    std::optional<S7FlattenedProgram> program;
     std::optional<FlattenError> error;
     std::vector<FlattenWarning> warnings;
     std::vector<FlattenSummary> summaries;
@@ -201,11 +216,11 @@ FlattenResult flattenProgram(
     const s6inline::InlinedCFGProgram& program,
     const FlattenOptions& options = {});
 
-FlattenedProgram flattenProgramOrThrow(
+S7FlattenedProgram flattenProgramOrThrow(
     const s6inline::InlinedCFGProgram& program,
     const FlattenOptions& options = {});
 
-std::string debugPrint(const FlattenedProgram& program,
+std::string debugPrint(const S7FlattenedProgram& program,
                        const std::vector<FlattenSummary>& summaries);
 
 } // namespace pred::s7flatten
