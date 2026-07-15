@@ -95,17 +95,15 @@ std::string scopeKindName(ScopeKind kind) {
     case ScopeKind::IfThen: return "if_then";
     case ScopeKind::IfElse: return "if_else";
     case ScopeKind::LoopBody: return "loop_body";
-    case ScopeKind::LoopStep: return "loop_step";
     case ScopeKind::SwitchCase: return "switch_case";
     }
     return "scope";
 }
 
-std::string loopKindName(LoopKind kind) {
+std::string loopConditionKindName(LoopConditionKind kind) {
     switch (kind) {
-    case LoopKind::For: return "for";
-    case LoopKind::While: return "while";
-    case LoopKind::DoWhile: return "do_while";
+    case LoopConditionKind::PreTest: return "pre_test";
+    case LoopConditionKind::PostTest: return "post_test";
     }
     return "loop";
 }
@@ -250,6 +248,8 @@ public:
         cfg_.name = fn_.name;
         cfg_.return_type = fn_.return_type;
         cfg_.params = fn_.params;
+        cfg_.s3_scopes = fn_.scopes;
+        cfg_.symbols = fn_.symbols;
         createScope(std::nullopt, ScopeKind::Function, fn_.name);
 
         auto* entry = newBlock();
@@ -502,19 +502,19 @@ private:
         setCurrent(merge_block->predecessors.empty() ? nullptr : merge_block);
     }
 
-    LoopRegionId createLoopRegion(LoopKind kind,
-                                  BlockId header,
-                                  BlockId body,
-                                  BlockId step,
+    LoopRegionId createLoopRegion(LoopConditionKind kind,
+                                  BlockId init,
                                   BlockId condition,
+                                  BlockId condition_prelude,
+                                  BlockId body,
                                   BlockId exit) {
         LoopRegion region;
         region.id = static_cast<LoopRegionId>(cfg_.loop_regions.size());
-        region.kind = kind;
-        region.header = header;
-        region.body = body;
-        region.step = step;
+        region.condition_kind = kind;
+        region.init = init;
         region.condition = condition;
+        region.condition_prelude = condition_prelude;
+        region.body = body;
         region.exit = exit;
         cfg_.loop_regions.push_back(region);
         return region.id;
@@ -531,21 +531,31 @@ private:
     };
 
     void buildFor(const S3StmtPtr& stmt) {
+        BlockId init = current_ ? current_->id : -1;
         emitList(stmt->for_init);
-        auto* header = newBlock();
+        auto* condition_prelude = newBlock();
+        auto* condition = newBlock();
         auto* body = newBlock();
         auto* step = newBlock();
         auto* exit = newBlock();
-        LoopRegionId loop_id = createLoopRegion(LoopKind::For, header->id, body->id,
-                                                step->id, header->id, exit->id);
-        header->loop_stack.push_back(loop_id);
+        LoopRegionId loop_id = createLoopRegion(LoopConditionKind::PreTest,
+                                                init, condition->id, condition_prelude->id,
+                                                body->id, exit->id);
+        condition_prelude->loop_stack.push_back(loop_id);
+        condition->loop_stack.push_back(loop_id);
         body->loop_stack.push_back(loop_id);
         step->loop_stack.push_back(loop_id);
 
-        if (current_) terminateJump(header->id, EdgeKind::Fallthrough, "loop_header");
+        if (current_) {
+            terminateJump(condition_prelude->id, EdgeKind::Fallthrough,
+                          "loop_condition_prelude");
+        }
 
-        setCurrent(header);
+        setCurrent(condition_prelude);
         emitList(stmt->condition_prelude);
+        terminateJump(condition->id, EdgeKind::Fallthrough, "condition");
+
+        setCurrent(condition);
         if (stmt->for_cond) terminateBranch(stmt->for_cond.value(), body->id, exit->id);
         else terminateJump(body->id, EdgeKind::Jump, "true");
 
@@ -557,16 +567,16 @@ private:
             body->scope_stack = scope_stack_;
             setCurrent(body);
             buildStmtList(stmt->loop_body);
-            if (current_) terminateJump(step->id, EdgeKind::Fallthrough, "body_step");
+            if (current_) terminateJump(step->id, EdgeKind::Fallthrough, "body_next");
         }
 
         {
             LoopGuard loop_guard(*this, loop_id);
-            ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopStep, "for_step"));
+            ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopBody, "for_body"));
             step->scope_stack = scope_stack_;
             setCurrent(step);
             emitList(stmt->for_step);
-            terminateJump(header->id, EdgeKind::Jump, "backedge");
+            terminateJump(condition_prelude->id, EdgeKind::Jump, "backedge");
         }
         break_targets_.pop_back();
         continue_targets_.pop_back();
@@ -574,29 +584,38 @@ private:
     }
 
     void buildWhile(const S3StmtPtr& stmt) {
-        auto* header = newBlock();
+        auto* condition_prelude = newBlock();
+        auto* condition = newBlock();
         auto* body = newBlock();
         auto* exit = newBlock();
-        LoopRegionId loop_id = createLoopRegion(LoopKind::While, header->id, body->id,
-                                                -1, header->id, exit->id);
-        header->loop_stack.push_back(loop_id);
+        LoopRegionId loop_id = createLoopRegion(LoopConditionKind::PreTest,
+                                                -1, condition->id, condition_prelude->id,
+                                                body->id, exit->id);
+        condition_prelude->loop_stack.push_back(loop_id);
+        condition->loop_stack.push_back(loop_id);
         body->loop_stack.push_back(loop_id);
 
-        if (current_) terminateJump(header->id, EdgeKind::Fallthrough, "loop_header");
+        if (current_) {
+            terminateJump(condition_prelude->id, EdgeKind::Fallthrough,
+                          "loop_condition_prelude");
+        }
 
-        setCurrent(header);
+        setCurrent(condition_prelude);
         emitList(stmt->condition_prelude);
+        terminateJump(condition->id, EdgeKind::Fallthrough, "condition");
+
+        setCurrent(condition);
         terminateBranch(stmt->condition, body->id, exit->id);
 
         break_targets_.push_back(exit->id);
-        continue_targets_.push_back(header->id);
+        continue_targets_.push_back(condition_prelude->id);
         {
             LoopGuard loop_guard(*this, loop_id);
             ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopBody, "while_body"));
             body->scope_stack = scope_stack_;
             setCurrent(body);
             buildStmtList(stmt->loop_body);
-            if (current_) terminateJump(header->id, EdgeKind::Jump, "backedge");
+            if (current_) terminateJump(condition_prelude->id, EdgeKind::Jump, "backedge");
         }
         break_targets_.pop_back();
         continue_targets_.pop_back();
@@ -605,30 +624,39 @@ private:
 
     void buildDoWhile(const S3StmtPtr& stmt) {
         auto* body = newBlock();
+        auto* condition_prelude = newBlock();
         auto* condition = newBlock();
         auto* exit = newBlock();
-        LoopRegionId loop_id = createLoopRegion(LoopKind::DoWhile, condition->id, body->id,
-                                                -1, condition->id, exit->id);
+        LoopRegionId loop_id = createLoopRegion(LoopConditionKind::PostTest,
+                                                -1, condition->id, condition_prelude->id,
+                                                body->id, exit->id);
         body->loop_stack.push_back(loop_id);
+        condition_prelude->loop_stack.push_back(loop_id);
         condition->loop_stack.push_back(loop_id);
 
         if (current_) terminateJump(body->id, EdgeKind::Fallthrough, "loop_body");
 
         break_targets_.push_back(exit->id);
-        continue_targets_.push_back(condition->id);
+        continue_targets_.push_back(condition_prelude->id);
         {
             LoopGuard loop_guard(*this, loop_id);
             ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopBody, "do_body"));
             body->scope_stack = scope_stack_;
             setCurrent(body);
             buildStmtList(stmt->loop_body);
-            if (current_) terminateJump(condition->id, EdgeKind::Fallthrough, "body_condition");
+            if (current_) {
+                terminateJump(condition_prelude->id, EdgeKind::Fallthrough,
+                              "body_condition");
+            }
         }
         break_targets_.pop_back();
         continue_targets_.pop_back();
 
-        setCurrent(condition);
+        setCurrent(condition_prelude);
         emitList(stmt->condition_prelude);
+        terminateJump(condition->id, EdgeKind::Fallthrough, "condition");
+
+        setCurrent(condition);
         terminateBranch(stmt->condition, body->id, exit->id);
         setCurrent(exit);
     }
@@ -916,11 +944,11 @@ void printFunction(std::ostream& os, const FunctionCFG& fn, const std::string& k
         os << "\n";
     }
     for (const auto& loop : fn.loop_regions) {
-        os << "  loop " << loop.id << " " << loopKindName(loop.kind)
-           << " header=bb" << loop.header
-           << " body=bb" << loop.body
-           << " step=bb" << loop.step
+        os << "  loop " << loop.id << " " << loopConditionKindName(loop.condition_kind)
+           << " init=bb" << loop.init
            << " condition=bb" << loop.condition
+           << " condition_prelude=bb" << loop.condition_prelude
+           << " body=bb" << loop.body
            << " exit=bb" << loop.exit << "\n";
     }
     for (const auto& block : fn.blocks) printBlock(os, *block, 2);

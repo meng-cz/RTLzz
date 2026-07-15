@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -14,6 +15,10 @@ struct LowerContext {
     std::unordered_set<std::string> used_names;
     std::unordered_set<std::string> struct_names;
     int temp_counter = 0;
+    std::vector<S3ScopeInfo> scopes;
+    std::vector<SymbolInfo> symbols;
+    std::vector<ScopeId> scope_stack;
+    std::vector<std::unordered_map<std::string, SymbolId>> bindings;
 };
 
 std::string sanitizeName(std::string name) {
@@ -58,19 +63,90 @@ std::string makeTempName(LowerContext& ctx, const std::string& hint) {
     }
 }
 
-S3StmtPtr makeDecl(const std::string& name, TypeInfo type, DebugLoc loc) {
+[[noreturn]] void fail(DebugLoc loc, const std::string& message);
+
+ScopeId currentScope(const LowerContext& ctx) {
+    return ctx.scope_stack.empty() ? 0 : ctx.scope_stack.back();
+}
+
+ScopeId createScope(LowerContext& ctx,
+                    std::optional<ScopeId> parent,
+                    S3ScopeKind kind,
+                    std::string label) {
+    S3ScopeInfo scope;
+    scope.id = static_cast<ScopeId>(ctx.scopes.size());
+    scope.parent = parent;
+    scope.kind = kind;
+    scope.label = std::move(label);
+    ctx.scopes.push_back(std::move(scope));
+    return ctx.scopes.back().id;
+}
+
+SymbolId createSymbol(LowerContext& ctx,
+                      const std::string& name,
+                      TypeInfo type,
+                      bool is_param = false,
+                      bool is_temp = false) {
+    if (ctx.scope_stack.empty()) {
+        createScope(ctx, std::nullopt, S3ScopeKind::Function, ctx.function_name);
+        ctx.scope_stack.push_back(0);
+        ctx.bindings.emplace_back();
+    }
+    SymbolInfo symbol;
+    symbol.id = static_cast<SymbolId>(ctx.symbols.size());
+    symbol.name = name;
+    symbol.type = storageType(std::move(type));
+    symbol.declaring_scope = currentScope(ctx);
+    symbol.is_param = is_param;
+    symbol.is_temp = is_temp;
+    ctx.symbols.push_back(std::move(symbol));
+    ctx.bindings.back()[name] = ctx.symbols.back().id;
+    return ctx.symbols.back().id;
+}
+
+SymbolId resolveSymbol(const LowerContext& ctx, const std::string& name, DebugLoc loc) {
+    for (auto it = ctx.bindings.rbegin(); it != ctx.bindings.rend(); ++it) {
+        auto found = it->find(name);
+        if (found != it->end()) return found->second;
+    }
+    fail(std::move(loc), "Unknown variable '" + name + "'");
+}
+
+struct ScopeGuard {
+    LowerContext& ctx;
+    bool active = true;
+    ScopeGuard(LowerContext& ctx, S3ScopeKind kind, std::string label) : ctx(ctx) {
+        auto parent = ctx.scope_stack.empty()
+            ? std::optional<ScopeId>{}
+            : std::optional<ScopeId>{ctx.scope_stack.back()};
+        ScopeId id = createScope(ctx, parent, kind, std::move(label));
+        ctx.scope_stack.push_back(id);
+        ctx.bindings.emplace_back();
+    }
+    ~ScopeGuard() {
+        if (!active) return;
+        ctx.scope_stack.pop_back();
+        ctx.bindings.pop_back();
+    }
+    ScopeGuard(const ScopeGuard&) = delete;
+    ScopeGuard& operator=(const ScopeGuard&) = delete;
+};
+
+S3StmtPtr makeDecl(const std::string& name, SymbolId symbol, TypeInfo type, DebugLoc loc) {
     auto stmt = std::make_shared<S3Stmt>();
     stmt->kind = S3StmtKind::Decl;
     stmt->debug_loc = std::move(loc);
     stmt->decl_name = name;
+    stmt->decl_symbol = symbol;
     stmt->decl_type = storageType(std::move(type));
     return stmt;
 }
 
-Operand varOperand(const std::string& name, TypeInfo type, DebugLoc loc = {}) {
+Operand varOperand(const std::string& name, SymbolId symbol, TypeInfo type, DebugLoc loc = {}) {
     Operand out;
     out.kind = OperandKind::Var;
     out.var_name = name;
+    out.var_symbol = symbol;
     out.type = canonicalize_bool_type(std::move(type));
     out.debug_loc = std::move(loc);
     return out;
@@ -94,9 +170,10 @@ Operand lvalueOperand(LValue lvalue) {
     return out;
 }
 
-LValue varLValue(const std::string& name, TypeInfo type, DebugLoc loc = {}) {
+LValue varLValue(const std::string& name, SymbolId symbol, TypeInfo type, DebugLoc loc = {}) {
     LValue out;
     out.root = name;
+    out.root_symbol = symbol;
     out.type = canonicalize_bool_type(std::move(type));
     out.debug_loc = std::move(loc);
     return out;
@@ -272,7 +349,18 @@ public:
         out.name = fn.name;
         out.return_type = fn.return_type;
         out.params = fn.params;
+        if (ctx_.scopes.empty()) {
+            createScope(ctx_, std::nullopt, S3ScopeKind::Function, fn.name);
+            ctx_.scope_stack.push_back(0);
+            ctx_.bindings.emplace_back();
+        }
+        for (const auto& param : fn.params) {
+            createSymbol(ctx_, param.name, param.type, true, false);
+        }
         out.body = lowerStmtList(fn.body);
+        finalizeSymbolScopes();
+        out.scopes = ctx_.scopes;
+        out.symbols = ctx_.symbols;
         return out;
     }
 
@@ -293,17 +381,35 @@ private:
                              type.width <= 0 && type.struct_name.empty()
             ? unknownType()
             : type;
-        out.push_back(makeDecl(name, temp_type, loc));
-        return varLValue(name, temp_type, loc);
+        SymbolId symbol = createSymbol(ctx_, name, temp_type, false, true);
+        out.push_back(makeDecl(name, symbol, temp_type, loc));
+        return varLValue(name, symbol, temp_type, loc);
     }
 
     Operand materializeOp(OpExpr op, const std::string& hint, DebugLoc loc,
                           std::vector<S3StmtPtr>& out) {
         TypeInfo type = op.type;
         auto target = tempLValue(type, hint, loc, out);
-        Operand result = varOperand(target.root, target.type, loc);
+        Operand result = varOperand(target.root, target.root_symbol, target.type, loc);
         out.push_back(makeOp(std::move(target), std::move(op), loc));
         return result;
+    }
+
+    void finalizeSymbolScopes() {
+        std::unordered_map<ScopeId, std::vector<ScopeId>> children;
+        for (const auto& scope : ctx_.scopes) {
+            if (scope.parent) children[scope.parent.value()].push_back(scope.id);
+        }
+        auto descendants = [&](auto&& self, ScopeId scope, std::vector<ScopeId>& out) -> void {
+            out.push_back(scope);
+            auto it = children.find(scope);
+            if (it == children.end()) return;
+            for (ScopeId child : it->second) self(self, child, out);
+        };
+        for (auto& symbol : ctx_.symbols) {
+            symbol.valid_scope_ids.clear();
+            descendants(descendants, symbol.declaring_scope, symbol.valid_scope_ids);
+        }
     }
 
     std::vector<Operand> lowerArgs(const std::vector<ExprPtr>& args,
@@ -327,7 +433,10 @@ private:
             result.operand = literalOperand(expr->literal_value, expr->type, expr->debug_loc);
             return result;
         case ExprKind::VarRef:
-            result.operand = varOperand(expr->var_name, expr->type, expr->debug_loc);
+            result.operand = varOperand(expr->var_name,
+                                        resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
+                                        expr->type,
+                                        expr->debug_loc);
             return result;
         case ExprKind::ArrayAccess:
         case ExprKind::FieldAccess: {
@@ -340,7 +449,8 @@ private:
             auto args = lowerArgs(expr->args, result.prelude);
             auto target = tempLValue(expr->type, tempHint(expr, "call"), expr->debug_loc,
                                      result.prelude);
-            result.operand = varOperand(target.root, target.type, expr->debug_loc);
+            result.operand = varOperand(target.root, target.root_symbol, target.type,
+                                        expr->debug_loc);
             if (isConstructorCall(expr, ctx_)) {
                 result.prelude.push_back(makeConstruct(std::move(target), expr->callee,
                                                        std::move(args), expr->type,
@@ -428,7 +538,10 @@ private:
     LValueResult lowerLValue(const ExprPtr& expr) {
         if (!expr) fail(DebugLoc{}, "Expected lvalue expression");
         if (expr->kind == ExprKind::VarRef) {
-            return {varLValue(expr->var_name, expr->type, expr->debug_loc), {}};
+            return {varLValue(expr->var_name,
+                              resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
+                              expr->type,
+                              expr->debug_loc), {}};
         }
         if (expr->kind == ExprKind::FieldAccess) {
             auto base = lowerLValue(expr->struct_base);
@@ -534,7 +647,7 @@ private:
         if (post) {
             auto old = tempLValue(expr->type, "post", expr->debug_loc, result.prelude);
             result.prelude.push_back(makeAssign(old, lvalueOperand(lv.lvalue), expr->debug_loc));
-            result.operand = varOperand(old.root, old.type, expr->debug_loc);
+            result.operand = varOperand(old.root, old.root_symbol, old.type, expr->debug_loc);
         }
         OpExpr op;
         op.kind = OpExpr::Kind::Binary;
@@ -574,11 +687,13 @@ private:
             not_op.unary_op = UnaryOp::LogicalNot;
             not_op.operands.push_back(lhs.operand);
             result.prelude.push_back(makeOp(cond_target, std::move(not_op), expr->debug_loc));
-            if_stmt->condition = varOperand(cond_target.root, cond_target.type, expr->debug_loc);
+            if_stmt->condition = varOperand(cond_target.root, cond_target.root_symbol,
+                                            cond_target.type, expr->debug_loc);
             if_stmt->then_body = std::move(body);
         }
         result.prelude.push_back(if_stmt);
-        result.operand = varOperand(target.root, target.type, expr->debug_loc);
+        result.operand = varOperand(target.root, target.root_symbol, target.type,
+                                    expr->debug_loc);
         return result;
     }
 
@@ -601,7 +716,8 @@ private:
             if_stmt->else_body = std::move(else_value.prelude);
             if_stmt->else_body.push_back(makeAssign(target, else_value.operand, expr->debug_loc));
             result.prelude.push_back(if_stmt);
-            result.operand = varOperand(target.root, target.type, expr->debug_loc);
+            result.operand = varOperand(target.root, target.root_symbol, target.type,
+                                        expr->debug_loc);
             return result;
         }
         auto then_value = lowerExpr(expr->then_expr);
@@ -745,13 +861,16 @@ private:
         std::vector<S3StmtPtr> out;
         switch (stmt->kind) {
         case StmtKind::Decl: {
-            out.push_back(makeDecl(stmt->decl_name, stmt->decl_type, stmt->debug_loc));
+            SymbolId decl_symbol = createSymbol(ctx_, stmt->decl_name, stmt->decl_type);
+            out.push_back(makeDecl(stmt->decl_name, decl_symbol,
+                                   stmt->decl_type, stmt->debug_loc));
             ctx_.used_names.insert(stmt->decl_name);
             if (stmt->decl_init) {
                 if (stmt->decl_init.value()->kind == ExprKind::Call) {
                     auto init = stmt->decl_init.value();
                     auto args = lowerArgs(init->args, out);
-                    auto target = varLValue(stmt->decl_name, stmt->decl_type, stmt->debug_loc);
+                    auto target = varLValue(stmt->decl_name, decl_symbol,
+                                            stmt->decl_type, stmt->debug_loc);
                     if (isConstructorCall(init, ctx_)) {
                         out.push_back(makeConstruct(std::move(target), init->callee,
                                                     std::move(args), init->type,
@@ -764,13 +883,15 @@ private:
                 } else {
                     auto value = lowerExpr(stmt->decl_init.value());
                     out.insert(out.end(), value.prelude.begin(), value.prelude.end());
-                    out.push_back(makeAssign(varLValue(stmt->decl_name, stmt->decl_type,
+                    out.push_back(makeAssign(varLValue(stmt->decl_name, decl_symbol,
+                                                       stmt->decl_type,
                                                        stmt->debug_loc),
                                              std::move(value.operand), stmt->debug_loc));
                 }
             } else if (!stmt->decl_init_args.empty()) {
                 auto args = lowerArgs(stmt->decl_init_args, out);
-                out.push_back(makeConstruct(varLValue(stmt->decl_name, stmt->decl_type,
+                out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
+                                                      stmt->decl_type,
                                                       stmt->debug_loc),
                                             !stmt->decl_type.struct_name.empty()
                                                 ? stmt->decl_type.struct_name
@@ -778,7 +899,8 @@ private:
                                             std::move(args), stmt->decl_type,
                                             stmt->debug_loc));
             } else if (stmt->decl_default_constructed) {
-                out.push_back(makeConstruct(varLValue(stmt->decl_name, stmt->decl_type,
+                out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
+                                                      stmt->decl_type,
                                                       stmt->debug_loc),
                                             !stmt->decl_type.struct_name.empty()
                                                 ? stmt->decl_type.struct_name
@@ -796,7 +918,8 @@ private:
                                                 stmt->assign_value->callee,
                                                 stmt->assign_value->debug_loc,
                                                 out);
-                    Operand call_value = varOperand(call_temp.root, call_temp.type,
+                    Operand call_value = varOperand(call_temp.root, call_temp.root_symbol,
+                                                    call_temp.type,
                                                     stmt->assign_value->debug_loc);
                     if (isConstructorCall(stmt->assign_value, ctx_)) {
                         out.push_back(makeConstruct(std::move(call_temp),
@@ -848,12 +971,19 @@ private:
             s->kind = S3StmtKind::If;
             s->debug_loc = stmt->debug_loc;
             s->condition = std::move(cond.operand);
-            s->then_body = lowerStmtList(stmt->if_then);
-            s->else_body = lowerStmtList(stmt->if_else);
+            {
+                ScopeGuard guard(ctx_, S3ScopeKind::IfThen, "then");
+                s->then_body = lowerStmtList(stmt->if_then);
+            }
+            {
+                ScopeGuard guard(ctx_, S3ScopeKind::IfElse, "else");
+                s->else_body = lowerStmtList(stmt->if_else);
+            }
             out.push_back(s);
             return out;
         }
         case StmtKind::Block: {
+            ScopeGuard guard(ctx_, S3ScopeKind::Block, "block");
             auto nested = lowerStmtList(stmt->block_stmts);
             out.insert(out.end(), nested.begin(), nested.end());
             return out;
@@ -897,6 +1027,7 @@ private:
             return out;
         }
         case StmtKind::For: {
+            ScopeGuard loop_guard(ctx_, S3ScopeKind::Loop, "for");
             auto s = std::make_shared<S3Stmt>();
             s->kind = S3StmtKind::For;
             s->debug_loc = stmt->debug_loc;
@@ -915,19 +1046,28 @@ private:
                 eval->value = std::move(step.operand);
                 s->for_step.push_back(eval);
             }
-            s->loop_body = lowerStmtList(stmt->for_body);
+            {
+                ScopeGuard body_guard(ctx_, S3ScopeKind::LoopBody, "for_body");
+                s->loop_body = lowerStmtList(stmt->for_body);
+            }
             out.push_back(s);
             return out;
         }
         case StmtKind::While:
         case StmtKind::DoWhile: {
+            ScopeGuard loop_guard(ctx_, S3ScopeKind::Loop,
+                                  stmt->kind == StmtKind::While ? "while" : "do_while");
             auto s = std::make_shared<S3Stmt>();
             s->kind = stmt->kind == StmtKind::While ? S3StmtKind::While : S3StmtKind::DoWhile;
             s->debug_loc = stmt->debug_loc;
             auto cond = lowerExpr(stmt->while_cond);
             s->condition_prelude = std::move(cond.prelude);
             s->condition = std::move(cond.operand);
-            s->loop_body = lowerStmtList(stmt->while_body);
+            {
+                ScopeGuard body_guard(ctx_, S3ScopeKind::LoopBody,
+                                      stmt->kind == StmtKind::While ? "while_body" : "do_body");
+                s->loop_body = lowerStmtList(stmt->while_body);
+            }
             out.push_back(s);
             return out;
         }
@@ -945,7 +1085,11 @@ private:
                     out.insert(out.end(), value.prelude.begin(), value.prelude.end());
                     clause.value = std::move(value.operand);
                 }
-                clause.body = lowerStmtList(c.body);
+                {
+                    ScopeGuard case_guard(ctx_, S3ScopeKind::SwitchCase,
+                                          clause.value ? "case" : "default");
+                    clause.body = lowerStmtList(c.body);
+                }
                 s->switch_cases.push_back(std::move(clause));
             }
             out.push_back(s);
@@ -1021,6 +1165,19 @@ std::string binaryName(BinaryOp op) {
     case BinaryOp::Ge: return "Ge";
     }
     return "Binary";
+}
+
+std::string scopeKindName(S3ScopeKind kind) {
+    switch (kind) {
+    case S3ScopeKind::Function: return "function";
+    case S3ScopeKind::Block: return "block";
+    case S3ScopeKind::IfThen: return "if_then";
+    case S3ScopeKind::IfElse: return "if_else";
+    case S3ScopeKind::Loop: return "loop";
+    case S3ScopeKind::LoopBody: return "loop_body";
+    case S3ScopeKind::SwitchCase: return "switch_case";
+    }
+    return "scope";
 }
 
 std::string operandText(const Operand& op);
@@ -1174,6 +1331,7 @@ void verifyOperand(const Operand& op);
 
 void verifyLValue(const LValue& lv) {
     if (lv.root.empty()) fail(lv.debug_loc, "Statementized lvalue has empty root");
+    if (lv.root_symbol < 0) fail(lv.debug_loc, "Statementized lvalue has invalid symbol");
     for (const auto& access : lv.accesses) {
         if (access.kind == LValueAccessKind::Index) {
             if (!access.index) fail(lv.debug_loc, "Statementized lvalue index is missing");
@@ -1186,6 +1344,9 @@ void verifyOperand(const Operand& op) {
     if (op.kind == OperandKind::Var && op.var_name.empty()) {
         fail(op.debug_loc, "Statementized operand var has empty name");
     }
+    if (op.kind == OperandKind::Var && op.var_symbol < 0) {
+        fail(op.debug_loc, "Statementized operand var has invalid symbol");
+    }
     if (op.kind == OperandKind::LValueRead) verifyLValue(op.lvalue);
 }
 
@@ -1195,6 +1356,8 @@ void verifyStmt(const S3StmtPtr& stmt) {
     if (!stmt) return;
     switch (stmt->kind) {
     case S3StmtKind::Decl:
+        if (stmt->decl_symbol < 0) fail(stmt->debug_loc, "Statementized decl has invalid symbol");
+        return;
     case S3StmtKind::Break:
     case S3StmtKind::Continue:
         return;
@@ -1275,6 +1438,24 @@ std::string debugPrint(const StatementizedProgram& program) {
     std::ostringstream os;
     auto print_fn = [&](const StatementizedFunction& fn, const std::string& kind) {
         os << kind << " " << fn.name << "\n";
+        for (const auto& scope : fn.scopes) {
+            os << "  scope " << scope.id << " " << scopeKindName(scope.kind);
+            if (scope.parent) os << " parent=" << scope.parent.value();
+            if (!scope.label.empty()) os << " label=" << scope.label;
+            os << "\n";
+        }
+        for (const auto& symbol : fn.symbols) {
+            os << "  symbol " << symbol.id << " " << symbol.name
+               << " scope=" << symbol.declaring_scope << " valid=[";
+            for (std::size_t i = 0; i < symbol.valid_scope_ids.size(); ++i) {
+                if (i) os << ",";
+                os << symbol.valid_scope_ids[i];
+            }
+            os << "]";
+            if (symbol.is_param) os << " param";
+            if (symbol.is_temp) os << " temp";
+            os << "\n";
+        }
         printStmtList(os, fn.body, 2);
     };
     os << "s3statementize\n";

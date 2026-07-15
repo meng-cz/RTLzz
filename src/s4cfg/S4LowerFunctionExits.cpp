@@ -32,6 +32,7 @@ void collectOperandName(const Operand& op, std::unordered_set<std::string>& name
 std::unordered_set<std::string> collectNames(const FunctionCFG& cfg) {
     std::unordered_set<std::string> names;
     for (const auto& param : cfg.params) names.insert(param.name);
+    for (const auto& symbol : cfg.symbols) names.insert(symbol.name);
     for (const auto& block : cfg.blocks) {
         for (const auto& stmt : block->stmts) {
             if (!stmt.stmt) continue;
@@ -59,33 +60,36 @@ std::string makeReturnSlotName(const FunctionCFG& cfg) {
     }
 }
 
-LValue slotLValue(const std::string& name, TypeInfo type) {
+LValue slotLValue(const std::string& name, SymbolId symbol, TypeInfo type) {
     LValue lv;
     lv.root = name;
+    lv.root_symbol = symbol;
     lv.type = std::move(type);
     return lv;
 }
 
-Operand slotOperand(const std::string& name, TypeInfo type) {
+Operand slotOperand(const std::string& name, SymbolId symbol, TypeInfo type) {
     Operand operand;
     operand.kind = OperandKind::Var;
     operand.var_name = name;
+    operand.var_symbol = symbol;
     operand.type = std::move(type);
     return operand;
 }
 
-S3StmtPtr makeDecl(const std::string& name, TypeInfo type) {
+S3StmtPtr makeDecl(const std::string& name, SymbolId symbol, TypeInfo type) {
     auto stmt = std::make_shared<S3Stmt>();
     stmt->kind = S3StmtKind::Decl;
     stmt->decl_name = name;
+    stmt->decl_symbol = symbol;
     stmt->decl_type = std::move(type);
     return stmt;
 }
 
-S3StmtPtr makeAssign(const std::string& name, TypeInfo type, Operand value) {
+S3StmtPtr makeAssign(const std::string& name, SymbolId symbol, TypeInfo type, Operand value) {
     auto stmt = std::make_shared<S3Stmt>();
     stmt->kind = S3StmtKind::Assign;
-    stmt->target = slotLValue(name, type);
+    stmt->target = slotLValue(name, symbol, type);
     stmt->value = std::move(value);
     return stmt;
 }
@@ -97,11 +101,28 @@ void lowerFunctionExits(FunctionCFG& cfg, std::vector<CFGWarning>&) {
 
     std::string slot = makeReturnSlotName(cfg);
     cfg.return_slot = slot;
+    SymbolId slot_symbol = static_cast<SymbolId>(cfg.symbols.size());
+    cfg.return_slot_symbol = slot_symbol;
+    SymbolInfo info;
+    info.id = slot_symbol;
+    info.name = slot;
+    info.type = cfg.return_type;
+    info.declaring_scope = 0;
+    if (cfg.s3_scopes.empty()) {
+        info.valid_scope_ids.push_back(0);
+    } else {
+        info.valid_scope_ids.reserve(cfg.s3_scopes.size());
+        for (const auto& scope : cfg.s3_scopes) {
+            info.valid_scope_ids.push_back(scope.id);
+        }
+    }
+    cfg.symbols.push_back(std::move(info));
 
     auto* entry = cfg.blocks.empty() ? nullptr : cfg.blocks[static_cast<std::size_t>(cfg.entry)].get();
     if (entry) {
         entry->stmts.insert(entry->stmts.begin(),
-                            CFGStmt{CFGStmtKind::Decl, makeDecl(slot, cfg.return_type)});
+                            CFGStmt{CFGStmtKind::Decl,
+                                    makeDecl(slot, slot_symbol, cfg.return_type)});
     }
 
     for (auto& block : cfg.blocks) {
@@ -114,8 +135,9 @@ void lowerFunctionExits(FunctionCFG& cfg, std::vector<CFGWarning>&) {
         }
         auto value = block->terminator.return_value.value();
         block->stmts.push_back(
-            CFGStmt{CFGStmtKind::Assign, makeAssign(slot, cfg.return_type, value)});
-        block->terminator.return_value = slotOperand(slot, cfg.return_type);
+            CFGStmt{CFGStmtKind::Assign,
+                    makeAssign(slot, slot_symbol, cfg.return_type, value)});
+        block->terminator.return_value = slotOperand(slot, slot_symbol, cfg.return_type);
     }
 }
 

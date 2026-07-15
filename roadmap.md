@@ -12,13 +12,12 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
   4. BuildFunctionCFGs
      为 top/helper/lambda 分别构建 per-function CFG，基本块中只保留顺序语句和 statement-level call，控制流边显式表达分支/退出。
 
+  5. LoopLowerOrUnroll
+     对静态可展开循环进行展开，当前硬件子集可先要求所有循环在此阶段完全 unroll。
+
 
 
 ## 仍需确认的步骤：
-
-
-  5. LoopLowerOrUnroll
-     对静态可展开循环进行展开，当前硬件子集可先要求所有循环在此阶段完全 unroll。
 
   9. InlineCallsCFG
      在 CFG 层通过 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation 来内联 helper/lambda 调用。

@@ -111,43 +111,40 @@ if(MSVC)
 endif()
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    function(configure_debug_executable target_name)
+        if(MSVC)
+            set_property(TARGET ${target_name} PROPERTY VS_GLOBAL_TrackFileAccess false)
+            set_property(TARGET ${target_name} PROPERTY
+                MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
+            )
+        endif()
+    endfunction()
+
+    function(configure_testv2_executable target_name)
+        target_link_libraries(${target_name} PRIVATE predicate-expand-objects)
+        set_target_properties(${target_name} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/testv2"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/testv2"
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/testv2"
+            RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/testv2"
+            RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/testv2"
+        )
+        configure_debug_executable(${target_name})
+    endfunction()
+
     add_executable(predicate-expand main/main.cpp)
     target_link_libraries(predicate-expand PRIVATE predicate-expand-objects)
+    configure_debug_executable(predicate-expand)
 
-    add_executable(s2validate-test testv2/s2validate_test.cpp)
-    target_link_libraries(s2validate-test PRIVATE predicate-expand-objects)
-
-    add_executable(s3statementize-test testv2/s3statementize_test.cpp)
-    target_link_libraries(s3statementize-test PRIVATE predicate-expand-objects)
-
-    add_executable(s4cfg-test testv2/s4cfg_test.cpp)
-    target_link_libraries(s4cfg-test PRIVATE predicate-expand-objects)
-
-    add_executable(s4cfg-integration-test testv2/s4cfg_integration_test.cpp)
-    target_link_libraries(s4cfg-integration-test PRIVATE predicate-expand-objects)
-
-    if(MSVC)
-        set_property(TARGET predicate-expand PROPERTY VS_GLOBAL_TrackFileAccess false)
-        set_property(TARGET predicate-expand PROPERTY
-            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
-        )
-        set_property(TARGET s2validate-test PROPERTY VS_GLOBAL_TrackFileAccess false)
-        set_property(TARGET s2validate-test PROPERTY
-            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
-        )
-        set_property(TARGET s3statementize-test PROPERTY VS_GLOBAL_TrackFileAccess false)
-        set_property(TARGET s3statementize-test PROPERTY
-            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
-        )
-        set_property(TARGET s4cfg-test PROPERTY VS_GLOBAL_TrackFileAccess false)
-        set_property(TARGET s4cfg-test PROPERTY
-            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
-        )
-        set_property(TARGET s4cfg-integration-test PROPERTY VS_GLOBAL_TrackFileAccess false)
-        set_property(TARGET s4cfg-integration-test PROPERTY
-            MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
-        )
-    endif()
+    file(GLOB TESTV2_SOURCES CONFIGURE_DEPENDS
+        "${PROJECT_SOURCE_DIR}/testv2/*.cpp"
+    )
+    foreach(test_source IN LISTS TESTV2_SOURCES)
+        get_filename_component(test_stem "${test_source}" NAME_WE)
+        string(REPLACE "_" "-" test_target "${test_stem}")
+        add_executable(${test_target} "${test_source}")
+        configure_testv2_executable(${test_target})
+    endforeach()
 
     if(WIN32 AND LIBCLANG_RUNTIME)
         add_custom_command(TARGET predicate-expand POST_BUILD

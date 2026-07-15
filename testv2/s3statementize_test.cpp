@@ -115,6 +115,13 @@ static StmtPtr whileStmt(ExprPtr cond, std::vector<StmtPtr> body) {
     return stmt;
 }
 
+static StmtPtr blockStmt(std::vector<StmtPtr> body) {
+    auto stmt = std::make_shared<Stmt>();
+    stmt->kind = StmtKind::Block;
+    stmt->block_stmts = std::move(body);
+    return stmt;
+}
+
 static FunctionAST baseTop() {
     FunctionAST top;
     top.name = "hls_main";
@@ -323,11 +330,48 @@ static void incrementsShortCircuitTernaryAndLoopConditionAreStructured() {
     });
 }
 
+static void shadowedNamesUseDistinctSymbols() {
+    auto top = baseTop();
+    top.params.push_back(outputParam("out", int8()));
+    top.body.push_back(decl("x", int8(), make_literal("1", int8())));
+    top.body.push_back(blockStmt({
+        decl("x", int8(), make_literal("2", int8())),
+        assign(make_var("out", int8()), make_var("x", int8())),
+    }));
+
+    auto program = pred::s3statementize::statementizeFunctionASTOrThrow(top);
+    const auto& fn = program.top;
+    CHECK(fn.symbols.size() >= 3);
+
+    pred::s3statementize::SymbolId outer_x = -1;
+    pred::s3statementize::SymbolId inner_x = -1;
+    for (const auto& symbol : fn.symbols) {
+        if (symbol.name != "x") continue;
+        if (outer_x < 0) outer_x = symbol.id;
+        else inner_x = symbol.id;
+    }
+    CHECK(outer_x >= 0);
+    CHECK(inner_x >= 0);
+    CHECK(outer_x != inner_x);
+
+    pred::s3statementize::S3StmtPtr out_assign;
+    for (const auto& stmt : fn.body) {
+        if (stmt->kind == pred::s3statementize::S3StmtKind::Assign &&
+            stmt->target.root == "out") {
+            out_assign = stmt;
+        }
+    }
+    CHECK(out_assign != nullptr);
+    CHECK(out_assign->value.kind == pred::s3statementize::OperandKind::Var);
+    CHECK(out_assign->value.var_symbol == inner_x);
+}
+
 int main() {
     nestedCallsBecomeStatementLevel();
     returnIfHelperAndLambdaAreStatementized();
     complexLValueKeepsRhsBeforeLhs();
     constructorArgsAndNestedAssignmentAreLowered();
     incrementsShortCircuitTernaryAndLoopConditionAreStructured();
+    shadowedNamesUseDistinctSymbols();
     return 0;
 }

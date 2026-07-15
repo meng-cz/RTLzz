@@ -45,10 +45,9 @@ enum class TermKind {
     Exit,
 };
 
-enum class LoopKind {
-    For,
-    While,
-    DoWhile,
+enum class LoopConditionKind {
+    PreTest,
+    PostTest,
 };
 
 enum class ScopeKind {
@@ -57,7 +56,6 @@ enum class ScopeKind {
     IfThen,
     IfElse,
     LoopBody,
-    LoopStep,
     SwitchCase,
 };
 
@@ -110,11 +108,11 @@ struct ScopeInfo {
 
 struct LoopRegion {
     LoopRegionId id = -1;
-    LoopKind kind = LoopKind::While;
-    BlockId header = -1;
-    BlockId body = -1;
-    BlockId step = -1;
+    LoopConditionKind condition_kind = LoopConditionKind::PreTest;
+    BlockId init = -1;
     BlockId condition = -1;
+    BlockId condition_prelude = -1;
+    BlockId body = -1;
     BlockId exit = -1;
 };
 
@@ -122,12 +120,15 @@ struct FunctionCFG {
     std::string name;
     TypeInfo return_type;
     std::vector<ParamDecl> params;
+    std::vector<s3statementize::S3ScopeInfo> s3_scopes;
+    std::vector<s3statementize::SymbolInfo> symbols;
     BlockId entry = -1;
     BlockId exit = -1;
     std::vector<std::unique_ptr<BasicBlock>> blocks;
     std::vector<ScopeInfo> scopes;
     std::vector<LoopRegion> loop_regions;
     std::optional<std::string> return_slot;
+    s3statementize::SymbolId return_slot_symbol = -1;
 };
 
 struct CFGProgram {

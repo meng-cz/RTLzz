@@ -234,7 +234,8 @@ static void whileContinueTargetsConditionPrelude() {
 
     auto debug = cfgDebug(top);
     expectInOrder(debug, {
-        "loop 0 while",
+        "loop 0 pre_test",
+        "condition_prelude=bb",
         "call __tmp_hls_main_keep_0 = keep(out)",
         "term branch __tmp_hls_main_keep_0",
         "succs=[continue:bb3]",
@@ -256,8 +257,9 @@ static void forAndDoWhileLoopsHaveRegions() {
         call("again", {make_var("out", int8())}, boolType())));
 
     auto debug = cfgDebug(top);
-    expectContains(debug, "loop 0 for");
-    expectContains(debug, "loop 1 do_while");
+    expectContains(debug, "loop 0 pre_test");
+    expectContains(debug, "loop 1 post_test");
+    expectContains(debug, "condition_prelude=bb");
     expectContains(debug, "call __tmp_hls_main_lt_0 = lt(i)");
     expectContains(debug, "op __tmp_hls_main_inc_1 = Add(i, 1)");
     expectContains(debug, "call __tmp_hls_main_again_2 = again(out)");

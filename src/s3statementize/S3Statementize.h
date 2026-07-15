@@ -11,6 +11,9 @@
 
 namespace pred::s3statementize {
 
+using SymbolId = int;
+using ScopeId = int;
+
 enum class UnaryOp {
     LogicalNot,
     BitNot,
@@ -63,6 +66,33 @@ enum class LValueAccessKind {
 
 struct Operand;
 
+enum class S3ScopeKind {
+    Function,
+    Block,
+    IfThen,
+    IfElse,
+    Loop,
+    LoopBody,
+    SwitchCase,
+};
+
+struct S3ScopeInfo {
+    ScopeId id = -1;
+    std::optional<ScopeId> parent;
+    S3ScopeKind kind = S3ScopeKind::Block;
+    std::string label;
+};
+
+struct SymbolInfo {
+    SymbolId id = -1;
+    std::string name;
+    TypeInfo type;
+    ScopeId declaring_scope = -1;
+    std::vector<ScopeId> valid_scope_ids;
+    bool is_param = false;
+    bool is_temp = false;
+};
+
 struct LValueAccess {
     LValueAccessKind kind = LValueAccessKind::Field;
     std::string field;
@@ -71,6 +101,7 @@ struct LValueAccess {
 
 struct LValue {
     std::string root;
+    SymbolId root_symbol = -1;
     TypeInfo type;
     std::vector<LValueAccess> accesses;
     DebugLoc debug_loc;
@@ -88,6 +119,7 @@ struct Operand {
     DebugLoc debug_loc;
     std::string literal_value;
     std::string var_name;
+    SymbolId var_symbol = -1;
     LValue lvalue;
 };
 
@@ -146,6 +178,7 @@ struct S3Stmt {
 
     TypeInfo decl_type;
     std::string decl_name;
+    SymbolId decl_symbol = -1;
     bool decl_default_constructed = false;
 
     LValue target;
@@ -177,6 +210,8 @@ struct StatementizedFunction {
     std::string name;
     TypeInfo return_type;
     std::vector<ParamDecl> params;
+    std::vector<S3ScopeInfo> scopes;
+    std::vector<SymbolInfo> symbols;
     std::vector<S3StmtPtr> body;
 };
 

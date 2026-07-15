@@ -110,9 +110,9 @@ static void sourceLoopsSwitchBuildsEdgesAndFallthrough() {
     auto debug = buildS4DebugFromSource(
         "testv2/fixtures/s4cfg/source_loops_switch.logic.cpp");
 
-    expectContains(debug, "loop 0 for");
+    expectContains(debug, "loop 0 pre_test");
+    expectContains(debug, "condition_prelude=bb");
     expectContains(debug, "label=for_body");
-    expectContains(debug, "label=for_step");
     expectContains(debug, "continue");
     expectContains(debug, "break");
     expectContains(debug, "backedge");
@@ -128,19 +128,20 @@ static void sourceWhileDoWhileReevaluatesConditionPreludes() {
 
     expectContains(debug, "helper keep");
     expectContains(debug, "helper again");
-    expectContains(debug, "loop 0 while");
-    expectContains(debug, "loop 1 do_while");
+    expectContains(debug, "loop 0 pre_test");
+    expectContains(debug, "loop 1 post_test");
+    expectContains(debug, "condition_prelude=bb");
     expectContains(debug, "call __tmp_hls_main_keep_");
     expectContains(debug, "call __tmp_hls_main_again_");
     expectContains(debug, "continue");
     expectContains(debug, "break");
     expectInOrder(debug, {
-        "loop 0 while",
+        "loop 0 pre_test",
         "call __tmp_hls_main_keep_",
         "term branch __tmp_hls_main_keep_",
     });
     expectInOrder(debug, {
-        "loop 1 do_while",
+        "loop 1 post_test",
         "call __tmp_hls_main_again_",
         "term branch __tmp_hls_main_again_",
     });
