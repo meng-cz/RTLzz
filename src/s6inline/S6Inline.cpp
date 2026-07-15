@@ -940,6 +940,8 @@ std::string hardwareName(HardwareOp op) {
     case HardwareOp::Trunc: return "Trunc";
     case HardwareOp::Slice: return "Slice";
     case HardwareOp::BitSelect: return "BitSelect";
+    case HardwareOp::DynamicSlice: return "DynamicSlice";
+    case HardwareOp::DynamicBitSelect: return "DynamicBitSelect";
     case HardwareOp::WriteSlice: return "WriteSlice";
     case HardwareOp::WriteBit: return "WriteBit";
     case HardwareOp::DynamicWriteSlice: return "DynamicWriteSlice";

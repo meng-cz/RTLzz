@@ -1,4 +1,5 @@
 #include "ast/ASTBuilder.h"
+#include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
 #include "s4cfg/S4CFG.h"
@@ -124,11 +125,16 @@ static FunctionAST parseFixture(const std::string& file) {
 }
 
 static pred::s6inline::InlineResult runS6(const FunctionAST& ast) {
-    auto validation = pred::s2validate::validateFunctionAST(ast);
+    auto s1 = pred::s1apinorm::normalizeAPIs(ast);
+    if (!s1.ok()) std::cerr << s1.error->formatted << "\n";
+    CHECK(s1.ok());
+    CHECK(s1.function.has_value());
+
+    auto validation = pred::s2validate::validateFunctionAST(s1.function.value());
     if (!validation.ok()) std::cerr << validation.error->formatted << "\n";
     CHECK(validation.ok());
 
-    auto s3 = pred::s3statementize::statementizeFunctionAST(ast);
+    auto s3 = pred::s3statementize::statementizeFunctionAST(s1.function.value());
     if (!s3.ok()) std::cerr << s3.error->formatted << "\n";
     CHECK(s3.ok());
     CHECK(s3.program.has_value());

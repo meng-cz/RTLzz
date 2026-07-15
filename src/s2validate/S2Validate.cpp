@@ -771,6 +771,167 @@ std::string debugPrint(const Context& ctx) {
     return os.str();
 }
 
+ExprKind legacyHardwareKind(s1apinorm::S1HardwareOp op) {
+    using s1apinorm::S1HardwareOp;
+    switch (op) {
+    case S1HardwareOp::ZExt: return ExprKind::ZExt;
+    case S1HardwareOp::SExt: return ExprKind::SExt;
+    case S1HardwareOp::Trunc: return ExprKind::Trunc;
+    case S1HardwareOp::Slice: return ExprKind::Slice;
+    case S1HardwareOp::BitSelect: return ExprKind::BitSelect;
+    case S1HardwareOp::DynamicSlice: return ExprKind::DynamicWriteSlice;
+    case S1HardwareOp::DynamicBitSelect: return ExprKind::DynamicWriteBit;
+    case S1HardwareOp::WriteSlice: return ExprKind::WriteSlice;
+    case S1HardwareOp::WriteBit: return ExprKind::WriteBit;
+    case S1HardwareOp::DynamicWriteSlice: return ExprKind::DynamicWriteSlice;
+    case S1HardwareOp::DynamicWriteBit: return ExprKind::DynamicWriteBit;
+    case S1HardwareOp::Concat: return ExprKind::Concat;
+    case S1HardwareOp::Repeat: return ExprKind::Repeat;
+    case S1HardwareOp::ReduceOr: return ExprKind::ReduceOr;
+    case S1HardwareOp::ReduceAnd: return ExprKind::ReduceAnd;
+    case S1HardwareOp::ReduceXor: return ExprKind::ReduceXor;
+    }
+    return ExprKind::Call;
+}
+
+ExprPtr legacyExprView(const s1apinorm::S1ExprPtr& expr) {
+    if (!expr) return nullptr;
+    auto out = std::make_shared<Expr>();
+    out->type = expr->type;
+    out->debug_loc = expr->debug_loc;
+    switch (expr->kind) {
+    case s1apinorm::S1ExprKind::Literal:
+        out->kind = ExprKind::Literal;
+        out->literal_value = expr->literal_value;
+        return out;
+    case s1apinorm::S1ExprKind::VarRef:
+        out->kind = ExprKind::VarRef;
+        out->var_name = expr->var_name;
+        return out;
+    case s1apinorm::S1ExprKind::BinaryOp:
+        out->kind = ExprKind::BinaryOp;
+        out->op = expr->op;
+        out->left = legacyExprView(expr->left);
+        out->right = legacyExprView(expr->right);
+        return out;
+    case s1apinorm::S1ExprKind::UnaryOp:
+        out->kind = ExprKind::UnaryOp;
+        out->op = expr->op;
+        out->operand = legacyExprView(expr->operand);
+        return out;
+    case s1apinorm::S1ExprKind::ArrayAccess:
+        out->kind = ExprKind::ArrayAccess;
+        out->array_base = legacyExprView(expr->array_base);
+        out->index = legacyExprView(expr->index);
+        return out;
+    case s1apinorm::S1ExprKind::FieldAccess:
+        out->kind = ExprKind::FieldAccess;
+        out->struct_base = legacyExprView(expr->struct_base);
+        out->field_name = expr->field_name;
+        return out;
+    case s1apinorm::S1ExprKind::Call:
+        out->kind = ExprKind::Call;
+        out->callee = expr->callee;
+        for (const auto& arg : expr->args) out->args.push_back(legacyExprView(arg));
+        return out;
+    case s1apinorm::S1ExprKind::Cast:
+        out->kind = ExprKind::Cast;
+        out->cast_type = expr->cast_type;
+        out->cast_expr = legacyExprView(expr->cast_expr);
+        return out;
+    case s1apinorm::S1ExprKind::Ternary:
+        out->kind = ExprKind::Ternary;
+        out->cond = legacyExprView(expr->cond);
+        out->then_expr = legacyExprView(expr->then_expr);
+        out->else_expr = legacyExprView(expr->else_expr);
+        return out;
+    case s1apinorm::S1ExprKind::HardwareOp:
+        out->kind = legacyHardwareKind(expr->hardware_op);
+        out->base = legacyExprView(expr->base);
+        out->value = legacyExprView(expr->value);
+        out->index = legacyExprView(expr->index);
+        out->operand = legacyExprView(expr->operand);
+        out->cast_expr = legacyExprView(expr->cast_expr);
+        for (const auto& part : expr->parts) out->parts.push_back(legacyExprView(part));
+        out->hi = expr->hi;
+        out->lo = expr->lo;
+        out->bit = expr->bit;
+        out->times = expr->times;
+        out->to_width = expr->to_width;
+        return out;
+    }
+    return out;
+}
+
+StmtPtr legacyStmtView(const s1apinorm::S1StmtPtr& stmt);
+
+std::vector<StmtPtr> legacyStmtListView(const std::vector<s1apinorm::S1StmtPtr>& stmts) {
+    std::vector<StmtPtr> out;
+    out.reserve(stmts.size());
+    for (const auto& stmt : stmts) out.push_back(legacyStmtView(stmt));
+    return out;
+}
+
+std::vector<CaseClause> legacyCaseView(const std::vector<s1apinorm::S1CaseClause>& cases) {
+    std::vector<CaseClause> out;
+    out.reserve(cases.size());
+    for (const auto& one : cases) {
+        CaseClause c;
+        if (one.value) c.value = legacyExprView(one.value.value());
+        c.body = legacyStmtListView(one.body);
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+StmtPtr legacyStmtView(const s1apinorm::S1StmtPtr& stmt) {
+    if (!stmt) return nullptr;
+    auto out = std::make_shared<Stmt>();
+    out->kind = stmt->kind;
+    out->debug_loc = stmt->debug_loc;
+    out->assign_target = legacyExprView(stmt->assign_target);
+    out->assign_value = legacyExprView(stmt->assign_value);
+    out->decl_type = stmt->decl_type;
+    out->decl_name = stmt->decl_name;
+    if (stmt->decl_init) out->decl_init = legacyExprView(stmt->decl_init.value());
+    for (const auto& arg : stmt->decl_init_args) out->decl_init_args.push_back(legacyExprView(arg));
+    out->decl_default_constructed = stmt->decl_default_constructed;
+    out->if_cond = legacyExprView(stmt->if_cond);
+    out->if_then = legacyStmtListView(stmt->if_then);
+    out->if_else = legacyStmtListView(stmt->if_else);
+    out->for_init = legacyStmtView(stmt->for_init);
+    out->for_cond = legacyExprView(stmt->for_cond);
+    out->for_step = legacyExprView(stmt->for_step);
+    out->for_body = legacyStmtListView(stmt->for_body);
+    out->while_cond = legacyExprView(stmt->while_cond);
+    out->while_body = legacyStmtListView(stmt->while_body);
+    out->switch_expr = legacyExprView(stmt->switch_expr);
+    out->switch_cases = legacyCaseView(stmt->switch_cases);
+    out->block_stmts = legacyStmtListView(stmt->block_stmts);
+    if (stmt->return_value) out->return_value = legacyExprView(stmt->return_value.value());
+    out->expr_stmt = legacyExprView(stmt->expr_stmt);
+    return out;
+}
+
+FunctionAST legacyFunctionView(const s1apinorm::S1FunctionAST& function) {
+    FunctionAST out;
+    out.name = function.name;
+    out.return_type = function.return_type;
+    out.params = function.params;
+    out.body = legacyStmtListView(function.body);
+    out.struct_fields = function.struct_fields;
+    out.struct_constructors = function.struct_constructors;
+    for (const auto& helper : function.helpers) {
+        if (!helper) continue;
+        out.helpers.push_back(std::make_shared<FunctionAST>(legacyFunctionView(*helper)));
+    }
+    for (const auto& [name, lambda] : function.lambdas) {
+        if (!lambda) continue;
+        out.lambdas[name] = std::make_shared<FunctionAST>(legacyFunctionView(*lambda));
+    }
+    return out;
+}
+
 ValidateResult runValidate(const FunctionAST& function,
                            const ValidateOptions& options) {
     Context ctx{function, options};
@@ -785,6 +946,11 @@ ValidateResult runValidate(const FunctionAST& function,
     result.warnings = std::move(ctx.warnings);
     if (options.debug_print) result.debug_text = debugPrint(ctx);
     return result;
+}
+
+ValidateResult runValidate(const s1apinorm::S1FunctionAST& function,
+                           const ValidateOptions& options) {
+    return runValidate(legacyFunctionView(function), options);
 }
 
 } // namespace
@@ -804,7 +970,28 @@ ValidateResult validateFunctionAST(const FunctionAST& function,
     }
 }
 
+ValidateResult validateFunctionAST(const s1apinorm::S1FunctionAST& function,
+                                   const ValidateOptions& options) {
+    try {
+        return runValidate(function, options);
+    } catch (const RTLZZException& ex) {
+        ValidateResult result;
+        ValidateError error;
+        error.message = ex.message();
+        error.formatted = ex.what();
+        if (auto context = ex.primaryContext()) error.context = *context;
+        result.error = std::move(error);
+        return result;
+    }
+}
+
 void validateFunctionASTOrThrow(const FunctionAST& function,
+                                const ValidateOptions& options) {
+    auto result = runValidate(function, options);
+    (void)result;
+}
+
+void validateFunctionASTOrThrow(const s1apinorm::S1FunctionAST& function,
                                 const ValidateOptions& options) {
     auto result = runValidate(function, options);
     (void)result;

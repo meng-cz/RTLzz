@@ -288,7 +288,27 @@ bool isConstructorCall(const ExprPtr& expr, const LowerContext& ctx) {
     return false;
 }
 
+bool isConstructorCall(const s1apinorm::S1ExprPtr& expr, const LowerContext& ctx) {
+    if (!expr || expr->kind != s1apinorm::S1ExprKind::Call) return false;
+    if (isHardwareConstructorName(expr->callee)) {
+        return true;
+    }
+    std::string callee = canonicalName(expr->callee);
+    if (!expr->type.struct_name.empty() &&
+        callee == canonicalName(expr->type.struct_name)) {
+        return true;
+    }
+    if (!expr->type.name.empty() && callee == canonicalName(expr->type.name) &&
+        ctx.struct_names.count(callee)) {
+        return true;
+    }
+    if (ctx.struct_names.count(callee)) return true;
+    return false;
+}
+
 void collectNamesExpr(const ExprPtr& expr, std::unordered_set<std::string>& out);
+
+void collectNamesExpr(const s1apinorm::S1ExprPtr& expr, std::unordered_set<std::string>& out);
 
 void collectNamesStmt(const StmtPtr& stmt, std::unordered_set<std::string>& out) {
     if (!stmt) return;
@@ -335,6 +355,53 @@ void collectNamesExpr(const ExprPtr& expr, std::unordered_set<std::string>& out)
     for (const auto& part : expr->parts) collectNamesExpr(part, out);
 }
 
+void collectNamesStmt(const s1apinorm::S1StmtPtr& stmt, std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    if (stmt->kind == StmtKind::Decl && !stmt->decl_name.empty()) out.insert(stmt->decl_name);
+    collectNamesExpr(stmt->assign_target, out);
+    collectNamesExpr(stmt->assign_value, out);
+    if (stmt->decl_init) collectNamesExpr(stmt->decl_init.value(), out);
+    for (const auto& arg : stmt->decl_init_args) collectNamesExpr(arg, out);
+    collectNamesExpr(stmt->if_cond, out);
+    for (const auto& child : stmt->if_then) collectNamesStmt(child, out);
+    for (const auto& child : stmt->if_else) collectNamesStmt(child, out);
+    if (stmt->for_init) collectNamesStmt(stmt->for_init, out);
+    collectNamesExpr(stmt->for_cond, out);
+    collectNamesExpr(stmt->for_step, out);
+    for (const auto& child : stmt->for_body) collectNamesStmt(child, out);
+    collectNamesExpr(stmt->while_cond, out);
+    for (const auto& child : stmt->while_body) collectNamesStmt(child, out);
+    collectNamesExpr(stmt->switch_expr, out);
+    for (const auto& c : stmt->switch_cases) {
+        if (c.value) collectNamesExpr(c.value.value(), out);
+        for (const auto& child : c.body) collectNamesStmt(child, out);
+    }
+    for (const auto& child : stmt->block_stmts) collectNamesStmt(child, out);
+    if (stmt->return_value) collectNamesExpr(stmt->return_value.value(), out);
+    collectNamesExpr(stmt->expr_stmt, out);
+}
+
+void collectNamesExpr(const s1apinorm::S1ExprPtr& expr, std::unordered_set<std::string>& out) {
+    if (!expr) return;
+    if (expr->kind == s1apinorm::S1ExprKind::VarRef && !expr->var_name.empty()) {
+        out.insert(expr->var_name);
+    }
+    collectNamesExpr(expr->left, out);
+    collectNamesExpr(expr->right, out);
+    collectNamesExpr(expr->operand, out);
+    collectNamesExpr(expr->array_base, out);
+    collectNamesExpr(expr->index, out);
+    collectNamesExpr(expr->struct_base, out);
+    collectNamesExpr(expr->cast_expr, out);
+    collectNamesExpr(expr->cond, out);
+    collectNamesExpr(expr->then_expr, out);
+    collectNamesExpr(expr->else_expr, out);
+    collectNamesExpr(expr->base, out);
+    collectNamesExpr(expr->value, out);
+    for (const auto& arg : expr->args) collectNamesExpr(arg, out);
+    for (const auto& part : expr->parts) collectNamesExpr(part, out);
+}
+
 struct LowerResult {
     Operand operand;
     std::vector<S3StmtPtr> prelude;
@@ -364,6 +431,26 @@ public:
         return out;
     }
 
+    StatementizedFunction lowerFunction(const s1apinorm::S1FunctionAST& fn) {
+        StatementizedFunction out;
+        out.name = fn.name;
+        out.return_type = fn.return_type;
+        out.params = fn.params;
+        if (ctx_.scopes.empty()) {
+            createScope(ctx_, std::nullopt, S3ScopeKind::Function, fn.name);
+            ctx_.scope_stack.push_back(0);
+            ctx_.bindings.emplace_back();
+        }
+        for (const auto& param : fn.params) {
+            createSymbol(ctx_, param.name, param.type, true, false);
+        }
+        out.body = lowerStmtList(fn.body);
+        finalizeSymbolScopes();
+        out.scopes = ctx_.scopes;
+        out.symbols = ctx_.symbols;
+        return out;
+    }
+
 private:
     LowerContext ctx_;
 
@@ -371,6 +458,16 @@ private:
         if (!expr) return fallback;
         if (expr->kind == ExprKind::VarRef) return expr->var_name;
         if (expr->kind == ExprKind::Call && !expr->callee.empty()) return expr->callee;
+        return fallback;
+    }
+
+    std::string tempHint(const s1apinorm::S1ExprPtr& expr, const std::string& fallback) {
+        if (!expr) return fallback;
+        if (expr->kind == s1apinorm::S1ExprKind::VarRef) return expr->var_name;
+        if (expr->kind == s1apinorm::S1ExprKind::Call && !expr->callee.empty()) return expr->callee;
+        if (expr->kind == s1apinorm::S1ExprKind::HardwareOp) {
+            return s1apinorm::hardwareOpName(expr->hardware_op);
+        }
         return fallback;
     }
 
@@ -413,6 +510,18 @@ private:
     }
 
     std::vector<Operand> lowerArgs(const std::vector<ExprPtr>& args,
+                                   std::vector<S3StmtPtr>& out) {
+        std::vector<Operand> lowered;
+        lowered.reserve(args.size());
+        for (const auto& arg : args) {
+            auto part = lowerExpr(arg);
+            out.insert(out.end(), part.prelude.begin(), part.prelude.end());
+            lowered.push_back(std::move(part.operand));
+        }
+        return lowered;
+    }
+
+    std::vector<Operand> lowerArgs(const std::vector<s1apinorm::S1ExprPtr>& args,
                                    std::vector<S3StmtPtr>& out) {
         std::vector<Operand> lowered;
         lowered.reserve(args.size());
@@ -530,6 +639,99 @@ private:
         return result;
     }
 
+    LowerResult lowerExpr(const s1apinorm::S1ExprPtr& expr) {
+        if (!expr) return {};
+        ErrorContextGuard guard("s3statementize", expr->debug_loc, "lowering S1 expression");
+        LowerResult result;
+        switch (expr->kind) {
+        case s1apinorm::S1ExprKind::Literal:
+            result.operand = literalOperand(expr->literal_value, expr->type, expr->debug_loc);
+            return result;
+        case s1apinorm::S1ExprKind::VarRef:
+            result.operand = varOperand(expr->var_name,
+                                        resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
+                                        expr->type,
+                                        expr->debug_loc);
+            return result;
+        case s1apinorm::S1ExprKind::ArrayAccess:
+        case s1apinorm::S1ExprKind::FieldAccess: {
+            auto lv = lowerLValue(expr);
+            result.prelude = std::move(lv.prelude);
+            result.operand = lvalueOperand(std::move(lv.lvalue));
+            return result;
+        }
+        case s1apinorm::S1ExprKind::Call: {
+            auto args = lowerArgs(expr->args, result.prelude);
+            auto target = tempLValue(expr->type, tempHint(expr, "call"), expr->debug_loc,
+                                     result.prelude);
+            result.operand = varOperand(target.root, target.root_symbol, target.type,
+                                        expr->debug_loc);
+            if (isConstructorCall(expr, ctx_)) {
+                result.prelude.push_back(makeConstruct(std::move(target), expr->callee,
+                                                       std::move(args), expr->type,
+                                                       expr->debug_loc));
+            } else {
+                result.prelude.push_back(makeCall(std::move(target), expr->callee,
+                                                  std::move(args), expr->type,
+                                                  expr->debug_loc));
+            }
+            return result;
+        }
+        case s1apinorm::S1ExprKind::Cast: {
+            auto value = lowerExpr(expr->cast_expr);
+            result.prelude = std::move(value.prelude);
+            OpExpr op;
+            op.kind = OpExpr::Kind::Cast;
+            op.type = expr->type;
+            op.cast_type = expr->cast_type;
+            op.debug_loc = expr->debug_loc;
+            op.operands.push_back(std::move(value.operand));
+            result.operand = materializeOp(std::move(op), "cast", expr->debug_loc, result.prelude);
+            return result;
+        }
+        case s1apinorm::S1ExprKind::UnaryOp: {
+            if (expr->op == "++" || expr->op == "--" || expr->op == "post++" ||
+                expr->op == "post--") {
+                return lowerIncrement(expr);
+            }
+            auto value = lowerExpr(expr->operand);
+            result.prelude = std::move(value.prelude);
+            OpExpr op;
+            op.kind = OpExpr::Kind::Unary;
+            op.type = expr->type;
+            op.debug_loc = expr->debug_loc;
+            op.unary_op = parseUnaryOp(expr->op, expr->debug_loc);
+            op.operands.push_back(std::move(value.operand));
+            result.operand = materializeOp(std::move(op), "unary", expr->debug_loc, result.prelude);
+            return result;
+        }
+        case s1apinorm::S1ExprKind::BinaryOp: {
+            if (expr->op == ",") fail(expr->debug_loc, "Comma expression is not supported");
+            if (expr->op == "=") return lowerAssignmentExpr(expr);
+            if (isCompoundAssign(expr->op)) return lowerCompoundAssignExpr(expr);
+            if (expr->op == "&&" || expr->op == "||") return lowerShortCircuit(expr);
+            auto lhs = lowerExpr(expr->left);
+            result.prelude = std::move(lhs.prelude);
+            auto rhs = lowerExpr(expr->right);
+            result.prelude.insert(result.prelude.end(), rhs.prelude.begin(), rhs.prelude.end());
+            OpExpr op;
+            op.kind = OpExpr::Kind::Binary;
+            op.type = expr->type;
+            op.debug_loc = expr->debug_loc;
+            op.binary_op = parseBinaryOp(expr->op, expr->debug_loc);
+            op.operands.push_back(std::move(lhs.operand));
+            op.operands.push_back(std::move(rhs.operand));
+            result.operand = materializeOp(std::move(op), "binary", expr->debug_loc, result.prelude);
+            return result;
+        }
+        case s1apinorm::S1ExprKind::Ternary:
+            return lowerTernary(expr);
+        case s1apinorm::S1ExprKind::HardwareOp:
+            return lowerHardwareExpr(expr);
+        }
+        return result;
+    }
+
     struct LValueResult {
         LValue lvalue;
         std::vector<S3StmtPtr> prelude;
@@ -566,6 +768,37 @@ private:
         fail(expr->debug_loc, "Expression is not a supported lvalue");
     }
 
+    LValueResult lowerLValue(const s1apinorm::S1ExprPtr& expr) {
+        if (!expr) fail(DebugLoc{}, "Expected lvalue expression");
+        if (expr->kind == s1apinorm::S1ExprKind::VarRef) {
+            return {varLValue(expr->var_name,
+                              resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
+                              expr->type,
+                              expr->debug_loc), {}};
+        }
+        if (expr->kind == s1apinorm::S1ExprKind::FieldAccess) {
+            auto base = lowerLValue(expr->struct_base);
+            base.lvalue.accesses.push_back(
+                LValueAccess{LValueAccessKind::Field, expr->field_name, nullptr});
+            base.lvalue.type = expr->type;
+            return base;
+        }
+        if (expr->kind == s1apinorm::S1ExprKind::ArrayAccess) {
+            auto base = lowerLValue(expr->array_base);
+            auto idx = lowerExpr(expr->index);
+            base.prelude.insert(base.prelude.end(), idx.prelude.begin(), idx.prelude.end());
+            auto index = std::make_shared<Operand>(std::move(idx.operand));
+            LValueAccess step;
+            step.kind = LValueAccessKind::Index;
+            step.index = std::move(index);
+            base.lvalue.accesses.push_back(std::move(step));
+            base.lvalue.type = expr->type;
+            return base;
+        }
+        if (expr->kind == s1apinorm::S1ExprKind::Cast) return lowerLValue(expr->cast_expr);
+        fail(expr->debug_loc, "Expression is not a supported lvalue");
+    }
+
     bool isCompoundAssign(const std::string& op) const {
         return op == "+=" || op == "-=" || op == "*=" || op == "/=" ||
                op == "%=" || op == "<<=" || op == ">>=" || op == "&=" ||
@@ -580,6 +813,20 @@ private:
             return true;
         case ExprKind::ArrayAccess:
         case ExprKind::FieldAccess:
+            return !lvalueNeedsPrelude(expr);
+        default:
+            return false;
+        }
+    }
+
+    bool exprIsSimpleOperand(const s1apinorm::S1ExprPtr& expr) const {
+        if (!expr) return false;
+        switch (expr->kind) {
+        case s1apinorm::S1ExprKind::Literal:
+        case s1apinorm::S1ExprKind::VarRef:
+            return true;
+        case s1apinorm::S1ExprKind::ArrayAccess:
+        case s1apinorm::S1ExprKind::FieldAccess:
             return !lvalueNeedsPrelude(expr);
         default:
             return false;
@@ -603,12 +850,40 @@ private:
         }
     }
 
+    bool lvalueNeedsPrelude(const s1apinorm::S1ExprPtr& expr) const {
+        if (!expr) return true;
+        switch (expr->kind) {
+        case s1apinorm::S1ExprKind::VarRef:
+            return false;
+        case s1apinorm::S1ExprKind::FieldAccess:
+            return lvalueNeedsPrelude(expr->struct_base);
+        case s1apinorm::S1ExprKind::ArrayAccess:
+            return lvalueNeedsPrelude(expr->array_base) ||
+                   !exprIsSimpleOperand(expr->index);
+        case s1apinorm::S1ExprKind::Cast:
+            return lvalueNeedsPrelude(expr->cast_expr);
+        default:
+            return true;
+        }
+    }
+
     std::string compoundBinaryOp(std::string op) const {
         op.pop_back();
         return op;
     }
 
     LowerResult lowerAssignmentExpr(const ExprPtr& expr) {
+        LowerResult result;
+        auto rhs = lowerExpr(expr->right);
+        result.prelude = std::move(rhs.prelude);
+        auto lhs = lowerLValue(expr->left);
+        result.prelude.insert(result.prelude.end(), lhs.prelude.begin(), lhs.prelude.end());
+        result.prelude.push_back(makeAssign(lhs.lvalue, rhs.operand, expr->debug_loc));
+        result.operand = lvalueOperand(std::move(lhs.lvalue));
+        return result;
+    }
+
+    LowerResult lowerAssignmentExpr(const s1apinorm::S1ExprPtr& expr) {
         LowerResult result;
         auto rhs = lowerExpr(expr->right);
         result.prelude = std::move(rhs.prelude);
@@ -638,7 +913,50 @@ private:
         return result;
     }
 
+    LowerResult lowerCompoundAssignExpr(const s1apinorm::S1ExprPtr& expr) {
+        LowerResult result;
+        auto lhs = lowerLValue(expr->left);
+        result.prelude = std::move(lhs.prelude);
+        auto rhs = lowerExpr(expr->right);
+        result.prelude.insert(result.prelude.end(), rhs.prelude.begin(), rhs.prelude.end());
+        OpExpr op;
+        op.kind = OpExpr::Kind::Binary;
+        op.type = expr->type;
+        op.debug_loc = expr->debug_loc;
+        op.binary_op = parseBinaryOp(compoundBinaryOp(expr->op), expr->debug_loc);
+        op.operands.push_back(lvalueOperand(lhs.lvalue));
+        op.operands.push_back(std::move(rhs.operand));
+        auto temp = materializeOp(std::move(op), "compound", expr->debug_loc, result.prelude);
+        result.prelude.push_back(makeAssign(lhs.lvalue, temp, expr->debug_loc));
+        result.operand = lvalueOperand(std::move(lhs.lvalue));
+        return result;
+    }
+
     LowerResult lowerIncrement(const ExprPtr& expr) {
+        LowerResult result;
+        const bool post = expr->op == "post++" || expr->op == "post--";
+        const bool inc = expr->op == "++" || expr->op == "post++";
+        auto lv = lowerLValue(expr->operand);
+        result.prelude = std::move(lv.prelude);
+        if (post) {
+            auto old = tempLValue(expr->type, "post", expr->debug_loc, result.prelude);
+            result.prelude.push_back(makeAssign(old, lvalueOperand(lv.lvalue), expr->debug_loc));
+            result.operand = varOperand(old.root, old.root_symbol, old.type, expr->debug_loc);
+        }
+        OpExpr op;
+        op.kind = OpExpr::Kind::Binary;
+        op.type = expr->type;
+        op.debug_loc = expr->debug_loc;
+        op.binary_op = inc ? BinaryOp::Add : BinaryOp::Sub;
+        op.operands.push_back(lvalueOperand(lv.lvalue));
+        op.operands.push_back(literalOperand("1", expr->type, expr->debug_loc));
+        auto next = materializeOp(std::move(op), "inc", expr->debug_loc, result.prelude);
+        result.prelude.push_back(makeAssign(lv.lvalue, next, expr->debug_loc));
+        if (!post) result.operand = lvalueOperand(std::move(lv.lvalue));
+        return result;
+    }
+
+    LowerResult lowerIncrement(const s1apinorm::S1ExprPtr& expr) {
         LowerResult result;
         const bool post = expr->op == "post++" || expr->op == "post--";
         const bool inc = expr->op == "++" || expr->op == "post++";
@@ -697,7 +1015,82 @@ private:
         return result;
     }
 
+    LowerResult lowerShortCircuit(const s1apinorm::S1ExprPtr& expr) {
+        LowerResult result;
+        auto lhs = lowerExpr(expr->left);
+        result.prelude = std::move(lhs.prelude);
+        auto target = tempLValue(expr->type, "shortcircuit", expr->debug_loc, result.prelude);
+        result.prelude.push_back(makeAssign(target, lhs.operand, expr->debug_loc));
+        auto rhs = lowerExpr(expr->right);
+        std::vector<S3StmtPtr> body = std::move(rhs.prelude);
+        body.push_back(makeAssign(target, rhs.operand, expr->debug_loc));
+        auto if_stmt = std::make_shared<S3Stmt>();
+        if_stmt->kind = S3StmtKind::If;
+        if_stmt->debug_loc = expr->debug_loc;
+        if (expr->op == "&&") {
+            if_stmt->condition = lhs.operand;
+            if_stmt->then_body = std::move(body);
+        } else {
+            auto cond_target = tempLValue(expr->type, "logical_not", expr->debug_loc,
+                                          result.prelude);
+            OpExpr not_op;
+            not_op.kind = OpExpr::Kind::Unary;
+            not_op.type = expr->type;
+            not_op.debug_loc = expr->debug_loc;
+            not_op.unary_op = UnaryOp::LogicalNot;
+            not_op.operands.push_back(lhs.operand);
+            result.prelude.push_back(makeOp(cond_target, std::move(not_op), expr->debug_loc));
+            if_stmt->condition = varOperand(cond_target.root, cond_target.root_symbol,
+                                            cond_target.type, expr->debug_loc);
+            if_stmt->then_body = std::move(body);
+        }
+        result.prelude.push_back(if_stmt);
+        result.operand = varOperand(target.root, target.root_symbol, target.type,
+                                    expr->debug_loc);
+        return result;
+    }
+
     LowerResult lowerTernary(const ExprPtr& expr) {
+        LowerResult result;
+        auto cond = lowerExpr(expr->cond);
+        result.prelude = std::move(cond.prelude);
+        bool has_side_effect = exprHasSideEffect(expr->then_expr) ||
+                               exprHasSideEffect(expr->else_expr);
+        if (has_side_effect) {
+            auto target = tempLValue(expr->type, "ternary", expr->debug_loc, result.prelude);
+            auto then_value = lowerExpr(expr->then_expr);
+            auto else_value = lowerExpr(expr->else_expr);
+            auto if_stmt = std::make_shared<S3Stmt>();
+            if_stmt->kind = S3StmtKind::If;
+            if_stmt->debug_loc = expr->debug_loc;
+            if_stmt->condition = cond.operand;
+            if_stmt->then_body = std::move(then_value.prelude);
+            if_stmt->then_body.push_back(makeAssign(target, then_value.operand, expr->debug_loc));
+            if_stmt->else_body = std::move(else_value.prelude);
+            if_stmt->else_body.push_back(makeAssign(target, else_value.operand, expr->debug_loc));
+            result.prelude.push_back(if_stmt);
+            result.operand = varOperand(target.root, target.root_symbol, target.type,
+                                        expr->debug_loc);
+            return result;
+        }
+        auto then_value = lowerExpr(expr->then_expr);
+        auto else_value = lowerExpr(expr->else_expr);
+        result.prelude.insert(result.prelude.end(),
+                              then_value.prelude.begin(), then_value.prelude.end());
+        result.prelude.insert(result.prelude.end(),
+                              else_value.prelude.begin(), else_value.prelude.end());
+        OpExpr op;
+        op.kind = OpExpr::Kind::Ternary;
+        op.type = expr->type;
+        op.debug_loc = expr->debug_loc;
+        op.operands.push_back(std::move(cond.operand));
+        op.operands.push_back(std::move(then_value.operand));
+        op.operands.push_back(std::move(else_value.operand));
+        result.operand = materializeOp(std::move(op), "ternary", expr->debug_loc, result.prelude);
+        return result;
+    }
+
+    LowerResult lowerTernary(const s1apinorm::S1ExprPtr& expr) {
         LowerResult result;
         auto cond = lowerExpr(expr->cond);
         result.prelude = std::move(cond.prelude);
@@ -796,6 +1189,52 @@ private:
         return false;
     }
 
+    bool exprHasSideEffect(const s1apinorm::S1ExprPtr& expr) const {
+        if (!expr) return false;
+        switch (expr->kind) {
+        case s1apinorm::S1ExprKind::Call:
+            if (isHardwareConstructorName(expr->callee)) {
+                return std::any_of(expr->args.begin(), expr->args.end(),
+                                   [&](const s1apinorm::S1ExprPtr& arg) { return exprHasSideEffect(arg); });
+            }
+            return true;
+        case s1apinorm::S1ExprKind::BinaryOp:
+            if (expr->op == "=" || isCompoundAssign(expr->op) ||
+                expr->op == "&&" || expr->op == "||") {
+                return true;
+            }
+            return exprHasSideEffect(expr->left) || exprHasSideEffect(expr->right);
+        case s1apinorm::S1ExprKind::UnaryOp:
+            if (expr->op == "++" || expr->op == "--" ||
+                expr->op == "post++" || expr->op == "post--") {
+                return true;
+            }
+            return exprHasSideEffect(expr->operand);
+        case s1apinorm::S1ExprKind::ArrayAccess:
+            return exprHasSideEffect(expr->array_base) || exprHasSideEffect(expr->index);
+        case s1apinorm::S1ExprKind::FieldAccess:
+            return exprHasSideEffect(expr->struct_base);
+        case s1apinorm::S1ExprKind::Cast:
+            return exprHasSideEffect(expr->cast_expr);
+        case s1apinorm::S1ExprKind::Ternary:
+            return exprHasSideEffect(expr->cond) ||
+                   exprHasSideEffect(expr->then_expr) ||
+                   exprHasSideEffect(expr->else_expr);
+        case s1apinorm::S1ExprKind::HardwareOp:
+            if (exprHasSideEffect(expr->base) || exprHasSideEffect(expr->value) ||
+                exprHasSideEffect(expr->operand) || exprHasSideEffect(expr->index) ||
+                exprHasSideEffect(expr->cast_expr)) {
+                return true;
+            }
+            return std::any_of(expr->parts.begin(), expr->parts.end(),
+                               [&](const s1apinorm::S1ExprPtr& part) { return exprHasSideEffect(part); });
+        case s1apinorm::S1ExprKind::Literal:
+        case s1apinorm::S1ExprKind::VarRef:
+            return false;
+        }
+        return false;
+    }
+
     HardwareOp hardwareKind(const ExprPtr& expr) {
         switch (expr->kind) {
         case ExprKind::ZExt: return HardwareOp::ZExt;
@@ -815,6 +1254,29 @@ private:
         default: break;
         }
         fail(expr ? expr->debug_loc : DebugLoc{}, "Unsupported hardware expression");
+    }
+
+    HardwareOp hardwareKind(s1apinorm::S1HardwareOp op) {
+        using s1apinorm::S1HardwareOp;
+        switch (op) {
+        case S1HardwareOp::ZExt: return HardwareOp::ZExt;
+        case S1HardwareOp::SExt: return HardwareOp::SExt;
+        case S1HardwareOp::Trunc: return HardwareOp::Trunc;
+        case S1HardwareOp::Slice: return HardwareOp::Slice;
+        case S1HardwareOp::BitSelect: return HardwareOp::BitSelect;
+        case S1HardwareOp::DynamicSlice: return HardwareOp::DynamicSlice;
+        case S1HardwareOp::DynamicBitSelect: return HardwareOp::DynamicBitSelect;
+        case S1HardwareOp::WriteSlice: return HardwareOp::WriteSlice;
+        case S1HardwareOp::WriteBit: return HardwareOp::WriteBit;
+        case S1HardwareOp::DynamicWriteSlice: return HardwareOp::DynamicWriteSlice;
+        case S1HardwareOp::DynamicWriteBit: return HardwareOp::DynamicWriteBit;
+        case S1HardwareOp::Concat: return HardwareOp::Concat;
+        case S1HardwareOp::Repeat: return HardwareOp::Repeat;
+        case S1HardwareOp::ReduceOr: return HardwareOp::ReduceOr;
+        case S1HardwareOp::ReduceAnd: return HardwareOp::ReduceAnd;
+        case S1HardwareOp::ReduceXor: return HardwareOp::ReduceXor;
+        }
+        fail(DebugLoc{}, "Unsupported S1 hardware expression");
     }
 
     LowerResult lowerHardwareExpr(const ExprPtr& expr) {
@@ -846,7 +1308,45 @@ private:
         return result;
     }
 
+    LowerResult lowerHardwareExpr(const s1apinorm::S1ExprPtr& expr) {
+        LowerResult result;
+        OpExpr op;
+        op.kind = OpExpr::Kind::Hardware;
+        op.type = expr->type;
+        op.debug_loc = expr->debug_loc;
+        op.hardware_op = hardwareKind(expr->hardware_op);
+        op.hi = expr->hi;
+        op.lo = expr->lo;
+        op.bit = expr->bit;
+        op.times = expr->times;
+        op.to_width = expr->to_width;
+
+        auto append = [&](const s1apinorm::S1ExprPtr& child) {
+            if (!child) return;
+            auto lowered = lowerExpr(child);
+            result.prelude.insert(result.prelude.end(), lowered.prelude.begin(), lowered.prelude.end());
+            op.operands.push_back(std::move(lowered.operand));
+        };
+        append(expr->base);
+        append(expr->value);
+        append(expr->operand);
+        append(expr->index);
+        append(expr->cast_expr);
+        for (const auto& part : expr->parts) append(part);
+        result.operand = materializeOp(std::move(op), "hwop", expr->debug_loc, result.prelude);
+        return result;
+    }
+
     std::vector<S3StmtPtr> lowerStmtList(const std::vector<StmtPtr>& stmts) {
+        std::vector<S3StmtPtr> out;
+        for (const auto& stmt : stmts) {
+            auto lowered = lowerStmt(stmt);
+            out.insert(out.end(), lowered.begin(), lowered.end());
+        }
+        return out;
+    }
+
+    std::vector<S3StmtPtr> lowerStmtList(const std::vector<s1apinorm::S1StmtPtr>& stmts) {
         std::vector<S3StmtPtr> out;
         for (const auto& stmt : stmts) {
             auto lowered = lowerStmt(stmt);
@@ -1112,6 +1612,266 @@ private:
         }
         return out;
     }
+
+    std::vector<S3StmtPtr> lowerStmt(const s1apinorm::S1StmtPtr& stmt) {
+        if (!stmt) return {};
+        ErrorContextGuard guard("s3statementize", stmt->debug_loc, "lowering S1 statement");
+        std::vector<S3StmtPtr> out;
+        switch (stmt->kind) {
+        case StmtKind::Decl: {
+            SymbolId decl_symbol = createSymbol(ctx_, stmt->decl_name, stmt->decl_type);
+            out.push_back(makeDecl(stmt->decl_name, decl_symbol,
+                                   stmt->decl_type, stmt->debug_loc));
+            ctx_.used_names.insert(stmt->decl_name);
+            if (stmt->decl_init) {
+                if (stmt->decl_init.value()->kind == s1apinorm::S1ExprKind::Call) {
+                    auto init = stmt->decl_init.value();
+                    auto args = lowerArgs(init->args, out);
+                    auto target = varLValue(stmt->decl_name, decl_symbol,
+                                            stmt->decl_type, stmt->debug_loc);
+                    if (isConstructorCall(init, ctx_)) {
+                        out.push_back(makeConstruct(std::move(target), init->callee,
+                                                    std::move(args), init->type,
+                                                    init->debug_loc));
+                    } else {
+                        out.push_back(makeCall(std::move(target), init->callee,
+                                               std::move(args), init->type,
+                                               init->debug_loc));
+                    }
+                } else {
+                    auto value = lowerExpr(stmt->decl_init.value());
+                    out.insert(out.end(), value.prelude.begin(), value.prelude.end());
+                    out.push_back(makeAssign(varLValue(stmt->decl_name, decl_symbol,
+                                                       stmt->decl_type,
+                                                       stmt->debug_loc),
+                                             std::move(value.operand), stmt->debug_loc));
+                }
+            } else if (!stmt->decl_init_args.empty()) {
+                auto args = lowerArgs(stmt->decl_init_args, out);
+                out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
+                                                      stmt->decl_type,
+                                                      stmt->debug_loc),
+                                            !stmt->decl_type.struct_name.empty()
+                                                ? stmt->decl_type.struct_name
+                                                : stmt->decl_type.name,
+                                            std::move(args), stmt->decl_type,
+                                            stmt->debug_loc));
+            } else if (stmt->decl_default_constructed) {
+                out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
+                                                      stmt->decl_type,
+                                                      stmt->debug_loc),
+                                            !stmt->decl_type.struct_name.empty()
+                                                ? stmt->decl_type.struct_name
+                                                : stmt->decl_type.name,
+                                            {}, stmt->decl_type, stmt->debug_loc));
+            }
+            return out;
+        }
+        case StmtKind::Assign: {
+            if (stmt->assign_value &&
+                stmt->assign_value->kind == s1apinorm::S1ExprKind::Call) {
+                auto args = lowerArgs(stmt->assign_value->args, out);
+                bool target_needs_prelude = lvalueNeedsPrelude(stmt->assign_target);
+                if (target_needs_prelude) {
+                    auto call_temp = tempLValue(stmt->assign_value->type,
+                                                stmt->assign_value->callee,
+                                                stmt->assign_value->debug_loc,
+                                                out);
+                    Operand call_value = varOperand(call_temp.root, call_temp.root_symbol,
+                                                    call_temp.type,
+                                                    stmt->assign_value->debug_loc);
+                    if (isConstructorCall(stmt->assign_value, ctx_)) {
+                        out.push_back(makeConstruct(std::move(call_temp),
+                                                    stmt->assign_value->callee,
+                                                    std::move(args),
+                                                    stmt->assign_value->type,
+                                                    stmt->debug_loc));
+                    } else {
+                        out.push_back(makeCall(std::move(call_temp),
+                                               stmt->assign_value->callee,
+                                               std::move(args),
+                                               stmt->assign_value->type,
+                                               stmt->debug_loc));
+                    }
+                    auto target = lowerLValue(stmt->assign_target);
+                    out.insert(out.end(), target.prelude.begin(), target.prelude.end());
+                    out.push_back(makeAssign(std::move(target.lvalue),
+                                             std::move(call_value), stmt->debug_loc));
+                } else {
+                    auto target = lowerLValue(stmt->assign_target);
+                    if (isConstructorCall(stmt->assign_value, ctx_)) {
+                        out.push_back(makeConstruct(std::move(target.lvalue),
+                                                    stmt->assign_value->callee,
+                                                    std::move(args),
+                                                    stmt->assign_value->type,
+                                                    stmt->debug_loc));
+                    } else {
+                        out.push_back(makeCall(std::move(target.lvalue),
+                                               stmt->assign_value->callee,
+                                               std::move(args),
+                                               stmt->assign_value->type,
+                                               stmt->debug_loc));
+                    }
+                }
+                return out;
+            }
+            auto rhs = lowerExpr(stmt->assign_value);
+            out.insert(out.end(), rhs.prelude.begin(), rhs.prelude.end());
+            auto lhs = lowerLValue(stmt->assign_target);
+            out.insert(out.end(), lhs.prelude.begin(), lhs.prelude.end());
+            out.push_back(makeAssign(std::move(lhs.lvalue), std::move(rhs.operand),
+                                     stmt->debug_loc));
+            return out;
+        }
+        case StmtKind::If: {
+            auto cond = lowerExpr(stmt->if_cond);
+            out.insert(out.end(), cond.prelude.begin(), cond.prelude.end());
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = S3StmtKind::If;
+            s->debug_loc = stmt->debug_loc;
+            s->condition = std::move(cond.operand);
+            {
+                ScopeGuard guard(ctx_, S3ScopeKind::IfThen, "then");
+                s->then_body = lowerStmtList(stmt->if_then);
+            }
+            {
+                ScopeGuard guard(ctx_, S3ScopeKind::IfElse, "else");
+                s->else_body = lowerStmtList(stmt->if_else);
+            }
+            out.push_back(s);
+            return out;
+        }
+        case StmtKind::Block: {
+            ScopeGuard guard(ctx_, S3ScopeKind::Block, "block");
+            auto nested = lowerStmtList(stmt->block_stmts);
+            out.insert(out.end(), nested.begin(), nested.end());
+            return out;
+        }
+        case StmtKind::Return: {
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = S3StmtKind::Return;
+            s->debug_loc = stmt->debug_loc;
+            if (stmt->return_value) {
+                auto value = lowerExpr(stmt->return_value.value());
+                out.insert(out.end(), value.prelude.begin(), value.prelude.end());
+                s->return_value = std::move(value.operand);
+            }
+            out.push_back(s);
+            return out;
+        }
+        case StmtKind::ExprStmt: {
+            if (stmt->expr_stmt &&
+                stmt->expr_stmt->kind == s1apinorm::S1ExprKind::Call) {
+                auto args = lowerArgs(stmt->expr_stmt->args, out);
+                if (isConstructorCall(stmt->expr_stmt, ctx_)) {
+                    auto target = tempLValue(stmt->expr_stmt->type, "construct",
+                                             stmt->debug_loc, out);
+                    out.push_back(makeConstruct(std::move(target),
+                                                stmt->expr_stmt->callee,
+                                                std::move(args), stmt->expr_stmt->type,
+                                                stmt->debug_loc));
+                } else {
+                    out.push_back(makeCall(std::nullopt, stmt->expr_stmt->callee,
+                                           std::move(args), stmt->expr_stmt->type,
+                                           stmt->debug_loc));
+                }
+                return out;
+            }
+            auto value = lowerExpr(stmt->expr_stmt);
+            out.insert(out.end(), value.prelude.begin(), value.prelude.end());
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = S3StmtKind::Eval;
+            s->debug_loc = stmt->debug_loc;
+            s->value = std::move(value.operand);
+            out.push_back(s);
+            return out;
+        }
+        case StmtKind::For: {
+            ScopeGuard loop_guard(ctx_, S3ScopeKind::Loop, "for");
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = S3StmtKind::For;
+            s->debug_loc = stmt->debug_loc;
+            if (stmt->for_init) s->for_init = lowerStmt(stmt->for_init);
+            if (stmt->for_cond) {
+                auto cond = lowerExpr(stmt->for_cond);
+                s->condition_prelude = std::move(cond.prelude);
+                s->for_cond = std::move(cond.operand);
+            }
+            if (stmt->for_step) {
+                auto step = lowerExpr(stmt->for_step);
+                s->for_step = std::move(step.prelude);
+                auto eval = std::make_shared<S3Stmt>();
+                eval->kind = S3StmtKind::Eval;
+                eval->debug_loc = stmt->for_step->debug_loc;
+                eval->value = std::move(step.operand);
+                s->for_step.push_back(eval);
+            }
+            {
+                ScopeGuard body_guard(ctx_, S3ScopeKind::LoopBody, "for_body");
+                s->loop_body = lowerStmtList(stmt->for_body);
+            }
+            out.push_back(s);
+            return out;
+        }
+        case StmtKind::While:
+        case StmtKind::DoWhile: {
+            ScopeGuard loop_guard(ctx_, S3ScopeKind::Loop,
+                                  stmt->kind == StmtKind::While ? "while" : "do_while");
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = stmt->kind == StmtKind::While ? S3StmtKind::While : S3StmtKind::DoWhile;
+            s->debug_loc = stmt->debug_loc;
+            auto cond = lowerExpr(stmt->while_cond);
+            s->condition_prelude = std::move(cond.prelude);
+            s->condition = std::move(cond.operand);
+            {
+                ScopeGuard body_guard(ctx_, S3ScopeKind::LoopBody,
+                                      stmt->kind == StmtKind::While ? "while_body" : "do_body");
+                s->loop_body = lowerStmtList(stmt->while_body);
+            }
+            out.push_back(s);
+            return out;
+        }
+        case StmtKind::Switch: {
+            auto selector = lowerExpr(stmt->switch_expr);
+            out.insert(out.end(), selector.prelude.begin(), selector.prelude.end());
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = S3StmtKind::Switch;
+            s->debug_loc = stmt->debug_loc;
+            s->switch_value = std::move(selector.operand);
+            for (const auto& c : stmt->switch_cases) {
+                S3CaseClause clause;
+                if (c.value) {
+                    auto value = lowerExpr(c.value.value());
+                    out.insert(out.end(), value.prelude.begin(), value.prelude.end());
+                    clause.value = std::move(value.operand);
+                }
+                {
+                    ScopeGuard case_guard(ctx_, S3ScopeKind::SwitchCase,
+                                          clause.value ? "case" : "default");
+                    clause.body = lowerStmtList(c.body);
+                }
+                s->switch_cases.push_back(std::move(clause));
+            }
+            out.push_back(s);
+            return out;
+        }
+        case StmtKind::Break: {
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = S3StmtKind::Break;
+            s->debug_loc = stmt->debug_loc;
+            out.push_back(s);
+            return out;
+        }
+        case StmtKind::Continue: {
+            auto s = std::make_shared<S3Stmt>();
+            s->kind = S3StmtKind::Continue;
+            s->debug_loc = stmt->debug_loc;
+            out.push_back(s);
+            return out;
+        }
+        }
+        return out;
+    }
 };
 
 LowerContext makeContext(const FunctionAST& fn) {
@@ -1128,7 +1888,26 @@ LowerContext makeContext(const FunctionAST& fn) {
     return ctx;
 }
 
+LowerContext makeContext(const s1apinorm::S1FunctionAST& fn) {
+    LowerContext ctx;
+    ctx.function_name = fn.name;
+    for (const auto& param : fn.params) ctx.used_names.insert(param.name);
+    for (const auto& stmt : fn.body) collectNamesStmt(stmt, ctx.used_names);
+    for (const auto& [name, _] : fn.struct_fields) {
+        ctx.struct_names.insert(canonicalName(name));
+    }
+    for (const auto& [name, _] : fn.struct_constructors) {
+        ctx.struct_names.insert(canonicalName(name));
+    }
+    return ctx;
+}
+
 StatementizedFunction lowerOneFunction(const FunctionAST& fn) {
+    Lowerer lowerer(makeContext(fn));
+    return lowerer.lowerFunction(fn);
+}
+
+StatementizedFunction lowerOneFunction(const s1apinorm::S1FunctionAST& fn) {
     Lowerer lowerer(makeContext(fn));
     return lowerer.lowerFunction(fn);
 }
@@ -1165,6 +1944,28 @@ std::string binaryName(BinaryOp op) {
     case BinaryOp::Ge: return "Ge";
     }
     return "Binary";
+}
+
+std::string hardwareName(HardwareOp op) {
+    switch (op) {
+    case HardwareOp::ZExt: return "ZExt";
+    case HardwareOp::SExt: return "SExt";
+    case HardwareOp::Trunc: return "Trunc";
+    case HardwareOp::Slice: return "Slice";
+    case HardwareOp::BitSelect: return "BitSelect";
+    case HardwareOp::DynamicSlice: return "DynamicSlice";
+    case HardwareOp::DynamicBitSelect: return "DynamicBitSelect";
+    case HardwareOp::WriteSlice: return "WriteSlice";
+    case HardwareOp::WriteBit: return "WriteBit";
+    case HardwareOp::DynamicWriteSlice: return "DynamicWriteSlice";
+    case HardwareOp::DynamicWriteBit: return "DynamicWriteBit";
+    case HardwareOp::Concat: return "Concat";
+    case HardwareOp::Repeat: return "Repeat";
+    case HardwareOp::ReduceOr: return "ReduceOr";
+    case HardwareOp::ReduceAnd: return "ReduceAnd";
+    case HardwareOp::ReduceXor: return "ReduceXor";
+    }
+    return "Hardware";
 }
 
 std::string scopeKindName(S3ScopeKind kind) {
@@ -1211,7 +2012,7 @@ std::string opText(const OpExpr& op) {
     else if (op.kind == OpExpr::Kind::Binary) os << binaryName(op.binary_op);
     else if (op.kind == OpExpr::Kind::Ternary) os << "Ternary";
     else if (op.kind == OpExpr::Kind::Cast) os << "Cast";
-    else os << "Hardware";
+    else os << hardwareName(op.hardware_op);
     os << "(";
     for (std::size_t i = 0; i < op.operands.size(); ++i) {
         if (i) os << ", ";
@@ -1432,6 +2233,23 @@ StatementizedProgram runStatementize(const FunctionAST& function) {
     return program;
 }
 
+StatementizedProgram runStatementize(const s1apinorm::S1FunctionAST& function) {
+    StatementizedProgram program;
+    program.struct_fields = function.struct_fields;
+    program.struct_constructors = function.struct_constructors;
+    program.top = lowerOneFunction(function);
+    for (const auto& helper : function.helpers) {
+        if (helper) program.helpers.push_back(lowerOneFunction(*helper));
+    }
+    for (const auto& [name, lambda] : function.lambdas) {
+        if (lambda) program.lambdas[name] = lowerOneFunction(*lambda);
+    }
+    verifyStmtList(program.top.body);
+    for (const auto& helper : program.helpers) verifyStmtList(helper.body);
+    for (const auto& [_, lambda] : program.lambdas) verifyStmtList(lambda.body);
+    return program;
+}
+
 } // namespace
 
 std::string debugPrint(const StatementizedProgram& program) {
@@ -1487,7 +2305,33 @@ StatementizeResult statementizeFunctionAST(const FunctionAST& function,
     }
 }
 
+StatementizeResult statementizeFunctionAST(const s1apinorm::S1FunctionAST& function,
+                                           const StatementizeOptions& options) {
+    try {
+        auto program = runStatementize(function);
+        StatementizeResult result;
+        if (options.debug_print) result.debug_text = debugPrint(program);
+        result.program = std::move(program);
+        return result;
+    } catch (const RTLZZException& ex) {
+        StatementizeResult result;
+        StatementizeError error;
+        error.message = ex.message();
+        error.formatted = ex.what();
+        if (auto context = ex.primaryContext()) error.context = *context;
+        result.error = std::move(error);
+        return result;
+    }
+}
+
 StatementizedProgram statementizeFunctionASTOrThrow(const FunctionAST& function,
+                                                    const StatementizeOptions& options) {
+    auto program = runStatementize(function);
+    (void)options;
+    return program;
+}
+
+StatementizedProgram statementizeFunctionASTOrThrow(const s1apinorm::S1FunctionAST& function,
                                                     const StatementizeOptions& options) {
     auto program = runStatementize(function);
     (void)options;

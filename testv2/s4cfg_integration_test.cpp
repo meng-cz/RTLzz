@@ -1,4 +1,5 @@
 #include "ast/ASTBuilder.h"
+#include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
 #include "s4cfg/S4CFG.h"
@@ -37,10 +38,16 @@ static FunctionAST parseFixture(const std::string& file) {
 
 static std::string buildS4DebugFromSource(const std::string& file) {
     auto ast = parseFixture(file);
+    auto s1 = pred::s1apinorm::normalizeAPIs(ast);
+    if (!s1.ok()) {
+        std::cerr << s1.error->formatted << "\n";
+    }
+    CHECK(s1.ok());
+    CHECK(s1.function.has_value());
 
     pred::s2validate::ValidateOptions validate_options;
     validate_options.debug_print = true;
-    auto validation = pred::s2validate::validateFunctionAST(ast, validate_options);
+    auto validation = pred::s2validate::validateFunctionAST(s1.function.value(), validate_options);
     if (!validation.ok()) {
         std::cerr << validation.error->formatted << "\n";
     }
@@ -48,7 +55,7 @@ static std::string buildS4DebugFromSource(const std::string& file) {
 
     pred::s3statementize::StatementizeOptions s3_options;
     s3_options.debug_print = true;
-    auto s3 = pred::s3statementize::statementizeFunctionAST(ast, s3_options);
+    auto s3 = pred::s3statementize::statementizeFunctionAST(s1.function.value(), s3_options);
     if (!s3.ok()) {
         std::cerr << s3.error->formatted << "\n";
     }

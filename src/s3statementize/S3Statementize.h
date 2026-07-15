@@ -2,6 +2,7 @@
 
 #include "ast/AST.h"
 #include "debug/RTLZZException.h"
+#include "s1apinorm/S1NormedAST.h"
 
 #include <memory>
 #include <optional>
@@ -52,6 +53,8 @@ enum class HardwareOp {
     Trunc,
     Slice,
     BitSelect,
+    DynamicSlice,
+    DynamicBitSelect,
     WriteSlice,
     WriteBit,
     DynamicWriteSlice,
@@ -258,8 +261,16 @@ StatementizeResult statementizeFunctionAST(
     const FunctionAST& function,
     const StatementizeOptions& options = {});
 
+StatementizeResult statementizeFunctionAST(
+    const s1apinorm::S1FunctionAST& function,
+    const StatementizeOptions& options = {});
+
 StatementizedProgram statementizeFunctionASTOrThrow(
     const FunctionAST& function,
+    const StatementizeOptions& options = {});
+
+StatementizedProgram statementizeFunctionASTOrThrow(
+    const s1apinorm::S1FunctionAST& function,
     const StatementizeOptions& options = {});
 
 std::string debugPrint(const StatementizedProgram& program);

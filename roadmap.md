@@ -1,7 +1,10 @@
 Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM proxy 识别和字段引用绑定主要应从 normalize/AliasGraph 路径移除；如果保留现有 src/ast，则 AST 阶段需要收紧为“识别并拒绝 struct/array 内含 reference 或 pointer 字段”，同时保留顶层端口的 const-ref/input 与 mutable-ref/output 参数形式，删除或停用为 proxy constructor 收集字段到参数别名映射的特殊用途，让后续阶段不再接收 proxy carrier 或引用字段 struct。
 
-  1. ParseAST
+  0. ParseAST
      用 libclang 解析 C++/fixint 子集，生成带类型、helper/lambda、struct 元数据的高层 FunctionAST，但不做 inline、flatten 或控制流 lowering。
+
+  1. APINormalize
+     将 C++/fixint API call 规范化为 Hardware OP。
 
   2. ASTValidateAndResolve
      校验支持的 C++ 子集，解析名字/作用域/重载结果，确认 helper/lambda/struct 元数据完整且无递归或非法参数形式。
@@ -18,15 +21,15 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
   6. InlineCallsCFG
      在 CFG 层通过 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation 来内联 helper/lambda 调用。
 
-
-
-## 仍需确认的步骤：
-
-  11. AggregateFlatten
+  7. AggregateFlatten
      将 struct、array、aggregate init/copy、field access、array access、动态索引读写全部降低为确定的 scalar leaf 变量、mux 或 guarded write。
 
   12. LValueLowering
      将剩余复杂左值操作，如 bit/slice 写、动态位写、proxy lvalue、array element write，降低为显式读改写或 leaf assignment。
+
+
+
+## 仍需确认的步骤：
 
   13. OperationNormalize
      规范化 Int/UInt/builtin 整数语义、宽度扩展/截断、cast、slice、bit、concat、repeat、reduce、比较和算术操作。
