@@ -12,7 +12,6 @@
 namespace pred::s4cfg {
 
 using BlockId = int;
-using ScopeId = int;
 using LoopRegionId = int;
 
 enum class CFGStmtKind {
@@ -48,15 +47,6 @@ enum class TermKind {
 enum class LoopConditionKind {
     PreTest,
     PostTest,
-};
-
-enum class ScopeKind {
-    Function,
-    Block,
-    IfThen,
-    IfElse,
-    LoopBody,
-    SwitchCase,
 };
 
 struct CFGStmt {
@@ -95,15 +85,7 @@ struct BasicBlock {
     Terminator terminator;
     std::vector<CFGEdge> successors;
     std::vector<CFGEdge> predecessors;
-    std::vector<ScopeId> scope_stack;
     std::vector<LoopRegionId> loop_stack;
-};
-
-struct ScopeInfo {
-    ScopeId id = -1;
-    std::optional<ScopeId> parent;
-    ScopeKind kind = ScopeKind::Block;
-    std::string label;
 };
 
 struct LoopRegion {
@@ -120,12 +102,13 @@ struct FunctionCFG {
     std::string name;
     TypeInfo return_type;
     std::vector<ParamDecl> params;
-    std::vector<s3statementize::S3ScopeInfo> s3_scopes;
+    // SymbolId remains function-local unique after S3. S4/S5 and later stages
+    // must use these ids as variable identity and must not depend on lexical
+    // scope metadata for name resolution.
     std::vector<s3statementize::SymbolInfo> symbols;
     BlockId entry = -1;
     BlockId exit = -1;
     std::vector<std::unique_ptr<BasicBlock>> blocks;
-    std::vector<ScopeInfo> scopes;
     std::vector<LoopRegion> loop_regions;
     std::optional<std::string> return_slot;
     s3statementize::SymbolId return_slot_symbol = -1;

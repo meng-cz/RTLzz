@@ -11,6 +11,10 @@
 
 namespace pred::s3statementize {
 
+// SymbolId is the canonical variable identity from S3 onward.
+// It is unique within one function across parameters, source locals, and
+// compiler-generated temporaries. Later stages must use SymbolId rather than
+// source names or lexical scopes to identify variables.
 using SymbolId = int;
 using ScopeId = int;
 
@@ -87,8 +91,11 @@ struct SymbolInfo {
     SymbolId id = -1;
     std::string name;
     TypeInfo type;
+    // S3/source provenance only. This is not a post-S3 semantic visibility
+    // relation and later stages must not rely on it for name resolution or
+    // variable identity.
     ScopeId declaring_scope = -1;
-    std::vector<ScopeId> valid_scope_ids;
+    std::vector<ScopeId> source_valid_scope_ids;
     bool is_param = false;
     bool is_temp = false;
 };

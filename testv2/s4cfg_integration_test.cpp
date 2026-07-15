@@ -112,7 +112,7 @@ static void sourceLoopsSwitchBuildsEdgesAndFallthrough() {
 
     expectContains(debug, "loop 0 pre_test");
     expectContains(debug, "condition_prelude=bb");
-    expectContains(debug, "label=for_body");
+    expectContains(debug, "loops=[0]");
     expectContains(debug, "continue");
     expectContains(debug, "break");
     expectContains(debug, "backedge");

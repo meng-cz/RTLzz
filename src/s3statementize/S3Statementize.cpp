@@ -407,8 +407,8 @@ private:
             for (ScopeId child : it->second) self(self, child, out);
         };
         for (auto& symbol : ctx_.symbols) {
-            symbol.valid_scope_ids.clear();
-            descendants(descendants, symbol.declaring_scope, symbol.valid_scope_ids);
+            symbol.source_valid_scope_ids.clear();
+            descendants(descendants, symbol.declaring_scope, symbol.source_valid_scope_ids);
         }
     }
 
@@ -1446,10 +1446,10 @@ std::string debugPrint(const StatementizedProgram& program) {
         }
         for (const auto& symbol : fn.symbols) {
             os << "  symbol " << symbol.id << " " << symbol.name
-               << " scope=" << symbol.declaring_scope << " valid=[";
-            for (std::size_t i = 0; i < symbol.valid_scope_ids.size(); ++i) {
+               << " source_scope=" << symbol.declaring_scope << " source_valid=[";
+            for (std::size_t i = 0; i < symbol.source_valid_scope_ids.size(); ++i) {
                 if (i) os << ",";
-                os << symbol.valid_scope_ids[i];
+                os << symbol.source_valid_scope_ids[i];
             }
             os << "]";
             if (symbol.is_param) os << " param";

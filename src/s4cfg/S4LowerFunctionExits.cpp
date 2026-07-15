@@ -107,15 +107,7 @@ void lowerFunctionExits(FunctionCFG& cfg, std::vector<CFGWarning>&) {
     info.id = slot_symbol;
     info.name = slot;
     info.type = cfg.return_type;
-    info.declaring_scope = 0;
-    if (cfg.s3_scopes.empty()) {
-        info.valid_scope_ids.push_back(0);
-    } else {
-        info.valid_scope_ids.reserve(cfg.s3_scopes.size());
-        for (const auto& scope : cfg.s3_scopes) {
-            info.valid_scope_ids.push_back(scope.id);
-        }
-    }
+    info.declaring_scope = -1;
     cfg.symbols.push_back(std::move(info));
 
     auto* entry = cfg.blocks.empty() ? nullptr : cfg.blocks[static_cast<std::size_t>(cfg.entry)].get();

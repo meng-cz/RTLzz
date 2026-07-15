@@ -88,18 +88,6 @@ std::string edgeKindName(EdgeKind kind) {
     return "edge";
 }
 
-std::string scopeKindName(ScopeKind kind) {
-    switch (kind) {
-    case ScopeKind::Function: return "function";
-    case ScopeKind::Block: return "block";
-    case ScopeKind::IfThen: return "if_then";
-    case ScopeKind::IfElse: return "if_else";
-    case ScopeKind::LoopBody: return "loop_body";
-    case ScopeKind::SwitchCase: return "switch_case";
-    }
-    return "scope";
-}
-
 std::string loopConditionKindName(LoopConditionKind kind) {
     switch (kind) {
     case LoopConditionKind::PreTest: return "pre_test";
@@ -248,9 +236,7 @@ public:
         cfg_.name = fn_.name;
         cfg_.return_type = fn_.return_type;
         cfg_.params = fn_.params;
-        cfg_.s3_scopes = fn_.scopes;
         cfg_.symbols = fn_.symbols;
-        createScope(std::nullopt, ScopeKind::Function, fn_.name);
 
         auto* entry = newBlock();
         auto* body = newBlock();
@@ -283,44 +269,13 @@ private:
     std::vector<CFGWarning>& warnings_;
     FunctionCFG cfg_;
     BasicBlock* current_ = nullptr;
-    std::vector<ScopeId> scope_stack_{0};
     std::vector<LoopRegionId> loop_stack_;
     std::vector<BlockId> break_targets_;
     std::vector<BlockId> continue_targets_;
 
-    ScopeId createScope(std::optional<ScopeId> parent, ScopeKind kind, std::string label) {
-        ScopeInfo scope;
-        scope.id = static_cast<ScopeId>(cfg_.scopes.size());
-        scope.parent = parent;
-        scope.kind = kind;
-        scope.label = std::move(label);
-        cfg_.scopes.push_back(std::move(scope));
-        return cfg_.scopes.back().id;
-    }
-
-    ScopeId childScope(ScopeKind kind, const std::string& label) {
-        ScopeId parent = scope_stack_.empty() ? 0 : scope_stack_.back();
-        return createScope(parent, kind, label);
-    }
-
-    struct ScopeGuard {
-        CFGBuilder& builder;
-        bool active = true;
-        ScopeGuard(CFGBuilder& builder, ScopeId scope) : builder(builder) {
-            builder.scope_stack_.push_back(scope);
-        }
-        ~ScopeGuard() {
-            if (active) builder.scope_stack_.pop_back();
-        }
-        ScopeGuard(const ScopeGuard&) = delete;
-        ScopeGuard& operator=(const ScopeGuard&) = delete;
-    };
-
-    BasicBlock* newBlock(std::vector<ScopeId> scopes = {},
-                         std::vector<LoopRegionId> loops = {}) {
+    BasicBlock* newBlock(std::vector<LoopRegionId> loops = {}) {
         auto block = std::make_unique<BasicBlock>();
         block->id = static_cast<BlockId>(cfg_.blocks.size());
-        block->scope_stack = scopes.empty() ? scope_stack_ : std::move(scopes);
         block->loop_stack = loops.empty() ? loop_stack_ : std::move(loops);
         auto* ptr = block.get();
         cfg_.blocks.push_back(std::move(block));
@@ -483,21 +438,13 @@ private:
         auto* merge_block = newBlock();
         terminateBranch(stmt->condition, then_block->id, else_block->id);
 
-        {
-            ScopeGuard guard(*this, childScope(ScopeKind::IfThen, "then"));
-            then_block->scope_stack = scope_stack_;
-            setCurrent(then_block);
-            buildStmtList(stmt->then_body);
-            if (current_) terminateJump(merge_block->id, EdgeKind::Fallthrough, "then_merge");
-        }
+        setCurrent(then_block);
+        buildStmtList(stmt->then_body);
+        if (current_) terminateJump(merge_block->id, EdgeKind::Fallthrough, "then_merge");
 
-        {
-            ScopeGuard guard(*this, childScope(ScopeKind::IfElse, "else"));
-            else_block->scope_stack = scope_stack_;
-            setCurrent(else_block);
-            buildStmtList(stmt->else_body);
-            if (current_) terminateJump(merge_block->id, EdgeKind::Fallthrough, "else_merge");
-        }
+        setCurrent(else_block);
+        buildStmtList(stmt->else_body);
+        if (current_) terminateJump(merge_block->id, EdgeKind::Fallthrough, "else_merge");
 
         setCurrent(merge_block->predecessors.empty() ? nullptr : merge_block);
     }
@@ -563,8 +510,6 @@ private:
         continue_targets_.push_back(step->id);
         {
             LoopGuard loop_guard(*this, loop_id);
-            ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopBody, "for_body"));
-            body->scope_stack = scope_stack_;
             setCurrent(body);
             buildStmtList(stmt->loop_body);
             if (current_) terminateJump(step->id, EdgeKind::Fallthrough, "body_next");
@@ -572,8 +517,6 @@ private:
 
         {
             LoopGuard loop_guard(*this, loop_id);
-            ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopBody, "for_body"));
-            step->scope_stack = scope_stack_;
             setCurrent(step);
             emitList(stmt->for_step);
             terminateJump(condition_prelude->id, EdgeKind::Jump, "backedge");
@@ -611,8 +554,6 @@ private:
         continue_targets_.push_back(condition_prelude->id);
         {
             LoopGuard loop_guard(*this, loop_id);
-            ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopBody, "while_body"));
-            body->scope_stack = scope_stack_;
             setCurrent(body);
             buildStmtList(stmt->loop_body);
             if (current_) terminateJump(condition_prelude->id, EdgeKind::Jump, "backedge");
@@ -640,8 +581,6 @@ private:
         continue_targets_.push_back(condition_prelude->id);
         {
             LoopGuard loop_guard(*this, loop_id);
-            ScopeGuard scope_guard(*this, childScope(ScopeKind::LoopBody, "do_body"));
-            body->scope_stack = scope_stack_;
             setCurrent(body);
             buildStmtList(stmt->loop_body);
             if (current_) {
@@ -684,8 +623,6 @@ private:
 
         break_targets_.push_back(exit->id);
         for (std::size_t i = 0; i < stmt->switch_cases.size(); ++i) {
-            ScopeGuard scope_guard(*this, childScope(ScopeKind::SwitchCase, "case"));
-            case_blocks[i]->scope_stack = scope_stack_;
             setCurrent(case_blocks[i]);
             buildStmtList(stmt->switch_cases[i].body);
             if (current_) {
@@ -876,12 +813,7 @@ std::string pad(int indent) {
 }
 
 void printBlock(std::ostream& os, const BasicBlock& block, int indent) {
-    os << pad(indent) << "bb" << block.id << " scopes=[";
-    for (std::size_t i = 0; i < block.scope_stack.size(); ++i) {
-        if (i) os << ",";
-        os << block.scope_stack[i];
-    }
-    os << "] loops=[";
+    os << pad(indent) << "bb" << block.id << " loops=[";
     for (std::size_t i = 0; i < block.loop_stack.size(); ++i) {
         if (i) os << ",";
         os << block.loop_stack[i];
@@ -937,12 +869,6 @@ void printFunction(std::ostream& os, const FunctionCFG& fn, const std::string& k
        << " exit=bb" << fn.exit;
     if (fn.return_slot) os << " return_slot=" << fn.return_slot.value();
     os << "\n";
-    for (const auto& scope : fn.scopes) {
-        os << "  scope " << scope.id << " " << scopeKindName(scope.kind);
-        if (scope.parent) os << " parent=" << scope.parent.value();
-        if (!scope.label.empty()) os << " label=" << scope.label;
-        os << "\n";
-    }
     for (const auto& loop : fn.loop_regions) {
         os << "  loop " << loop.id << " " << loopConditionKindName(loop.condition_kind)
            << " init=bb" << loop.init

@@ -7,6 +7,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace pred;
@@ -189,8 +190,25 @@ static void expectBreakEnableFlag(const std::string& debug) {
 static void verifyNoLoopMetadata(const pred::s4cfg::CFGProgram& program) {
     auto verify_fn = [](const pred::s4cfg::FunctionCFG& fn) {
         CHECK(fn.loop_regions.empty());
+        std::unordered_set<pred::s3statementize::SymbolId> symbol_ids;
+        for (std::size_t i = 0; i < fn.symbols.size(); ++i) {
+            CHECK(fn.symbols[i].id == static_cast<pred::s3statementize::SymbolId>(i));
+            CHECK(symbol_ids.insert(fn.symbols[i].id).second);
+        }
+        std::unordered_set<pred::s3statementize::SymbolId> declared_symbols;
         for (const auto& block : fn.blocks) {
             CHECK(block->loop_stack.empty());
+            for (const auto& cfg_stmt : block->stmts) {
+                if (!cfg_stmt.stmt ||
+                    cfg_stmt.stmt->kind != pred::s3statementize::S3StmtKind::Decl) {
+                    continue;
+                }
+                auto symbol = cfg_stmt.stmt->decl_symbol;
+                CHECK(symbol >= 0);
+                CHECK(symbol < static_cast<pred::s3statementize::SymbolId>(fn.symbols.size()));
+                CHECK(cfg_stmt.stmt->decl_name == fn.symbols[static_cast<std::size_t>(symbol)].name);
+                CHECK(declared_symbols.insert(symbol).second);
+            }
             for (const auto& edge : block->successors) {
                 CHECK(edge.label != "backedge");
                 CHECK(edge.kind != pred::s4cfg::EdgeKind::Continue);

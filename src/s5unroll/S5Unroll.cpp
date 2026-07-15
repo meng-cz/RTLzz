@@ -215,11 +215,9 @@ s4cfg::FunctionCFG cloneFunction(const s4cfg::FunctionCFG& input) {
     out.name = input.name;
     out.return_type = input.return_type;
     out.params = input.params;
-    out.s3_scopes = input.s3_scopes;
     out.symbols = input.symbols;
     out.entry = input.entry;
     out.exit = input.exit;
-    out.scopes = input.scopes;
     out.loop_regions = input.loop_regions;
     out.return_slot = input.return_slot;
     out.return_slot_symbol = input.return_slot_symbol;
@@ -961,6 +959,148 @@ S3StmtPtr cloneAndRewriteStmt(const S3StmtPtr& stmt,
     return out;
 }
 
+using SymbolRemap = std::unordered_map<SymbolId, SymbolId>;
+
+std::string uniqueSymbolName(const FunctionCFG& fn, const std::string& base);
+const SymbolInfo& symbolInfo(const FunctionCFG& fn, SymbolId symbol);
+
+std::string clonedSymbolName(const FunctionCFG& fn,
+                             const SymbolInfo& old_symbol,
+                             LoopRegionId loop_id,
+                             std::size_t iter) {
+    return uniqueSymbolName(fn,
+        old_symbol.name + "__u" + std::to_string(loop_id) + "_" +
+        std::to_string(iter) + "_");
+}
+
+SymbolId cloneDeclaredSymbol(FunctionCFG& fn,
+                             SymbolId old_symbol,
+                             LoopRegionId loop_id,
+                             std::size_t iter) {
+    const auto& old_info = symbolInfo(fn, old_symbol);
+    SymbolInfo info = old_info;
+    info.id = static_cast<SymbolId>(fn.symbols.size());
+    info.name = clonedSymbolName(fn, old_info, loop_id, iter);
+    fn.symbols.push_back(info);
+    return info.id;
+}
+
+void collectDeclaredSymbols(const S3StmtPtr& stmt,
+                            std::vector<SymbolId>& declared) {
+    if (!stmt) return;
+    if (stmt->kind == S3StmtKind::Decl && stmt->decl_symbol >= 0) {
+        declared.push_back(stmt->decl_symbol);
+    }
+    for (const auto& child : stmt->condition_prelude) collectDeclaredSymbols(child, declared);
+    for (const auto& child : stmt->then_body) collectDeclaredSymbols(child, declared);
+    for (const auto& child : stmt->else_body) collectDeclaredSymbols(child, declared);
+    for (const auto& child : stmt->for_init) collectDeclaredSymbols(child, declared);
+    for (const auto& child : stmt->for_step) collectDeclaredSymbols(child, declared);
+    for (const auto& child : stmt->loop_body) collectDeclaredSymbols(child, declared);
+    for (const auto& c : stmt->switch_cases) {
+        for (const auto& child : c.body) collectDeclaredSymbols(child, declared);
+    }
+}
+
+void collectDeclaredSymbols(const BasicBlock& block,
+                            std::vector<SymbolId>& declared) {
+    for (const auto& stmt : block.stmts) collectDeclaredSymbols(stmt.stmt, declared);
+}
+
+void ensureClonedSymbols(FunctionCFG& fn,
+                         const BasicBlock& clone,
+                         LoopRegionId loop_id,
+                         std::size_t iter,
+                         SymbolRemap& remap) {
+    std::vector<SymbolId> declared;
+    collectDeclaredSymbols(clone, declared);
+    for (SymbolId old_symbol : declared) {
+        if (remap.count(old_symbol)) continue;
+        remap[old_symbol] = cloneDeclaredSymbol(fn, old_symbol, loop_id, iter);
+    }
+}
+
+void remapOperandSymbols(const FunctionCFG& fn, Operand& operand, const SymbolRemap& remap);
+
+void remapLValueSymbols(const FunctionCFG& fn, LValue& lvalue, const SymbolRemap& remap) {
+    auto found = remap.find(lvalue.root_symbol);
+    if (found != remap.end()) {
+        lvalue.root_symbol = found->second;
+        lvalue.root = symbolInfo(fn, found->second).name;
+    }
+    for (auto& access : lvalue.accesses) {
+        if (access.index) remapOperandSymbols(fn, *access.index, remap);
+    }
+}
+
+void remapOperandSymbols(const FunctionCFG& fn, Operand& operand, const SymbolRemap& remap) {
+    if (operand.kind == OperandKind::Var) {
+        auto found = remap.find(operand.var_symbol);
+        if (found != remap.end()) {
+            operand.var_symbol = found->second;
+            operand.var_name = symbolInfo(fn, found->second).name;
+        }
+        return;
+    }
+    if (operand.kind == OperandKind::LValueRead) {
+        remapLValueSymbols(fn, operand.lvalue, remap);
+    }
+}
+
+void remapStmtSymbols(const FunctionCFG& fn, const S3StmtPtr& stmt, const SymbolRemap& remap);
+
+void remapStmtListSymbols(const FunctionCFG& fn,
+                          std::vector<S3StmtPtr>& stmts,
+                          const SymbolRemap& remap) {
+    for (auto& stmt : stmts) remapStmtSymbols(fn, stmt, remap);
+}
+
+void remapStmtSymbols(const FunctionCFG& fn, const S3StmtPtr& stmt, const SymbolRemap& remap) {
+    if (!stmt) return;
+    if (stmt->kind == S3StmtKind::Decl) {
+        auto found = remap.find(stmt->decl_symbol);
+        if (found != remap.end()) {
+            stmt->decl_symbol = found->second;
+            stmt->decl_name = symbolInfo(fn, found->second).name;
+            stmt->decl_type = symbolInfo(fn, found->second).type;
+        }
+    }
+    remapLValueSymbols(fn, stmt->target, remap);
+    remapOperandSymbols(fn, stmt->value, remap);
+    for (auto& operand : stmt->op.operands) remapOperandSymbols(fn, operand, remap);
+    if (stmt->call_result) remapLValueSymbols(fn, stmt->call_result.value(), remap);
+    for (auto& arg : stmt->args) remapOperandSymbols(fn, arg, remap);
+    remapOperandSymbols(fn, stmt->condition, remap);
+    remapStmtListSymbols(fn, stmt->condition_prelude, remap);
+    remapStmtListSymbols(fn, stmt->then_body, remap);
+    remapStmtListSymbols(fn, stmt->else_body, remap);
+    remapStmtListSymbols(fn, stmt->for_init, remap);
+    if (stmt->for_cond) remapOperandSymbols(fn, stmt->for_cond.value(), remap);
+    remapStmtListSymbols(fn, stmt->for_step, remap);
+    remapStmtListSymbols(fn, stmt->loop_body, remap);
+    remapOperandSymbols(fn, stmt->switch_value, remap);
+    for (auto& c : stmt->switch_cases) {
+        if (c.value) remapOperandSymbols(fn, c.value.value(), remap);
+        remapStmtListSymbols(fn, c.body, remap);
+    }
+    if (stmt->return_value) remapOperandSymbols(fn, stmt->return_value.value(), remap);
+}
+
+void remapBlockSymbols(const FunctionCFG& fn, BasicBlock& block, const SymbolRemap& remap) {
+    for (auto& stmt : block.stmts) remapStmtSymbols(fn, stmt.stmt, remap);
+}
+
+void remapTerminatorSymbols(const FunctionCFG& fn,
+                            Terminator& term,
+                            const SymbolRemap& remap) {
+    remapOperandSymbols(fn, term.condition, remap);
+    remapOperandSymbols(fn, term.switch_value, remap);
+    for (auto& target : term.switch_targets) {
+        if (target.value) remapOperandSymbols(fn, target.value.value(), remap);
+    }
+    if (term.return_value) remapOperandSymbols(fn, term.return_value.value(), remap);
+}
+
 Terminator cloneAndRewriteTerminator(const Terminator& term,
                                      s3statementize::SymbolId var,
                                      const Operand& value) {
@@ -971,33 +1111,6 @@ Terminator cloneAndRewriteTerminator(const Terminator& term,
         if (target.value) replaceOperand(target.value.value(), var, value);
     }
     if (out.return_value) replaceOperand(out.return_value.value(), var, value);
-    return out;
-}
-
-ScopeId cloneScope(FunctionCFG& fn,
-                   ScopeId old_scope,
-                   std::unordered_map<ScopeId, ScopeId>& scope_map) {
-    if (old_scope == 0) return old_scope;
-    auto it = scope_map.find(old_scope);
-    if (it != scope_map.end()) return it->second;
-    if (old_scope < 0 || old_scope >= static_cast<ScopeId>(fn.scopes.size())) {
-        return old_scope;
-    }
-    ScopeInfo info = fn.scopes[static_cast<std::size_t>(old_scope)];
-    if (info.parent) info.parent = cloneScope(fn, info.parent.value(), scope_map);
-    info.id = static_cast<ScopeId>(fn.scopes.size());
-    info.label += "__unrolled";
-    fn.scopes.push_back(info);
-    scope_map[old_scope] = info.id;
-    return info.id;
-}
-
-std::vector<ScopeId> cloneScopeStack(FunctionCFG& fn,
-                                     const std::vector<ScopeId>& stack,
-                                     std::unordered_map<ScopeId, ScopeId>& scope_map) {
-    std::vector<ScopeId> out;
-    out.reserve(stack.size());
-    for (ScopeId scope : stack) out.push_back(cloneScope(fn, scope, scope_map));
     return out;
 }
 
@@ -1057,13 +1170,7 @@ SymbolId createLoopEnableSymbol(FunctionCFG& fn, const LoopRegion& region) {
     info.name = uniqueSymbolName(fn,
         "__s5_loop_enable_" + std::to_string(region.id) + "_");
     info.type = boolType();
-    info.declaring_scope = 0;
-    if (fn.s3_scopes.empty()) {
-        info.valid_scope_ids.push_back(0);
-    } else {
-        info.valid_scope_ids.reserve(fn.s3_scopes.size());
-        for (const auto& scope : fn.s3_scopes) info.valid_scope_ids.push_back(scope.id);
-    }
+    info.declaring_scope = -1;
     fn.symbols.push_back(info);
     return info.id;
 }
@@ -1121,11 +1228,9 @@ S3StmtPtr makeSymbolAssign(const FunctionCFG& fn, SymbolId symbol, Operand value
 }
 
 BasicBlock* appendSyntheticBlock(FunctionCFG& fn,
-                                 std::vector<ScopeId> scope_stack,
                                  std::vector<LoopRegionId> loop_stack) {
     auto block = std::make_unique<BasicBlock>();
     block->id = static_cast<BlockId>(fn.blocks.size());
-    block->scope_stack = std::move(scope_stack);
     block->loop_stack = std::move(loop_stack);
     auto* out = block.get();
     fn.blocks.push_back(std::move(block));
@@ -1239,13 +1344,12 @@ int unrollForLoop(FunctionCFG& fn,
     SymbolId enable_symbol = -1;
 
     for (std::size_t iter = 0; iter < analysis.values.size(); ++iter) {
-        std::unordered_map<ScopeId, ScopeId> scope_map;
+        SymbolRemap symbol_remap;
         for (BlockId old : body_blocks) {
             auto clone = std::make_unique<BasicBlock>(*fn.blocks[static_cast<std::size_t>(old)]);
             clone->id = static_cast<BlockId>(fn.blocks.size());
             clone->successors.clear();
             clone->predecessors.clear();
-            clone->scope_stack = cloneScopeStack(fn, clone->scope_stack, scope_map);
             removeLoopId(clone->loop_stack, region.id);
             rewriteBlockForIteration(*clone,
                                       *fn.blocks[static_cast<std::size_t>(old)],
@@ -1256,6 +1360,19 @@ int unrollForLoop(FunctionCFG& fn,
             ++cloned_blocks;
         }
 
+        for (const auto& [_, cloned_id] : body_maps[iter]) {
+            ensureClonedSymbols(fn,
+                                *fn.blocks[static_cast<std::size_t>(cloned_id)],
+                                region.id,
+                                iter,
+                                symbol_remap);
+        }
+        for (const auto& [_, cloned_id] : body_maps[iter]) {
+            auto& clone = *fn.blocks[static_cast<std::size_t>(cloned_id)];
+            remapBlockSymbols(fn, clone, symbol_remap);
+            remapTerminatorSymbols(fn, clone.terminator, symbol_remap);
+        }
+
         if (cloned_blocks > options.max_total_cloned_blocks) {
             fail("Unrolled CFG exceeds max_total_cloned_blocks");
         }
@@ -1264,12 +1381,8 @@ int unrollForLoop(FunctionCFG& fn,
     if (has_break && !analysis.values.empty()) {
         enable_symbol = createLoopEnableSymbol(fn, region);
         std::vector<LoopRegionId> synthetic_loops = parentLoopStack(fn, region);
-        std::vector<ScopeId> synthetic_scopes;
-        if (region.body >= 0 && region.body < static_cast<BlockId>(fn.blocks.size())) {
-            synthetic_scopes = fn.blocks[static_cast<std::size_t>(region.body)]->scope_stack;
-        }
 
-        auto* init = appendSyntheticBlock(fn, synthetic_scopes, synthetic_loops);
+        auto* init = appendSyntheticBlock(fn, synthetic_loops);
         enable_init = init->id;
         init->stmts.push_back(CFGStmt{CFGStmtKind::Decl,
                                       makeSymbolDecl(fn, enable_symbol)});
@@ -1281,10 +1394,10 @@ int unrollForLoop(FunctionCFG& fn,
         guard_blocks.reserve(analysis.values.size());
         break_blocks.reserve(analysis.values.size());
         for (std::size_t iter = 0; iter < analysis.values.size(); ++iter) {
-            auto* guard = appendSyntheticBlock(fn, synthetic_scopes, synthetic_loops);
+            auto* guard = appendSyntheticBlock(fn, synthetic_loops);
             guard_blocks.push_back(guard->id);
             ++cloned_blocks;
-            auto* breaker = appendSyntheticBlock(fn, synthetic_scopes, synthetic_loops);
+            auto* breaker = appendSyntheticBlock(fn, synthetic_loops);
             breaker->stmts.push_back(
                 CFGStmt{CFGStmtKind::Assign,
                         makeSymbolAssign(fn, enable_symbol, boolLiteral(false))});

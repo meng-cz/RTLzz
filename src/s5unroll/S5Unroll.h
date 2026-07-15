@@ -46,6 +46,10 @@ struct UnrollResult {
     bool ok() const { return !error.has_value(); }
 };
 
+// S5 consumes and produces S4 CFGs with the post-S3 symbol invariant:
+// every SymbolId is unique within its FunctionCFG. Any cloned declarations or
+// synthetic variables introduced here must allocate fresh function-local ids;
+// S5 must not depend on lexical scope metadata for variable identity.
 UnrollResult unrollCFGProgram(
     const s4cfg::CFGProgram& program,
     const UnrollOptions& options = {});

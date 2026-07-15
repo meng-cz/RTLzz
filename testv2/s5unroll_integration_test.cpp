@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace pred;
@@ -66,8 +67,29 @@ static S5SourceRun runS5FromSource(const std::string& file) {
     CHECK(s5.program.has_value());
     CHECK(!s5.debug_text.empty());
     CHECK(s5.program->top.loop_regions.empty());
+    std::unordered_set<pred::s3statementize::SymbolId> symbol_ids;
+    for (std::size_t i = 0; i < s5.program->top.symbols.size(); ++i) {
+        CHECK(s5.program->top.symbols[i].id ==
+              static_cast<pred::s3statementize::SymbolId>(i));
+        CHECK(symbol_ids.insert(s5.program->top.symbols[i].id).second);
+    }
+    std::unordered_set<pred::s3statementize::SymbolId> declared_symbols;
     for (const auto& block : s5.program->top.blocks) {
         CHECK(block->loop_stack.empty());
+        for (const auto& cfg_stmt : block->stmts) {
+            if (!cfg_stmt.stmt ||
+                cfg_stmt.stmt->kind != pred::s3statementize::S3StmtKind::Decl) {
+                continue;
+            }
+            auto symbol = cfg_stmt.stmt->decl_symbol;
+            CHECK(symbol >= 0);
+            CHECK(symbol <
+                  static_cast<pred::s3statementize::SymbolId>(
+                      s5.program->top.symbols.size()));
+            CHECK(cfg_stmt.stmt->decl_name ==
+                  s5.program->top.symbols[static_cast<std::size_t>(symbol)].name);
+            CHECK(declared_symbols.insert(symbol).second);
+        }
     }
     return S5SourceRun{s5.debug_text, s5.summaries.size()};
 }
