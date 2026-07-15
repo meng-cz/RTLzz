@@ -15,15 +15,12 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
   5. LoopLowerOrUnroll
      对静态可展开循环进行展开，当前硬件子集可先要求所有循环在此阶段完全 unroll。
 
+  6. InlineCallsCFG
+     在 CFG 层通过 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation 来内联 helper/lambda 调用。
+
 
 
 ## 仍需确认的步骤：
-
-  9. InlineCallsCFG
-     在 CFG 层通过 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation 来内联 helper/lambda 调用。
-
-  10. AliasAndParamLowering
-     明确 value / const-ref / mutable-ref / pointer 参数语义，把引用别名、输出端口、proxy carrier 关系降低为统一的 lvalue/value 绑定模型。
 
   11. AggregateFlatten
      将 struct、array、aggregate init/copy、field access、array access、动态索引读写全部降低为确定的 scalar leaf 变量、mux 或 guarded write。
