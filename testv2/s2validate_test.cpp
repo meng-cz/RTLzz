@@ -150,6 +150,16 @@ static FunctionAST makeStructRefFieldProgram() {
     return top;
 }
 
+static FunctionAST makeRepeatUndeclaredOperandProgram() {
+    FunctionAST top;
+    top.name = "hls_main";
+    top.return_type = voidType();
+    top.params.push_back(outputParam("out", make_hw_type("UInt", 16, false)));
+    top.body.push_back(assign(make_var("out", make_hw_type("UInt", 16, false)),
+                              make_repeat(make_var("missing", int8()), 2)));
+    return top;
+}
+
 static FunctionAST parseFixture(const std::string& file) {
     std::vector<std::string> clang_args = {
         "-I.",
@@ -204,6 +214,7 @@ int main() {
     expectErrorContains(
         parseFixture("testv2/fixtures/s2validate/illegal_legacy_proxy.logic.cpp"),
         "legacy proxy carrier");
+    expectErrorContains(makeRepeatUndeclaredOperandProgram(), "Use of undeclared variable");
     expectErrorContains(makeRecursiveProgram(), "Recursive helper/lambda call graph");
     return 0;
 }

@@ -469,8 +469,10 @@ void validateExpr(Context& ctx,
     case ExprKind::Trunc:
     case ExprKind::Slice:
     case ExprKind::BitSelect:
-    case ExprKind::Repeat:
         validateExpr(ctx, expr->base, scopes, current_fn);
+        return;
+    case ExprKind::Repeat:
+        validateExpr(ctx, expr->operand, scopes, current_fn);
         return;
     case ExprKind::WriteSlice:
     case ExprKind::WriteBit:
