@@ -27,14 +27,11 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
   8. OperationNormalize
      规范化 Int/UInt/builtin 整数语义、宽度扩展/截断、cast、slice、bit、concat、repeat、reduce、比较和算术操作。
 
+  9. BuildSSA
+     对 scalar CFG 做 SSA 转换，插入/表示 phi 或等价 merge，形成每个变量版本和控制流合流点的明确数据依赖。此处需要拆分 lookupwrite到逐元素mux。
 
 ## 仍需确认的步骤：
 
-  14. EffectAndDefaultPolicy
-     处理输出端口默认值、写使能默认 false、ReqHelper/RegProxy/BRAM/Queue 等特殊硬件 side effect 的默认和配对策略。
-
-  15. BuildSSA
-     对 scalar CFG 做 SSA 转换，插入/表示 phi 或等价 merge，形成每个变量版本和控制流合流点的明确数据依赖。
 
   16. PredicateLowering
      将 SSA CFG 的控制流 lowering 为 predicate/guarded assignments，生成 predicate-friendly 的中间程序。
