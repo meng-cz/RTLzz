@@ -240,6 +240,14 @@ static const beir::Signal* findSignal(const beir::Program& program,
     return nullptr;
 }
 
+static const beir::Port* findPort(const beir::Program& program,
+                                  const std::string& name) {
+    for (const auto& port : program.ports) {
+        if (port.name == name) return &port;
+    }
+    return nullptr;
+}
+
 static void straightLineBuildsPortsAndOutputAssign() {
     auto program = baseProgram();
     auto& block = program.top.blocks[0];
@@ -357,6 +365,53 @@ static void outputInitialReadIsRejected() {
     CHECK(result.error->message.find("output/mutable-ref initial") != std::string::npos);
 }
 
+static void groupedOutputArrayBuildsBEIRArrayPort() {
+    s10predicate::S10PredicateProgram program;
+    program.name = "manual_grouped_output";
+    program.base_symbols.push_back(s10predicate::S10Symbol{0, intType(8), "out__idx_0", s10predicate::S10SymbolRole::Port});
+    program.base_symbols.push_back(s10predicate::S10Symbol{1, intType(8), "out__idx_1", s10predicate::S10SymbolRole::Port});
+    program.values.push_back(predS10Value(0, 0, 0, intType(8), s10predicate::S10ValueKind::Statement, "out__idx_0"));
+    program.values.push_back(predS10Value(1, 1, 0, intType(8), s10predicate::S10ValueKind::Statement, "out__idx_1"));
+
+    s10predicate::S10Definition def0;
+    def0.kind = s10predicate::S10DefKind::Assign;
+    def0.target = 0;
+    def0.guard = predLiteral(1, boolType());
+    def0.value = predLiteral(7, intType(8));
+    program.definitions.push_back(std::move(def0));
+
+    s10predicate::S10Definition def1;
+    def1.kind = s10predicate::S10DefKind::Assign;
+    def1.target = 1;
+    def1.guard = predLiteral(1, boolType());
+    def1.value = predLiteral(9, intType(8));
+    program.definitions.push_back(std::move(def1));
+
+    program.ports.push_back(s10predicate::S10Port{0, ParamDirection::Output, ParamPassingKind::MutableRef, std::nullopt, 0, predLiteral(1, boolType())});
+    program.ports.push_back(s10predicate::S10Port{1, ParamDirection::Output, ParamPassingKind::MutableRef, std::nullopt, 1, predLiteral(1, boolType())});
+    s10predicate::S10PortGroup group;
+    group.source_name = "out";
+    group.direction = ParamDirection::Output;
+    group.passing = ParamPassingKind::MutableRef;
+    group.scalar_type = intType(8);
+    group.array_dims = {2};
+    group.elements.push_back(s10predicate::S10PortElement{0, {0}});
+    group.elements.push_back(s10predicate::S10PortElement{1, {1}});
+    program.port_groups.push_back(std::move(group));
+
+    auto result = s11beir::buildBEIR(program);
+    if (!result.ok()) std::cerr << result.error->formatted << "\n";
+    CHECK(result.ok());
+    CHECK(result.program.has_value());
+    const beir::Port* out = findPort(result.program.value(), "out");
+    CHECK(out != nullptr);
+    CHECK(out->direction == beir::PortDirection::Output);
+    CHECK(out->type.width == 8);
+    CHECK(out->type.array_dims.size() == 1);
+    CHECK(out->type.array_dims[0] == 2);
+    CHECK(out->element_nodes.size() == 2);
+}
+
 static void sourcePipelineRunsThroughBEIR() {
     auto beir_program = runSourceToBEIR("testv2/fixtures/s9ssa/source_ssa.logic.cpp");
     std::string text = beir::emitText(beir_program);
@@ -368,11 +423,31 @@ static void sourcePipelineRunsThroughBEIR() {
     CHECK(countKind(beir_program, beir::OperationKind::Ite) >= 1);
 }
 
+static void sourcePipelinePreservesArrayPortGroupsInBEIR() {
+    auto beir_program = runSourceToBEIR("testv2/fixtures/s11beir/source_array_ports.logic.cpp");
+    const beir::Port* in = findPort(beir_program, "in");
+    CHECK(in != nullptr);
+    CHECK(in->direction == beir::PortDirection::Input);
+    CHECK(in->type.width == 8);
+    CHECK(in->type.array_dims.size() == 1);
+    CHECK(in->type.array_dims[0] == 2);
+    CHECK(in->element_nodes.size() == 2);
+
+    const beir::Port* selected = findPort(beir_program, "selected");
+    CHECK(selected != nullptr);
+    CHECK(selected->direction == beir::PortDirection::Output);
+    CHECK(selected->type.width == 8);
+    CHECK(selected->type.array_dims.empty());
+    CHECK(selected->element_nodes.size() == 1);
+}
+
 int main() {
     straightLineBuildsPortsAndOutputAssign();
     lookupLowersToScalarIteTree();
     signedArithmeticShiftMapsToShrSignedView();
     outputInitialReadIsRejected();
+    groupedOutputArrayBuildsBEIRArrayPort();
     sourcePipelineRunsThroughBEIR();
+    sourcePipelinePreservesArrayPortGroupsInBEIR();
     return 0;
 }

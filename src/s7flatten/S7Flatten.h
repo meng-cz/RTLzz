@@ -31,6 +31,21 @@ struct S7Port {
     ParamPassingKind passing = ParamPassingKind::Value;
 };
 
+struct S7PortElement {
+    SymbolId symbol = -1;
+    std::vector<int> indices;
+};
+
+struct S7PortGroup {
+    std::string source_name;
+    ParamDirection direction = ParamDirection::Input;
+    ParamPassingKind passing = ParamPassingKind::Value;
+    TypeInfo source_type;
+    TypeInfo scalar_type;
+    std::vector<int> array_dims;
+    std::vector<S7PortElement> elements;
+};
+
 enum class S7OperandKind {
     Literal,
     Var,
@@ -169,6 +184,7 @@ struct FlattenedCFG {
     std::string name;
     std::vector<S7Symbol> symbols;
     std::vector<S7Port> ports;
+    std::vector<S7PortGroup> port_groups;
     BlockId entry = -1;
     BlockId exit = -1;
     std::vector<S7BasicBlock> blocks;

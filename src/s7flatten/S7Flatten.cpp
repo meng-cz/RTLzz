@@ -91,6 +91,28 @@ TypeInfo arrayElement(TypeInfo type) {
     return type;
 }
 
+std::vector<int> arrayDimsOf(const TypeInfo& type) {
+    if (!type.is_array) return {};
+    if (!type.array_dims.empty()) return type.array_dims;
+    if (type.array_size > 0) return {type.array_size};
+    return {};
+}
+
+std::vector<int> indicesForPath(const std::vector<std::string>& path) {
+    std::vector<int> indices;
+    for (const auto& part : path) {
+        constexpr const char* prefix = "idx_";
+        if (part.rfind(prefix, 0) != 0) continue;
+        try {
+            std::size_t pos = 0;
+            int value = std::stoi(part.substr(4), &pos, 10);
+            if (pos == part.size() - 4) indices.push_back(value);
+        } catch (...) {
+        }
+    }
+    return indices;
+}
+
 std::optional<int> literalIndex(const Operand& operand) {
     if (operand.kind != OperandKind::Literal) return std::nullopt;
     try {
@@ -1068,6 +1090,22 @@ void buildSymbolMaps(Context& ctx) {
                 port.passing = passing;
                 ctx.output.ports.push_back(port);
             }
+            S7PortGroup group;
+            group.source_name = symbol.name;
+            group.direction = direction;
+            group.passing = passing;
+            group.source_type = symbol.type;
+            group.array_dims = arrayDimsOf(symbol.type);
+            group.scalar_type = map.leaves.empty()
+                ? TypeInfo{}
+                : map.leaves.front().type;
+            for (const auto& leaf : map.leaves) {
+                S7PortElement element;
+                element.symbol = leaf.id;
+                element.indices = indicesForPath(leaf.path);
+                group.elements.push_back(std::move(element));
+            }
+            ctx.output.port_groups.push_back(std::move(group));
         }
         ctx.maps[symbol.id] = std::move(map);
     }

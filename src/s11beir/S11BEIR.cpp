@@ -295,6 +295,30 @@ struct Builder {
         return out;
     }
 
+    beir::ValueType portGroupType(const S10PortGroup& group) const {
+        beir::ValueType out;
+        out.width = group.scalar_type.width;
+        out.array_dims = group.array_dims;
+        return out;
+    }
+
+    const S10Port* leafPortFor(SymbolId symbol) const {
+        for (const auto& port : input.ports) {
+            if (port.symbol == symbol) return &port;
+        }
+        return nullptr;
+    }
+
+    int flattenedArraySize(const std::vector<int>& dims) const {
+        if (dims.empty()) return 1;
+        int size = 1;
+        for (int dim : dims) {
+            if (dim <= 0) fail("S10 port group has invalid array dimension");
+            size *= dim;
+        }
+        return size;
+    }
+
     beir::Operation baseOperation(beir::OperationKind kind,
                                   beir::ValueType type,
                                   DebugLoc loc,
@@ -363,7 +387,7 @@ struct Builder {
         }
     }
 
-    void createPortsAndInputDrivers() {
+    void createLegacyPortsAndInputDrivers() {
         for (const auto& port : input.ports) {
             const std::string name = symbolName(input, port.symbol);
             const auto& symbol = symbolAt(input, port.symbol);
@@ -408,6 +432,97 @@ struct Builder {
 
             output.ports.push_back(std::move(out_port));
         }
+    }
+
+    void createGroupedPortsAndInputDrivers() {
+        for (const auto& group : input.port_groups) {
+            if (group.source_name.empty()) fail("S10 port group has empty source name");
+            if (group.elements.empty()) {
+                fail("S10 port group has no elements", {},
+                     "port=" + group.source_name);
+            }
+            int expected = flattenedArraySize(group.array_dims);
+            if (expected != static_cast<int>(group.elements.size())) {
+                fail("S10 port group element count does not match array dimensions",
+                     {},
+                     "port=" + group.source_name);
+            }
+
+            beir::ValueType port_type = portGroupType(group);
+            beir::ValueType scalar_type = port_type;
+            scalar_type.array_dims.clear();
+
+            beir::Port out_port;
+            out_port.name = group.source_name;
+            out_port.direction = group.direction == ParamDirection::Input
+                ? beir::PortDirection::Input
+                : beir::PortDirection::Output;
+            out_port.type = port_type;
+
+            if (group.direction == ParamDirection::Input) {
+                output.inputs.push_back(group.source_name);
+                ++summary.input_ports;
+                for (std::size_t i = 0; i < group.elements.size(); ++i) {
+                    const auto& element = group.elements[i];
+                    const S10Port* leaf_port = leafPortFor(element.symbol);
+                    if (!leaf_port || !leaf_port->initial_value) {
+                        fail("S10 input port group element has no initial value",
+                             {},
+                             "port=" + group.source_name);
+                    }
+                    beir::NodeId node = value_nodes[static_cast<std::size_t>(*leaf_port->initial_value)];
+                    out_port.element_nodes.push_back(node);
+                    auto& sig = signal(node);
+                    sig.port_name = group.source_name;
+                    sig.port_element_index = static_cast<int>(i);
+
+                    beir::Operation op = baseOperation(
+                        beir::OperationKind::PortRead,
+                        sig.type,
+                        {},
+                        "read from S10 input port '" + group.source_name + "'");
+                    op.operands.push_back(portOperand(group.source_name, port_type));
+                    if (!group.array_dims.empty()) {
+                        op.operands.push_back(literalOperand(static_cast<std::uint64_t>(i),
+                                                             S10Type{s8opnorm::S8TypeKind::Int, 32}));
+                    }
+                    op.debug.derived_names.push_back("s10_input");
+                    setDriver(node, std::move(op));
+                }
+            } else {
+                output.outputs.push_back(group.source_name);
+                ++summary.output_ports;
+                for (std::size_t i = 0; i < group.elements.size(); ++i) {
+                    const auto& element = group.elements[i];
+                    const S10Port* leaf_port = leafPortFor(element.symbol);
+                    if (!leaf_port) {
+                        fail("S10 output port group element has no leaf port",
+                             {},
+                             "port=" + group.source_name);
+                    }
+                    std::string element_name = group.array_dims.empty()
+                        ? group.source_name
+                        : group.source_name + "_" + std::to_string(i);
+                    auto& sig = addSignal(element_name, scalar_type,
+                                          generatedDebug("S11 output port '" +
+                                                         group.source_name + "' element"));
+                    sig.port_name = group.source_name;
+                    sig.port_element_index = static_cast<int>(i);
+                    out_port.element_nodes.push_back(sig.id);
+                    output_nodes_by_symbol[element.symbol] = sig.id;
+                }
+            }
+
+            output.ports.push_back(std::move(out_port));
+        }
+    }
+
+    void createPortsAndInputDrivers() {
+        if (input.port_groups.empty()) {
+            createLegacyPortsAndInputDrivers();
+            return;
+        }
+        createGroupedPortsAndInputDrivers();
     }
 
     beir::OpCode binaryOp(S10OpKind kind) {

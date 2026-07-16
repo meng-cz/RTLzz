@@ -1247,6 +1247,23 @@ S8NormCFG normalizeFunction(const FlattenedCFG& fn, const NormOptions& options,
         out.passing = port.passing;
         ctx.output.ports.push_back(out);
     }
+    for (const auto& group : fn.port_groups) {
+        S8PortGroup out;
+        out.source_name = group.source_name;
+        out.direction = group.direction;
+        out.passing = group.passing;
+        out.source_type = group.source_type;
+        out.scalar_source_type = group.scalar_type;
+        out.scalar_type = normType(group.scalar_type);
+        out.array_dims = group.array_dims;
+        for (const auto& element : group.elements) {
+            S8PortElement out_element;
+            out_element.symbol = element.symbol;
+            out_element.indices = element.indices;
+            out.elements.push_back(std::move(out_element));
+        }
+        ctx.output.port_groups.push_back(std::move(out));
+    }
     for (const auto& block : fn.blocks) {
         S8BasicBlock out_block;
         out_block.id = block.id;

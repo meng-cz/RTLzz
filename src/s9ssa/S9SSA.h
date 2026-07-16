@@ -131,10 +131,27 @@ struct S9Port {
     std::optional<S9ValueId> final_value;
 };
 
+struct S9PortElement {
+    SymbolId symbol = -1;
+    std::vector<int> indices;
+};
+
+struct S9PortGroup {
+    std::string source_name;
+    ParamDirection direction = ParamDirection::Input;
+    ParamPassingKind passing = ParamPassingKind::Value;
+    TypeInfo source_type;
+    TypeInfo scalar_source_type;
+    S9Type scalar_type;
+    std::vector<int> array_dims;
+    std::vector<S9PortElement> elements;
+};
+
 struct S9SSACFG {
     std::string name;
     std::vector<S9Symbol> base_symbols;
     std::vector<S9Port> ports;
+    std::vector<S9PortGroup> port_groups;
     std::vector<S9Value> values;
     BlockId entry = -1;
     BlockId exit = -1;

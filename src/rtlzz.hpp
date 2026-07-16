@@ -1,13 +1,6 @@
 #pragma once
 
-#include "backend/beir.hpp"
-#include "backend/beopt.hpp"
-#include "backend/rtlgen.hpp"
-#include "emitter/ListJsonEmitter.h"
-#include "pipeline/Stages.h"
-#include "predicate/OutputExpressionMap.h"
-#include "predicate/PredicateVerifier.h"
-#include "transform/Predicate.h"
+#include "pipelinev2/PipelineV2.h"
 
 #include <exception>
 #include <sstream>
@@ -101,97 +94,32 @@ inline std::vector<std::string> splitCodeLines(const std::string& output) {
     return lines;
 }
 
-inline pred::PredicateProgram buildPredicateProgram(const pred::FunctionAST& function,
-                                                    const pred::NormalizeResult& normalized,
-                                                    const pred::SSAProgram& ssa) {
-    auto program = pred::predicate(ssa);
-    program.function_name = function.name;
-
-    for (const auto& [name, type] : normalized.symbols) {
-        program.symbols[name] = type;
-    }
-    program.param_directions = normalized.param_directions;
-    for (const auto& param : function.params) {
-        if (param.debug_loc.valid()) program.param_debug_locs[param.name] = param.debug_loc;
-    }
-    program.output_default_reasons = normalized.output_default_reasons;
-    program.output_paired_controls = normalized.output_paired_controls;
-    program.lookup_tables = normalized.lookup_tables;
-    program.outputs = normalized.output_params;
-    pred::buildOutputExpressionMap(program);
-    return program;
-}
-
 inline CompileResult compileSource(const CompileOptions& options, OutputKind output_kind) {
     if (options.source_codelines.empty()) return {{}, "source_codelines must not be empty"};
     if (options.top_function.find_first_not_of(" \t\r\n") == std::string::npos) {
         return {{}, "top_function must not be empty"};
     }
 
-    pred::pipeline::ParseConfig parse_config;
-    parse_config.source_name = "rtlzz_input.logic.cpp";
-    parse_config.source_text = joinCodeLines(options.source_codelines);
-    parse_config.top_function = options.top_function;
-    parse_config.clang_args = buildClangArgs(options);
-
-    auto parsed = pred::pipeline::parseSource(parse_config);
-    if (!parsed.error.empty()) return {{}, "parse: " + parsed.error};
-    if (!parsed.function.has_value()) return {{}, "parse: failed to extract function"};
-
-    pred::UnrollConfig unroll_config;
-    unroll_config.max_iterations = options.unroll_limit;
-    auto unrolled = pred::pipeline::unrollFunction(std::move(parsed.function.value()),
-                                                   unroll_config);
-    if (!unrolled.error.empty()) return {{}, "unroll: " + unrolled.error};
-    if (!unrolled.function.has_value()) return {{}, "unroll: stage produced no function"};
-
-    auto inlined = pred::pipeline::inlineHelpersAndLambdas(
-        std::move(unrolled.function.value()));
-    if (!inlined.error.empty()) return {{}, "inline: " + inlined.error};
-    if (!inlined.function.has_value()) return {{}, "inline: stage produced no function"};
-
-    const auto& lowered_function = inlined.function.value();
-    auto normalized = pred::pipeline::normalizeFunction(lowered_function);
-    if (!normalized.error.empty()) return {{}, "normalize/lower: " + normalized.error};
-
-    auto cfg = pred::pipeline::buildControlFlow(normalized);
-    if (!cfg.error.empty()) return {{}, "cfg: " + cfg.error};
-
-    auto ssa = pred::pipeline::buildSSAForm(cfg, normalized);
-    if (!ssa.error.empty()) return {{}, "ssa: " + ssa.error};
-
-    auto program = buildPredicateProgram(lowered_function, normalized, ssa.program);
-    auto verified = pred::verifyPredicateProgram(program);
-    if (!verified.ok) return {{}, "predicate verification: " + verified.error};
-
-    try {
-        std::string output;
-        switch (output_kind) {
-        case OutputKind::ListJson:
-            output = pred::emitListJson(program);
-            break;
-        case OutputKind::Beir: {
-            auto beir_program = pred::beir::buildProgram(program, false);
-            beir_program = pred::beir::opt::optimizeProgram(
-                std::move(beir_program),
-                pred::beir::opt::parseOptions(options.beopt_args));
-            output = pred::beir::emitText(beir_program);
-            break;
-        }
-        case OutputKind::Rtl: {
-            auto beir_program = pred::beir::buildProgram(program, false);
-            beir_program = pred::beir::opt::optimizeProgram(
-                std::move(beir_program),
-                pred::beir::opt::parseOptions(options.beopt_args));
-            output = pred::rtlgen::emitSystemVerilog(beir_program);
-            break;
-        }
-        }
-        return {splitCodeLines(output), ""};
-    } catch (const std::exception& ex) {
-        return {{}, std::string(outputKindName(output_kind)) + " emission: " + ex.what()};
+    if (output_kind == OutputKind::ListJson) {
+        return {{}, "listjson output is not supported by pipelinev2"};
     }
-    return {{}, "unknown output format"};
+
+    pred::pipelinev2::PipelineConfig config;
+    config.source_name = "rtlzz_input.logic.cpp";
+    config.source_text = joinCodeLines(options.source_codelines);
+    config.top_function = options.top_function;
+    config.clang_args = buildClangArgs(options);
+    config.unroll_limit = options.unroll_limit;
+    config.beopt_args = options.beopt_args;
+    config.output_kind = output_kind == OutputKind::Beir
+        ? pred::pipelinev2::OutputKind::Beir
+        : pred::pipelinev2::OutputKind::Rtl;
+
+    auto result = pred::pipelinev2::compile(config);
+    if (!result.ok()) {
+        return {{}, result.error};
+    }
+    return {splitCodeLines(result.output_text), ""};
 }
 
 } // namespace detail

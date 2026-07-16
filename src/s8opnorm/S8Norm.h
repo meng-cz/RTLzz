@@ -42,6 +42,22 @@ struct S8Port {
     ParamPassingKind passing = ParamPassingKind::Value;
 };
 
+struct S8PortElement {
+    SymbolId symbol = -1;
+    std::vector<int> indices;
+};
+
+struct S8PortGroup {
+    std::string source_name;
+    ParamDirection direction = ParamDirection::Input;
+    ParamPassingKind passing = ParamPassingKind::Value;
+    TypeInfo source_type;
+    TypeInfo scalar_source_type;
+    S8Type scalar_type;
+    std::vector<int> array_dims;
+    std::vector<S8PortElement> elements;
+};
+
 struct S8Literal {
     std::vector<std::uint64_t> words;
     int valid_width = 0;
@@ -168,6 +184,7 @@ struct S8NormCFG {
     std::string name;
     std::vector<S8Symbol> symbols;
     std::vector<S8Port> ports;
+    std::vector<S8PortGroup> port_groups;
     BlockId entry = -1;
     BlockId exit = -1;
     std::vector<S8BasicBlock> blocks;

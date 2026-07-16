@@ -748,6 +748,23 @@ S10PredicateProgram lowerFunction(const S9SSACFG& fn,
         out.final_value = port.final_value;
         ctx.output.ports.push_back(std::move(out));
     }
+    for (const auto& group : fn.port_groups) {
+        S10PortGroup out;
+        out.source_name = group.source_name;
+        out.direction = group.direction;
+        out.passing = group.passing;
+        out.source_type = group.source_type;
+        out.scalar_source_type = group.scalar_source_type;
+        out.scalar_type = group.scalar_type;
+        out.array_dims = group.array_dims;
+        for (const auto& element : group.elements) {
+            S10PortElement out_element;
+            out_element.symbol = element.symbol;
+            out_element.indices = element.indices;
+            out.elements.push_back(std::move(out_element));
+        }
+        ctx.output.port_groups.push_back(std::move(out));
+    }
 
     GuardInfo guards = computeGuards(ctx, cfg);
     ctx.output.block_guards.resize(fn.blocks.size());

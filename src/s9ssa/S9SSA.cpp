@@ -803,6 +803,23 @@ S9SSACFG buildFunction(const S8NormCFG& fn,
         out.passing = port.passing;
         ctx.output.ports.push_back(out);
     }
+    for (const auto& group : fn.port_groups) {
+        S9PortGroup out;
+        out.source_name = group.source_name;
+        out.direction = group.direction;
+        out.passing = group.passing;
+        out.source_type = group.source_type;
+        out.scalar_source_type = group.scalar_source_type;
+        out.scalar_type = group.scalar_type;
+        out.array_dims = group.array_dims;
+        for (const auto& element : group.elements) {
+            S9PortElement out_element;
+            out_element.symbol = element.symbol;
+            out_element.indices = element.indices;
+            out.elements.push_back(std::move(out_element));
+        }
+        ctx.output.port_groups.push_back(std::move(out));
+    }
     ctx.output.blocks.resize(fn.blocks.size());
     for (const auto& block : fn.blocks) {
         S9BasicBlock out;

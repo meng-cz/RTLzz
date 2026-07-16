@@ -102,11 +102,28 @@ struct S10Port {
     std::optional<S10Operand> final_guard;
 };
 
+struct S10PortElement {
+    SymbolId symbol = -1;
+    std::vector<int> indices;
+};
+
+struct S10PortGroup {
+    std::string source_name;
+    ParamDirection direction = ParamDirection::Input;
+    ParamPassingKind passing = ParamPassingKind::Value;
+    TypeInfo source_type;
+    TypeInfo scalar_source_type;
+    S10Type scalar_type;
+    std::vector<int> array_dims;
+    std::vector<S10PortElement> elements;
+};
+
 struct S10PredicateProgram {
     std::string name;
     std::vector<S10Symbol> base_symbols;
     std::vector<S10Value> values;
     std::vector<S10Port> ports;
+    std::vector<S10PortGroup> port_groups;
     std::vector<S10BlockGuard> block_guards;
     std::vector<S10Definition> definitions;
 };

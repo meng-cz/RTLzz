@@ -11,9 +11,10 @@
 
 static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " <source.cpp> --top <function_name> [--format listjson|beir|rtl]"
+              << " <source.cpp> --top <function_name> [--format beir|rtl|listjson]"
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
               << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]\n";
+    std::cerr << "Default format is rtl. listjson is kept for API compatibility but is not supported by pipelinev2.\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -99,7 +100,7 @@ static int runMain(int argc, char* argv[]) {
 
     std::string source_file;
     std::string top_function;
-    std::string format = "listjson";
+    std::string format = "rtl";
     std::string output_file;
     std::string vullib_dir;
     int unroll_limit = 1024;
