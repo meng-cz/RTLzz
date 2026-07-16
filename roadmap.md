@@ -30,20 +30,8 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
   9. BuildSSA
      对 scalar CFG 做 SSA 转换，插入/表示 phi 或等价 merge，形成每个变量版本和控制流合流点的明确数据依赖。此处需要拆分 lookupwrite到逐元素mux。
 
-## 仍需确认的步骤：
-
-
-  16. PredicateLowering
+  10. PredicateLowering
      将 SSA CFG 的控制流 lowering 为 predicate/guarded assignments，生成 predicate-friendly 的中间程序。
 
-  17. PredicateVerifyAndSimplify
-     校验无未初始化读、无多驱动冲突、输出覆盖完整、宽度一致，并做基础 guard/表达式简化。
-
-  18. BuildBackendIR
+  11. BuildBackendIR
      将 predicate program 转换为 backend IR/BEIR，形成后端所需的 signal、operation、assignment、register/memory/proxy effect 表示。
-
-  19. BackendIROptimize
-     在 backend IR 上做常量折叠、代数化简、CSE、DCE、宽度规整、predicate sinking 等后端优化。
-
-  20. EmitBackendIR
-     输出最终 backend IR 文本/listjson，或把 backend IR 交给 RTL emitter 继续生成 SystemVerilog。
