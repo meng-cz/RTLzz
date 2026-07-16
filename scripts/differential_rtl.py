@@ -2,13 +2,13 @@
 """Differentially test generated SystemVerilog RTL against the original C++.
 
 The script:
-  1. runs predicate-expand to produce listjson metadata and RTL,
+  1. runs predicate-expand to produce pipelinev2 port metadata and RTL,
   2. builds a tiny C++ oracle harness that includes and calls the source top,
   3. builds a Verilator C++ testbench around the generated RTL,
   4. compares RTL outputs against the C++ oracle for random inputs.
 
-It intentionally mirrors differential_listjson.py for input generation and
-fixture support.
+It reuses differential_listjson.py harness helpers where the compact port
+metadata schema intentionally matches the old listjson port subset.
 """
 
 from __future__ import annotations
@@ -222,7 +222,7 @@ def main() -> int:
     predicate = lj.find_exe(build_dir)
     work = Path(tempfile.mkdtemp(prefix="rtlzz_rtl_diff_", dir="/tmp"))
     try:
-        listjson = work / "program.listjson"
+        portmeta = work / "program.portmeta.json"
         rtl = work / "program.sv"
         common_args = [
             str(predicate), str(source), "--top", args.top,
@@ -233,9 +233,9 @@ def main() -> int:
         ]
         for opt in args.beopt:
             common_args += ["--beopt", opt]
-        lj.run(common_args + ["--format", "listjson", "-o", str(listjson)], cwd=ROOT)
+        lj.run(common_args + ["--format", "portmeta", "-o", str(portmeta)], cwd=ROOT)
         lj.run(common_args + ["--format", "rtl", "-o", str(rtl)], cwd=ROOT)
-        program = json.loads(listjson.read_text())
+        program = json.loads(portmeta.read_text())
         resolved_top = program.get("function", args.top)
 
         oracle_cpp = work / "oracle.cpp"

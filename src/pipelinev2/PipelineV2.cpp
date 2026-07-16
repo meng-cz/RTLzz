@@ -16,6 +16,7 @@
 #include "s11beir/S11BEIR.h"
 
 #include <exception>
+#include <sstream>
 #include <utility>
 
 namespace pred::pipelinev2 {
@@ -71,6 +72,147 @@ std::string stageError(const std::optional<s11beir::BEIRError>& error) {
     return error ? error->formatted : "stage failed";
 }
 
+std::string jsonEscape(const std::string& text) {
+    std::ostringstream os;
+    for (char ch : text) {
+        switch (ch) {
+        case '"': os << "\\\""; break;
+        case '\\': os << "\\\\"; break;
+        case '\b': os << "\\b"; break;
+        case '\f': os << "\\f"; break;
+        case '\n': os << "\\n"; break;
+        case '\r': os << "\\r"; break;
+        case '\t': os << "\\t"; break;
+        default:
+            unsigned char c = static_cast<unsigned char>(ch);
+            if (c < 0x20) {
+                os << "\\u";
+                constexpr char hex[] = "0123456789abcdef";
+                os << "00" << hex[(c >> 4) & 0xf] << hex[c & 0xf];
+            } else {
+                os << ch;
+            }
+            break;
+        }
+    }
+    return os.str();
+}
+
+void emitJsonString(std::ostream& os, const std::string& text) {
+    os << '"' << jsonEscape(text) << '"';
+}
+
+void emitIntArray(std::ostream& os, const std::vector<int>& values) {
+    os << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i) os << ", ";
+        os << values[i];
+    }
+    os << "]";
+}
+
+std::string passingName(ParamPassingKind passing) {
+    switch (passing) {
+    case ParamPassingKind::Value: return "Value";
+    case ParamPassingKind::ConstRef: return "ConstRef";
+    case ParamPassingKind::MutableRef: return "MutableRef";
+    case ParamPassingKind::RValueRef: return "RValueRef";
+    case ParamPassingKind::Pointer: return "Pointer";
+    }
+    return "Value";
+}
+
+std::string typeNameForMetadata(const TypeInfo& type) {
+    if (!type.name.empty()) return type.name;
+    if (type.hw_kind == "bool") return "bool";
+    if (type.hw_kind == "Int" && type.width > 0) {
+        return "Int<" + std::to_string(type.width) + ">";
+    }
+    if (type.hw_kind == "UInt" && type.width > 0) {
+        return "UInt<" + std::to_string(type.width) + ">";
+    }
+    if (!type.hw_kind.empty()) return type.hw_kind;
+    return "bits";
+}
+
+void emitTypeMetadata(std::ostream& os,
+                      const TypeInfo& scalar_type,
+                      const std::vector<int>& array_dims) {
+    os << "{";
+    os << "\"name\": ";
+    emitJsonString(os, typeNameForMetadata(scalar_type));
+    os << ", \"width\": " << scalar_type.width;
+    os << ", \"signed\": " << (scalar_type.is_signed ? "true" : "false");
+    os << ", \"hw_kind\": ";
+    emitJsonString(os, scalar_type.hw_kind);
+    os << ", \"is_array\": " << (!array_dims.empty() ? "true" : "false");
+    os << ", \"array_size\": " << (array_dims.empty() ? 0 : array_dims.front());
+    os << ", \"array_dims\": ";
+    emitIntArray(os, array_dims);
+    os << "}";
+}
+
+std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program) {
+    const auto& fn = program.top;
+    std::ostringstream os;
+    os << "{\n";
+    os << "  \"schema_version\": \"rtlzz-pipelinev2-portmeta-v1\",\n";
+    os << "  \"function\": ";
+    emitJsonString(os, fn.name);
+    os << ",\n";
+    os << "  \"ports\": [\n";
+    for (std::size_t i = 0; i < fn.port_groups.size(); ++i) {
+        const auto& group = fn.port_groups[i];
+        os << "    {\n";
+        os << "      \"name\": ";
+        emitJsonString(os, group.source_name);
+        os << ",\n";
+        os << "      \"direction\": ";
+        emitJsonString(os, paramDirectionName(group.direction));
+        os << ",\n";
+        os << "      \"passing\": ";
+        emitJsonString(os, passingName(group.passing));
+        os << ",\n";
+        os << "      \"type\": ";
+        emitTypeMetadata(os, group.scalar_type, group.array_dims);
+        os << ",\n";
+        os << "      \"element_symbols\": [";
+        for (std::size_t j = 0; j < group.elements.size(); ++j) {
+            if (j) os << ", ";
+            const auto& element = group.elements[j];
+            std::string name = "port_" + std::to_string(element.symbol);
+            if (element.symbol >= 0 &&
+                element.symbol < static_cast<s7flatten::SymbolId>(fn.symbols.size())) {
+                name = fn.symbols[static_cast<std::size_t>(element.symbol)].debug_name;
+            }
+            emitJsonString(os, name);
+        }
+        os << "],\n";
+        os << "      \"elements\": [";
+        for (std::size_t j = 0; j < group.elements.size(); ++j) {
+            if (j) os << ", ";
+            const auto& element = group.elements[j];
+            std::string name = "port_" + std::to_string(element.symbol);
+            if (element.symbol >= 0 &&
+                element.symbol < static_cast<s7flatten::SymbolId>(fn.symbols.size())) {
+                name = fn.symbols[static_cast<std::size_t>(element.symbol)].debug_name;
+            }
+            os << "{\"symbol\": ";
+            emitJsonString(os, name);
+            os << ", \"indices\": ";
+            emitIntArray(os, element.indices);
+            os << "}";
+        }
+        os << "]\n";
+        os << "    }";
+        if (i + 1 < fn.port_groups.size()) os << ",";
+        os << "\n";
+    }
+    os << "  ]\n";
+    os << "}\n";
+    return os.str();
+}
+
 } // namespace
 
 PipelineResult compile(const PipelineConfig& config) {
@@ -124,6 +266,12 @@ PipelineResult compile(const PipelineConfig& config) {
         if (!s7.ok()) return errorResult("s7flatten", stageError(s7.error));
         if (!s7.program) return errorResult("s7flatten", "stage produced no program");
 
+        if (config.output_kind == OutputKind::PortMetadata) {
+            PipelineResult result;
+            result.output_text = portMetadataJson(*s7.program);
+            return result;
+        }
+
         auto s8 = s8opnorm::normalizeOperations(*s7.program);
         if (!s8.ok()) return errorResult("s8opnorm", stageError(s8.error));
         if (!s8.program) return errorResult("s8opnorm", "stage produced no program");
@@ -153,6 +301,8 @@ PipelineResult compile(const PipelineConfig& config) {
             break;
         case OutputKind::Rtl:
             result.output_text = rtlgen::emitSystemVerilog(beir_program);
+            break;
+        case OutputKind::PortMetadata:
             break;
         }
         result.beir_program = std::move(beir_program);

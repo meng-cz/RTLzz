@@ -11,6 +11,7 @@ namespace pred::pipelinev2 {
 enum class OutputKind {
     Beir,
     Rtl,
+    PortMetadata,
 };
 
 struct PipelineConfig {

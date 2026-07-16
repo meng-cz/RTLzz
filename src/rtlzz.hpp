@@ -42,6 +42,7 @@ namespace detail {
 
 enum class OutputKind {
     ListJson,
+    PortMetadata,
     Beir,
     Rtl,
 };
@@ -50,6 +51,8 @@ inline const char* outputKindName(OutputKind kind) {
     switch (kind) {
     case OutputKind::ListJson:
         return "listjson";
+    case OutputKind::PortMetadata:
+        return "portmeta";
     case OutputKind::Beir:
         return "beir";
     case OutputKind::Rtl:
@@ -111,9 +114,13 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     config.clang_args = buildClangArgs(options);
     config.unroll_limit = options.unroll_limit;
     config.beopt_args = options.beopt_args;
-    config.output_kind = output_kind == OutputKind::Beir
-        ? pred::pipelinev2::OutputKind::Beir
-        : pred::pipelinev2::OutputKind::Rtl;
+    if (output_kind == OutputKind::Beir) {
+        config.output_kind = pred::pipelinev2::OutputKind::Beir;
+    } else if (output_kind == OutputKind::PortMetadata) {
+        config.output_kind = pred::pipelinev2::OutputKind::PortMetadata;
+    } else {
+        config.output_kind = pred::pipelinev2::OutputKind::Rtl;
+    }
 
     auto result = pred::pipelinev2::compile(config);
     if (!result.ok()) {
@@ -130,6 +137,10 @@ inline CompileResult compileToRtl(CompileOptions options) {
 
 inline CompileResult compileToListJson(CompileOptions options) {
     return detail::compileSource(options, detail::OutputKind::ListJson);
+}
+
+inline CompileResult compileToPortMetadata(CompileOptions options) {
+    return detail::compileSource(options, detail::OutputKind::PortMetadata);
 }
 
 inline CompileResult compileToBeir(CompileOptions options) {
