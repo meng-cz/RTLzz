@@ -61,6 +61,11 @@ void hls_main(Int<8> a,
               Int<12>& overload12,
               Int<8>& lambda_value,
               Int<8>& lambda_ref,
+              Int<8>& lambda_nested_value,
+              Int<8>& lambda_nested_ref,
+              Int<8>& lambda_ref_mutation,
+              Int<8>& lambda_calls_lambda_value,
+              Int<8>& lambda_calls_lambda_ref,
               Int<8>& helper_lambda,
               Int<8>& loop_inline,
               Int<8>& return_mix) {
@@ -85,6 +90,43 @@ void hls_main(Int<8> a,
         touched = touched + Int<8>(1);
     }
     lambda_ref = touched;
+
+    auto nested_by_value = [=](Int<8> x) -> Int<8> {
+        auto inner = [=](Int<8> y) -> Int<8> {
+            return choose_path(sel, y, b);
+        };
+        return inner(x + Int<8>(2));
+    };
+    lambda_nested_value = nested_by_value(a);
+
+    auto nested_by_ref = [&](Int<8> x) -> Int<8> {
+        Int<8> local = x ^ Int<8>(4);
+        auto inner = [&](Int<8> y) -> Int<8> {
+            return choose_path(alt, local + y, b);
+        };
+        return inner(a);
+    };
+    lambda_nested_ref = nested_by_ref(chain);
+
+    Int<8> mutable_main = a;
+    auto mutate_main_and_output = [&](Int<8> delta) -> Int<8> {
+        mutable_main = mutable_main + delta;
+        lambda_ref_mutation = mutable_main ^ b;
+        return lambda_ref_mutation;
+    };
+    Int<8> mutation_result = mutate_main_and_output(Int<8>(3));
+    lambda_ref_mutation = mutation_result + mutable_main;
+
+    auto call_local_by_value = [=](Int<8> x) -> Int<8> {
+        return value_lambda(x, b) + Int<8>(2);
+    };
+    lambda_calls_lambda_value = call_local_by_value(a);
+
+    auto call_local_by_ref = [&](Int<8> x) -> Int<8> {
+        mutable_main = mutable_main ^ x;
+        return value_lambda(mutable_main, b) ^ lambda_ref_mutation;
+    };
+    lambda_calls_lambda_ref = call_local_by_ref(chain);
 
     helper_lambda = helper_with_local_lambda(a, alt);
     loop_inline = loop_calls_helper(b);

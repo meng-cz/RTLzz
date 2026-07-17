@@ -7,6 +7,7 @@
 #include <fstream>
 #include <regex>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 
 namespace pred::s0ast {
@@ -357,6 +358,173 @@ std::string normalizeCaptureName(std::string capture) {
     return capture;
 }
 
+std::size_t skipSpaces(const std::string& text, std::size_t pos);
+std::string findIdentifierType(const std::string& prefix, const std::string& name);
+
+enum class CaptureDefault {
+    None,
+    ByValue,
+    ByRef,
+};
+
+struct CaptureSpec {
+    std::string name;
+    bool by_ref = false;
+};
+
+const std::unordered_set<std::string>& lambdaRewriteKeywords() {
+    static const std::unordered_set<std::string> keywords = {
+        "auto", "bool", "break", "case", "class", "const", "continue",
+        "default", "do", "else", "enum", "false", "for", "if", "int",
+        "long", "return", "short", "signed", "sizeof", "static", "struct",
+        "switch", "true", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "int8_t", "int16_t", "int32_t", "int64_t", "unsigned", "void",
+        "while", "Int", "Cat", "Repeat", "ReduceOr", "ReduceAnd",
+        "ReduceXor",
+    };
+    return keywords;
+}
+
+std::string lastIdentifierInDeclaration(std::string text) {
+    text = trim(std::move(text));
+    if (text.empty()) return "";
+    auto eq = text.find('=');
+    if (eq != std::string::npos) text = text.substr(0, eq);
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.pop_back();
+    }
+    while (!text.empty() && text.back() == ']') {
+        auto open = text.find_last_of('[');
+        if (open == std::string::npos) break;
+        text.erase(open);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+            text.pop_back();
+        }
+    }
+    if (text.empty() || !identChar(text.back())) return "";
+    std::size_t end = text.size();
+    std::size_t begin = end;
+    while (begin > 0 && identChar(text[begin - 1])) --begin;
+    return text.substr(begin, end - begin);
+}
+
+std::unordered_set<std::string> parameterNames(const std::string& params) {
+    std::unordered_set<std::string> out;
+    for (const auto& param : splitCommaList(params)) {
+        auto name = lastIdentifierInDeclaration(param);
+        if (!name.empty()) out.insert(std::move(name));
+    }
+    return out;
+}
+
+std::unordered_set<std::string> localDeclarationNames(const std::string& body) {
+    std::unordered_set<std::string> out;
+    std::regex pattern(
+        "(?:^|[;{}])\\s*(?:auto|bool|Int\\s*<\\s*\\d+\\s*>|u?int(?:8|16|32|64)_t|int(?:8|16|32|64)_t|int|uint|uint8|uint16|uint32|uint64)\\s*(?:[&*]\\s*)?([A-Za-z_][A-Za-z0-9_]*)\\b");
+    for (std::sregex_iterator it(body.begin(), body.end(), pattern), end; it != end; ++it) {
+        out.insert((*it)[1].str());
+    }
+    std::regex lambda_params("\\[[^\\]]*\\]\\s*\\(([^)]*)\\)");
+    for (std::sregex_iterator it(body.begin(), body.end(), lambda_params), end; it != end; ++it) {
+        auto nested_params = parameterNames((*it)[1].str());
+        out.insert(nested_params.begin(), nested_params.end());
+    }
+    return out;
+}
+
+bool identifierHasNonCallUse(const std::string& text, const std::string& name) {
+    std::size_t pos = 0;
+    while ((pos = text.find(name, pos)) != std::string::npos) {
+        if (pos > 0 && identChar(text[pos - 1])) {
+            pos += name.size();
+            continue;
+        }
+        std::size_t after = pos + name.size();
+        if (after < text.size() && identChar(text[after])) {
+            pos = after;
+            continue;
+        }
+        std::size_t before = pos;
+        while (before > 0 && std::isspace(static_cast<unsigned char>(text[before - 1]))) {
+            --before;
+        }
+        if (before > 0 && text[before - 1] == '.') {
+            pos = after;
+            continue;
+        }
+        std::size_t next = skipSpaces(text, after);
+        if (next < text.size() && text[next] == '(') {
+            pos = after;
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool identifierHasCallUse(const std::string& text, const std::string& name) {
+    std::size_t pos = 0;
+    while ((pos = text.find(name, pos)) != std::string::npos) {
+        if (pos > 0 && identChar(text[pos - 1])) {
+            pos += name.size();
+            continue;
+        }
+        std::size_t after = pos + name.size();
+        if (after < text.size() && identChar(text[after])) {
+            pos = after;
+            continue;
+        }
+        std::size_t call_pos = skipSpaces(text, after);
+        if (call_pos < text.size() && text[call_pos] == '(') return true;
+        pos = after;
+    }
+    return false;
+}
+
+std::vector<std::string> identifiersInOrder(const std::string& text) {
+    std::vector<std::string> out;
+    std::unordered_set<std::string> seen;
+    std::regex pattern("\\b[A-Za-z_][A-Za-z0-9_]*\\b");
+    for (std::sregex_iterator it(text.begin(), text.end(), pattern), end; it != end; ++it) {
+        std::string name = (*it)[0].str();
+        if (seen.insert(name).second) out.push_back(std::move(name));
+    }
+    return out;
+}
+
+std::string captureParamType(std::string type, bool by_ref) {
+    type = trim(std::move(type));
+    if (!by_ref || type.empty()) return type;
+    if (type.find('&') != std::string::npos || type.find('*') != std::string::npos) {
+        return type;
+    }
+    return type + "&";
+}
+
+std::vector<CaptureSpec> inferDefaultCaptures(const std::string& source,
+                                              std::size_t auto_pos,
+                                              const std::string& params,
+                                              const std::string& body,
+                                              CaptureDefault default_mode) {
+    std::vector<CaptureSpec> out;
+    if (default_mode == CaptureDefault::None) return out;
+    auto params_set = parameterNames(params);
+    auto locals_set = localDeclarationNames(body);
+    const auto& keywords = lambdaRewriteKeywords();
+    std::unordered_set<std::string> emitted;
+    std::string prefix = source.substr(0, auto_pos);
+    for (const auto& name : identifiersInOrder(body)) {
+        if (keywords.count(name)) continue;
+        if (params_set.count(name)) continue;
+        if (locals_set.count(name)) continue;
+        if (!identifierHasNonCallUse(body, name)) continue;
+        if (findIdentifierType(prefix, name).empty()) continue;
+        if (!emitted.insert(name).second) continue;
+        out.push_back(CaptureSpec{name, default_mode == CaptureDefault::ByRef});
+    }
+    return out;
+}
+
 std::size_t skipSpaces(const std::string& text, std::size_t pos) {
     while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
     return pos;
@@ -401,8 +569,11 @@ struct LambdaRewrite {
     std::string body;
     std::vector<std::string> captures;
     std::vector<std::string> capture_types;
+    std::vector<bool> capture_by_ref;
     std::size_t begin = 0;
     std::size_t end = 0;
+    std::size_t body_begin = 0;
+    std::size_t body_end = 0;
 };
 
 std::optional<LambdaRewrite> parseLambdaRewrite(const std::string& source,
@@ -451,19 +622,46 @@ std::optional<LambdaRewrite> parseLambdaRewrite(const std::string& source,
     rewrite.body = source.substr(body_begin, body_end - body_begin + 1);
     rewrite.begin = auto_pos;
     rewrite.end = pos + 1;
-    for (auto capture : splitCommaList(capture_text)) {
-        capture = normalizeCaptureName(std::move(capture));
-        if (capture.empty()) {
-            error = "S0 lambda rewrite requires explicit captures; capture-default is not supported yet";
-            return std::nullopt;
+    rewrite.body_begin = body_begin;
+    rewrite.body_end = body_end;
+
+    CaptureDefault default_mode = CaptureDefault::None;
+    std::vector<CaptureSpec> captures;
+    std::unordered_set<std::string> explicit_names;
+    for (auto raw_capture : splitCommaList(capture_text)) {
+        raw_capture = trim(std::move(raw_capture));
+        if (raw_capture == "=") {
+            default_mode = CaptureDefault::ByValue;
+            continue;
         }
-        std::string type = findIdentifierType(source.substr(0, auto_pos), capture);
+        if (raw_capture == "&") {
+            default_mode = CaptureDefault::ByRef;
+            continue;
+        }
+        bool by_ref = !raw_capture.empty() && raw_capture.front() == '&';
+        bool by_value = !raw_capture.empty() && raw_capture.front() == '=';
+        std::string capture = normalizeCaptureName(raw_capture);
+        if (capture.empty()) continue;
+        if (!explicit_names.insert(capture).second) continue;
+        captures.push_back(CaptureSpec{std::move(capture), by_ref && !by_value});
+    }
+    for (auto inferred : inferDefaultCaptures(source, auto_pos, rewrite.params,
+                                             rewrite.body, default_mode)) {
+        if (explicit_names.count(inferred.name)) continue;
+        captures.push_back(std::move(inferred));
+    }
+
+    std::unordered_set<std::string> emitted_captures;
+    for (auto capture : captures) {
+        if (!emitted_captures.insert(capture.name).second) continue;
+        std::string type = findIdentifierType(source.substr(0, auto_pos), capture.name);
         if (type.empty()) {
-            error = "S0 lambda rewrite could not infer capture type for '" + capture + "'";
+            error = "S0 lambda rewrite could not infer capture type for '" + capture.name + "'";
             return std::nullopt;
         }
-        rewrite.captures.push_back(std::move(capture));
-        rewrite.capture_types.push_back(std::move(type));
+        rewrite.captures.push_back(std::move(capture.name));
+        rewrite.capture_types.push_back(captureParamType(std::move(type), capture.by_ref));
+        rewrite.capture_by_ref.push_back(capture.by_ref);
     }
     return rewrite;
 }
@@ -502,6 +700,11 @@ std::string combinedParamList(const LambdaRewrite& rewrite) {
     return os.str();
 }
 
+std::string declarationForRewrite(const LambdaRewrite& rewrite) {
+    return rewrite.return_type + " " + rewrite.generated_name +
+           "(" + combinedParamList(rewrite) + ");";
+}
+
 std::string captureArgPrefix(const LambdaRewrite& rewrite) {
     if (rewrite.captures.empty()) return "";
     std::ostringstream os;
@@ -535,6 +738,117 @@ void replaceLambdaCalls(std::string& source, const LambdaRewrite& rewrite) {
     }
 }
 
+bool containsRewrite(const LambdaRewrite& parent, const LambdaRewrite& child) {
+    return parent.begin < child.begin && child.end <= parent.end;
+}
+
+bool isNestedRewrite(const LambdaRewrite& rewrite,
+                     const std::vector<LambdaRewrite>& rewrites) {
+    for (const auto& other : rewrites) {
+        if (&other == &rewrite) continue;
+        if (containsRewrite(other, rewrite)) return true;
+    }
+    return false;
+}
+
+bool hasNestedRewriteContainerInside(const LambdaRewrite& parent,
+                                     const LambdaRewrite& candidate,
+                                     const std::vector<LambdaRewrite>& rewrites) {
+    for (const auto& other : rewrites) {
+        if (&other == &parent || &other == &candidate) continue;
+        if (other.begin <= parent.body_begin || other.end > parent.body_end + 1) continue;
+        if (containsRewrite(other, candidate)) return true;
+    }
+    return false;
+}
+
+bool isDirectNestedRewriteInside(const LambdaRewrite& parent,
+                                 const LambdaRewrite& candidate,
+                                 const std::vector<LambdaRewrite>& rewrites) {
+    if (candidate.begin <= parent.body_begin || candidate.end > parent.body_end + 1) {
+        return false;
+    }
+    return !hasNestedRewriteContainerInside(parent, candidate, rewrites);
+}
+
+bool isVisiblePriorOuterRewrite(const LambdaRewrite& rewrite,
+                                const LambdaRewrite& candidate,
+                                const std::vector<LambdaRewrite>& rewrites) {
+    if (candidate.end > rewrite.begin) return false;
+    return !isNestedRewrite(candidate, rewrites);
+}
+
+std::string bodyForDefinition(const std::string& source,
+                              const LambdaRewrite& rewrite,
+                              const std::vector<LambdaRewrite>& rewrites) {
+    std::string body = rewrite.body;
+    for (auto it = rewrites.rbegin(); it != rewrites.rend(); ++it) {
+        if (it->begin <= rewrite.body_begin || it->end > rewrite.body_end + 1) continue;
+        if (hasNestedRewriteContainerInside(rewrite, *it, rewrites)) continue;
+        std::size_t relative_begin = it->begin - rewrite.body_begin;
+        std::string original = source.substr(it->begin, it->end - it->begin);
+        body.replace(relative_begin, it->end - it->begin,
+                     linePreservingReplacement(original, declarationForRewrite(*it)));
+    }
+    for (const auto& nested : rewrites) {
+        if (!isDirectNestedRewriteInside(rewrite, nested, rewrites)) continue;
+        replaceLambdaCalls(body, nested);
+    }
+    for (const auto& visible : rewrites) {
+        if (!isVisiblePriorOuterRewrite(rewrite, visible, rewrites)) continue;
+        replaceLambdaCalls(body, visible);
+    }
+    return body;
+}
+
+bool rewriteHasCapture(const LambdaRewrite& rewrite, const std::string& name) {
+    return std::find(rewrite.captures.begin(), rewrite.captures.end(), name) !=
+           rewrite.captures.end();
+}
+
+void addCaptureToRewrite(LambdaRewrite& rewrite,
+                         const std::string& source,
+                         const std::string& name,
+                         bool by_ref,
+                         std::string& error) {
+    if (rewriteHasCapture(rewrite, name)) return;
+    std::string type = findIdentifierType(source.substr(0, rewrite.begin), name);
+    if (type.empty()) {
+        error = "S0 lambda rewrite could not infer transitive capture type for '" + name + "'";
+        return;
+    }
+    rewrite.captures.push_back(name);
+    rewrite.capture_types.push_back(captureParamType(std::move(type), by_ref));
+    rewrite.capture_by_ref.push_back(by_ref);
+}
+
+void propagateLambdaCallCaptures(std::vector<LambdaRewrite>& rewrites,
+                                 const std::string& source,
+                                 std::string& error) {
+    bool changed = true;
+    int iteration = 0;
+    while (changed && iteration++ < 16) {
+        changed = false;
+        for (auto& rewrite : rewrites) {
+            std::size_t before = rewrite.captures.size();
+            for (const auto& candidate : rewrites) {
+                if (&candidate == &rewrite) continue;
+                if (!isVisiblePriorOuterRewrite(rewrite, candidate, rewrites)) continue;
+                if (!identifierHasCallUse(rewrite.body, candidate.source_name)) continue;
+                for (std::size_t i = 0; i < candidate.captures.size(); ++i) {
+                    addCaptureToRewrite(rewrite, source, candidate.captures[i],
+                                        candidate.capture_by_ref[i], error);
+                    if (!error.empty()) return;
+                }
+            }
+            changed = changed || rewrite.captures.size() != before;
+        }
+    }
+    if (changed) {
+        error = "S0 lambda rewrite capture dependency propagation did not converge";
+    }
+}
+
 std::optional<std::string> rewriteLocalLambdasForNativeParser(const std::string& source,
                                                         std::string& error) {
     std::vector<LambdaRewrite> rewrites;
@@ -542,31 +856,40 @@ std::optional<std::string> rewriteLocalLambdasForNativeParser(const std::string&
     int index = 0;
     while ((pos = source.find("auto", pos)) != std::string::npos) {
         if (auto rewrite = parseLambdaRewrite(source, pos, index, error)) {
+            std::size_t next_scan = pos + 4;
             rewrites.push_back(std::move(*rewrite));
             ++index;
-            pos = rewrites.back().end;
+            pos = next_scan;
             continue;
         }
         if (!error.empty()) return std::nullopt;
         pos += 4;
     }
     if (rewrites.empty()) return source;
+    propagateLambdaCallCaptures(rewrites, source, error);
+    if (!error.empty()) return std::nullopt;
 
     std::string transformed = source;
     for (auto it = rewrites.rbegin(); it != rewrites.rend(); ++it) {
+        if (isNestedRewrite(*it, rewrites)) continue;
         std::string original = source.substr(it->begin, it->end - it->begin);
-        std::string declaration = it->return_type + " " + it->generated_name +
-                                  "(" + combinedParamList(*it) + ");";
         transformed.replace(it->begin, it->end - it->begin,
-                            linePreservingReplacement(original, std::move(declaration)));
+                            linePreservingReplacement(original, declarationForRewrite(*it)));
     }
-    for (const auto& rewrite : rewrites) replaceLambdaCalls(transformed, rewrite);
+    for (const auto& rewrite : rewrites) {
+        if (isNestedRewrite(rewrite, rewrites)) continue;
+        replaceLambdaCalls(transformed, rewrite);
+    }
 
     std::ostringstream definitions;
     for (const auto& rewrite : rewrites) {
+        definitions << "\n" << declarationForRewrite(rewrite) << "\n";
+    }
+    for (const auto& rewrite : rewrites) {
         std::string params = combinedParamList(rewrite);
         definitions << "\n" << rewrite.return_type << " " << rewrite.generated_name
-                    << "(" << params << ") " << rewrite.body << "\n";
+                    << "(" << params << ") "
+                    << bodyForDefinition(source, rewrite, rewrites) << "\n";
     }
     transformed += definitions.str();
     return transformed;
