@@ -11,6 +11,13 @@
 
 namespace pred::s6inline {
 
+using TypeInfo = pred::v2::TypeInfo;
+using ParamDecl = pred::v2::ParamDecl;
+using ParamDirection = pred::v2::ParamDirection;
+using ParamPassingKind = pred::v2::ParamPassingKind;
+using StructFieldInfo = pred::v2::StructFieldInfo;
+using StructConstructorInfo = pred::v2::StructConstructorInfo;
+
 using BlockId = s4cfg::BlockId;
 
 struct InlinedBasicBlock {

@@ -1485,7 +1485,11 @@ void verifyNormProgram(const S8NormProgram& program) {
                 (void)symbolAt(fn, stmt.target);
                 verify_operand(stmt.value);
                 if (!typeEq(symbolType(fn, stmt.target), stmt.value.type)) {
-                    fail("S8 assign value type does not match target type");
+                    const auto& target_symbol = symbolAt(fn, stmt.target);
+                    fail("S8 assign value type does not match target type for '" +
+                         target_symbol.debug_name + "': target width " +
+                         std::to_string(target_symbol.type.width) +
+                         ", value width " + std::to_string(stmt.value.type.width));
                 }
                 break;
             case S8StmtKind::Op:

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "ast/AST.h"
 #include "debug/RTLZZException.h"
 #include "s1apinorm/S1NormedAST.h"
 
@@ -33,14 +32,8 @@ struct ValidateResult {
     bool ok() const { return !error.has_value(); }
 };
 
-ValidateResult validateFunctionAST(const FunctionAST& function,
-                                   const ValidateOptions& options = {});
-
 ValidateResult validateFunctionAST(const s1apinorm::S1FunctionAST& function,
                                    const ValidateOptions& options = {});
-
-void validateFunctionASTOrThrow(const FunctionAST& function,
-                                const ValidateOptions& options = {});
 
 void validateFunctionASTOrThrow(const s1apinorm::S1FunctionAST& function,
                                 const ValidateOptions& options = {});

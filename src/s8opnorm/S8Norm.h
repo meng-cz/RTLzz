@@ -10,6 +10,10 @@
 
 namespace pred::s8opnorm {
 
+using TypeInfo = pred::v2::TypeInfo;
+using ParamDirection = pred::v2::ParamDirection;
+using ParamPassingKind = pred::v2::ParamPassingKind;
+
 using BlockId = int;
 using SymbolId = int;
 

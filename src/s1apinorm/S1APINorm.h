@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ast/AST.h"
 #include "debug/RTLZZException.h"
 #include "s1apinorm/S1NormedAST.h"
+#include "v2/V2AST.h"
 
 #include <optional>
 #include <string>
@@ -42,11 +42,11 @@ struct APINormResult {
 };
 
 APINormResult normalizeAPIs(
-    const FunctionAST& function,
+    const pred::v2::FunctionAST& function,
     const APINormOptions& options = {});
 
 S1FunctionAST normalizeAPIsOrThrow(
-    const FunctionAST& function,
+    const pred::v2::FunctionAST& function,
     const APINormOptions& options = {});
 
 std::string debugPrint(const S1FunctionAST& function,

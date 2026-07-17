@@ -6,6 +6,19 @@
 #include <utility>
 
 namespace pred::s1apinorm {
+
+using FunctionAST = pred::v2::FunctionAST;
+using Expr = pred::v2::Expr;
+using ExprPtr = pred::v2::ExprPtr;
+using ExprKind = pred::v2::ExprKind;
+using Stmt = pred::v2::Stmt;
+using StmtPtr = pred::v2::StmtPtr;
+using StmtKind = pred::v2::StmtKind;
+using CaseClause = pred::v2::CaseClause;
+using IntrinsicKind = pred::v2::IntrinsicKind;
+using pred::v2::canonicalize_bool_type;
+using pred::v2::make_hw_type;
+
 namespace {
 
 ErrorContext makeContext(DebugLoc loc = {}, std::string note = {}) {
@@ -497,6 +510,20 @@ private:
                                  const Expr& target,
                                  S1ExprPtr value,
                                  NormStats& stats) {
+        if (target.callee == "at" || target.callee == "_at") {
+            if (target.args.empty()) {
+                fail("Int at assignment is missing a base expression", target.debug_loc);
+            }
+            if (target.hi < 0 || target.lo < 0) {
+                fail("Int at assignment requires static template indices", target.debug_loc);
+            }
+            auto base = normalizeExpr(target.args[0], stats);
+            stmt.assign_target = cloneExpr(base);
+            stmt.assign_value = makeWriteSlice(std::move(base), target.hi, target.lo,
+                                               std::move(value));
+            ++stats.normalized_writes;
+            return true;
+        }
         if (target.callee != "__slice" && target.callee != "__bit") return false;
         if (target.args.empty()) fail("Int slice assignment is missing a base expression", target.debug_loc);
         auto base = normalizeExpr(target.args[0], stats);
@@ -523,12 +550,16 @@ private:
                              const Expr& target,
                              S1ExprPtr value,
                              NormStats& stats) {
-        if (!isDynamicRangeAt(target) && !isDynamicBitAt(target)) return false;
+        const std::string callee = canonicalCallee(target.callee);
+        const bool range_call = isDynamicRangeAt(target) ||
+            callee == "range_at" || callee == "pick";
+        const bool bit_call = isDynamicBitAt(target) || callee == "bit_at";
+        if (!range_call && !bit_call) return false;
         if (target.args.size() < 2) fail("Dynamic Int assignment is missing base or index", target.debug_loc);
         auto base = normalizeExpr(target.args[0], stats);
         auto index = normalizeExpr(target.args[1], stats);
         stmt.assign_target = cloneExpr(base);
-        stmt.assign_value = isDynamicBitAt(target)
+        stmt.assign_value = bit_call
             ? makeDynamicWriteBit(std::move(base), std::move(index), std::move(value))
             : makeDynamicWriteSlice(std::move(base), std::move(index), std::move(value));
         ++stats.normalized_writes;
@@ -661,19 +692,29 @@ private:
         args.reserve(expr.args.size());
         for (const auto& arg : expr.args) args.push_back(normalizeExpr(arg, stats));
 
+        const std::string callee = canonicalCallee(expr.callee);
+        if ((expr.callee == "at" || expr.callee == "_at") && !args.empty()) {
+            ++stats.normalized_calls;
+            if (expr.hi >= 0 && expr.lo >= 0) {
+                return makeSlice(std::move(args[0]), expr.hi, expr.lo, expr.type);
+            }
+            fail("Int at API normalization requires static template indices", expr.debug_loc);
+        }
         if ((expr.callee == "__slice" || expr.callee == "__bit") && !args.empty()) {
             ++stats.normalized_calls;
             return normalizeStaticSliceRead(expr, std::move(args));
         }
-        if ((isDynamicRangeAt(expr) || isDynamicBitAt(expr)) && args.size() >= 2) {
+        if (((isDynamicRangeAt(expr) || isDynamicBitAt(expr)) ||
+             callee == "range_at" || callee == "bit_at" || callee == "pick") &&
+            args.size() >= 2) {
             ++stats.normalized_calls;
-            return isDynamicBitAt(expr)
+            bool is_bit = isDynamicBitAt(expr) || callee == "bit_at";
+            return is_bit
                 ? makeDynamicBitSelect(std::move(args[0]), std::move(args[1]))
                 : makeDynamicSlice(std::move(args[0]), std::move(args[1]), expr.type,
                                    expr.to_width);
         }
 
-        const std::string callee = canonicalCallee(expr.callee);
         if (callee == "Cat" || callee == "cat" || callee == "concat") {
             ++stats.normalized_calls;
             return makeConcat(std::move(args));

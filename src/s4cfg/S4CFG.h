@@ -11,6 +11,11 @@
 
 namespace pred::s4cfg {
 
+using TypeInfo = pred::v2::TypeInfo;
+using ParamDecl = pred::v2::ParamDecl;
+using StructFieldInfo = pred::v2::StructFieldInfo;
+using StructConstructorInfo = pred::v2::StructConstructorInfo;
+
 using BlockId = int;
 using LoopRegionId = int;
 

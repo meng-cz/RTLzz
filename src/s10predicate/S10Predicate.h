@@ -9,6 +9,10 @@
 
 namespace pred::s10predicate {
 
+using TypeInfo = pred::v2::TypeInfo;
+using ParamDirection = pred::v2::ParamDirection;
+using ParamPassingKind = pred::v2::ParamPassingKind;
+
 using BlockId = int;
 using SymbolId = int;
 using S10ValueId = int;

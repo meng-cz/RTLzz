@@ -1,5 +1,7 @@
 #include "s3statementize/S3Statementize.h"
 
+#include "v2/V2AST.h"
+
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -8,6 +10,19 @@
 #include <utility>
 
 namespace pred::s3statementize {
+
+using FunctionAST = pred::v2::FunctionAST;
+using Expr = pred::v2::Expr;
+using ExprPtr = pred::v2::ExprPtr;
+using ExprKind = pred::v2::ExprKind;
+using Stmt = pred::v2::Stmt;
+using StmtPtr = pred::v2::StmtPtr;
+using StmtKind = pred::v2::StmtKind;
+using CaseClause = pred::v2::CaseClause;
+using pred::v2::canonical_bool_type;
+using pred::v2::canonicalize_bool_type;
+using pred::v2::make_hw_type;
+
 namespace {
 
 struct LowerContext {

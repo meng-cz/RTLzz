@@ -1,8 +1,8 @@
 #include "pipelinev2/PipelineV2.h"
 
-#include "ast/ASTBuilder.h"
 #include "backend/beopt.hpp"
 #include "backend/rtlgen.hpp"
+#include "s0ast/S0AST.h"
 #include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
@@ -22,6 +22,11 @@
 namespace pred::pipelinev2 {
 namespace {
 
+using TypeInfo = pred::v2::TypeInfo;
+using ParamDirection = pred::v2::ParamDirection;
+using ParamPassingKind = pred::v2::ParamPassingKind;
+using pred::v2::paramDirectionName;
+
 PipelineResult errorResult(std::string stage, std::string message) {
     PipelineResult result;
     result.error = std::move(stage) + ": " + std::move(message);
@@ -30,6 +35,10 @@ PipelineResult errorResult(std::string stage, std::string message) {
 
 std::string stageError(const std::optional<s1apinorm::APINormError>& error) {
     return error ? error->formatted : "stage failed";
+}
+
+std::string stageError(const std::optional<s0ast::S0Diagnostic>& error) {
+    return error ? error->message : "stage failed";
 }
 
 std::string stageError(const std::optional<s2validate::ValidateError>& error) {
@@ -223,21 +232,13 @@ PipelineResult compile(const PipelineConfig& config) {
     if (config.unroll_limit <= 0) return errorResult("config", "unroll_limit must be positive");
 
     try {
-        BuildResult parsed;
-        if (config.source_text) {
-            parsed = buildASTFromSourceText(config.source_name,
-                                            *config.source_text,
-                                            config.top_function,
-                                            config.clang_args);
-        } else {
-            parsed = buildASTFromSource(config.source_name,
-                                        config.top_function,
-                                        config.clang_args);
-        }
-        if (!parsed.error.empty()) return errorResult("parse", std::move(parsed.error));
-        if (!parsed.function) return errorResult("parse", "failed to extract function");
-
-        auto s1 = s1apinorm::normalizeAPIs(*parsed.function);
+        auto s0 = s0ast::parseProgram(config.source_name,
+                                      config.source_text,
+                                      config.top_function,
+                                      config.clang_args);
+        if (!s0.ok()) return errorResult("s0ast", stageError(s0.error));
+        if (!s0.program) return errorResult("s0ast", "stage produced no program");
+        auto s1 = s1apinorm::normalizeAPIs(s0ast::surfaceAST(*s0.program));
         if (!s1.ok()) return errorResult("s1apinorm", stageError(s1.error));
         if (!s1.function) return errorResult("s1apinorm", "stage produced no function");
 

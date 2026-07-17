@@ -1,6 +1,7 @@
 #pragma once
 
-#include "ast/AST.h"
+#include "debug/DebugLoc.h"
+#include "v2/V2Types.h"
 
 #include <memory>
 #include <optional>
@@ -9,6 +10,13 @@
 #include <vector>
 
 namespace pred::s1apinorm {
+
+using TypeInfo = pred::v2::TypeInfo;
+using ParamDecl = pred::v2::ParamDecl;
+using ParamDirection = pred::v2::ParamDirection;
+using ParamPassingKind = pred::v2::ParamPassingKind;
+using StructFieldInfo = pred::v2::StructFieldInfo;
+using StructConstructorInfo = pred::v2::StructConstructorInfo;
 
 struct S1Expr;
 using S1ExprPtr = std::shared_ptr<S1Expr>;

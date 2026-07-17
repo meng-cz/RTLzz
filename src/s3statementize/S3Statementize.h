@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ast/AST.h"
 #include "debug/RTLZZException.h"
 #include "s1apinorm/S1NormedAST.h"
+#include "v2/V2Types.h"
 
 #include <memory>
 #include <optional>
@@ -11,6 +11,11 @@
 #include <vector>
 
 namespace pred::s3statementize {
+
+using TypeInfo = pred::v2::TypeInfo;
+using ParamDecl = pred::v2::ParamDecl;
+using StructFieldInfo = pred::v2::StructFieldInfo;
+using StructConstructorInfo = pred::v2::StructConstructorInfo;
 
 // SymbolId is the canonical variable identity from S3 onward.
 // It is unique within one function across parameters, source locals, and
@@ -262,15 +267,7 @@ struct StatementizeResult {
 };
 
 StatementizeResult statementizeFunctionAST(
-    const FunctionAST& function,
-    const StatementizeOptions& options = {});
-
-StatementizeResult statementizeFunctionAST(
     const s1apinorm::S1FunctionAST& function,
-    const StatementizeOptions& options = {});
-
-StatementizedProgram statementizeFunctionASTOrThrow(
-    const FunctionAST& function,
     const StatementizeOptions& options = {});
 
 StatementizedProgram statementizeFunctionASTOrThrow(
