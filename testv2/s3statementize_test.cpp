@@ -1,4 +1,5 @@
-#include "ast/AST.h"
+#include "v2/V2AST.h"
+#include "s1apinorm/S1APINorm.h"
 #include "s3statementize/S3Statementize.h"
 
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <vector>
 
 using namespace pred;
+using namespace pred::v2;
 
 [[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
     std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
@@ -21,6 +23,14 @@ using namespace pred;
 
 static TypeInfo int8() {
     return make_hw_type("Int", 8, false);
+}
+
+static pred::s1apinorm::S1FunctionAST normalizeS1OrFail(const FunctionAST& fn) {
+    auto result = pred::s1apinorm::normalizeAPIs(fn);
+    if (!result.ok()) std::cerr << result.error->formatted << "\n";
+    CHECK(result.ok());
+    CHECK(result.function.has_value());
+    return std::move(result.function.value());
 }
 
 static TypeInfo boolType() {
@@ -132,7 +142,8 @@ static FunctionAST baseTop() {
 static std::string statementizeDebug(const FunctionAST& fn) {
     pred::s3statementize::StatementizeOptions options;
     options.debug_print = true;
-    auto result = pred::s3statementize::statementizeFunctionAST(fn, options);
+    auto s1 = normalizeS1OrFail(fn);
+    auto result = pred::s3statementize::statementizeFunctionAST(s1, options);
     if (!result.ok()) {
         std::cerr << result.error->formatted << "\n";
     }
@@ -339,7 +350,8 @@ static void shadowedNamesUseDistinctSymbols() {
         assign(make_var("out", int8()), make_var("x", int8())),
     }));
 
-    auto program = pred::s3statementize::statementizeFunctionASTOrThrow(top);
+    auto s1 = normalizeS1OrFail(top);
+    auto program = pred::s3statementize::statementizeFunctionASTOrThrow(s1);
     const auto& fn = program.top;
     CHECK(fn.symbols.size() >= 3);
 

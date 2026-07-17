@@ -11,10 +11,10 @@
 
 static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " <source.cpp> --top <function_name> [--format beir|rtl|portmeta|listjson]"
+              << " <source.cpp> --top <function_name> [--format beir|rtl|portmeta]"
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
               << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]\n";
-    std::cerr << "Default format is rtl. listjson is kept for API compatibility but is not supported by pipelinev2.\n";
+    std::cerr << "Default format is rtl. portmeta emits the V2 port metadata used by RTL differential tests.\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -156,7 +156,7 @@ static int runMain(int argc, char* argv[]) {
         std::cerr << "--top must not be empty\n";
         return 1;
     }
-    if (format != "listjson" && format != "portmeta" && format != "beir" && format != "rtl") {
+    if (format != "portmeta" && format != "beir" && format != "rtl") {
         std::cerr << "Unknown format: " << format << "\n";
         return 1;
     }
@@ -174,9 +174,7 @@ static int runMain(int argc, char* argv[]) {
     options.vullib_dir = vullib_dir;
 
     rtlzz::CompileResult result;
-    if (format == "listjson") {
-        result = rtlzz::compileToListJson(std::move(options));
-    } else if (format == "portmeta") {
+    if (format == "portmeta") {
         result = rtlzz::compileToPortMetadata(std::move(options));
     } else if (format == "beir") {
         result = rtlzz::compileToBeir(std::move(options));

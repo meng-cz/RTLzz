@@ -6,15 +6,13 @@ The script:
   2. builds a tiny C++ oracle harness that includes and calls the source top,
   3. builds a Verilator C++ testbench around the generated RTL,
   4. compares RTL outputs against the C++ oracle for random inputs.
-
-It reuses differential_listjson.py harness helpers where the compact port
-metadata schema intentionally matches the old listjson port subset.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import random
 import shutil
 import subprocess
@@ -23,10 +21,257 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import differential_listjson as lj
-
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def default_cxx() -> str:
+    return shutil.which("clang++") or shutil.which("g++") or "c++"
+
+
+def find_exe(build_dir: Path) -> Path:
+    candidates = [
+        build_dir / "predicate-expand",
+        build_dir / "Debug" / "predicate-expand",
+        build_dir / "Release" / "predicate-expand",
+        build_dir / "RelWithDebInfo" / "predicate-expand",
+        build_dir / "MinSizeRel" / "predicate-expand",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"predicate-expand executable not found under {build_dir}")
+
+
+def type_width(t: dict[str, Any]) -> int:
+    width = int(t.get("width", 0))
+    if width <= 0:
+        raise ValueError(f"port type has no positive width: {t}")
+    return width
+
+
+def mask(width: int) -> int:
+    return (1 << width) - 1 if width > 0 else 0
+
+
+def split_top_level_commas(text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    angle = paren = bracket = brace = 0
+    for i, ch in enumerate(text):
+        if ch == "<":
+            angle += 1
+        elif ch == ">" and angle:
+            angle -= 1
+        elif ch == "(":
+            paren += 1
+        elif ch == ")" and paren:
+            paren -= 1
+        elif ch == "[":
+            bracket += 1
+        elif ch == "]" and bracket:
+            bracket -= 1
+        elif ch == "{":
+            brace += 1
+        elif ch == "}" and brace:
+            brace -= 1
+        elif ch == "," and not (angle or paren or bracket or brace):
+            parts.append(text[start:i].strip())
+            start = i + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def strip_cxx_comments(text: str) -> str:
+    text = re.sub(r"//.*", "", text)
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+
+
+def sanitize_cxx_value_type(text: str) -> str:
+    text = text.strip()
+    text = re.sub(r"\bconst\b", "", text)
+    text = text.replace("&&", " ").replace("&", " ").replace("*", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def source_param_types(source: Path, top: str) -> dict[str, str]:
+    text = strip_cxx_comments(source.read_text())
+    match = re.search(r"\b" + re.escape(top) + r"\s*\(", text)
+    if not match:
+        return {}
+    open_paren = text.find("(", match.start())
+    depth = 0
+    close_paren = -1
+    for i in range(open_paren, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                close_paren = i
+                break
+    if close_paren < 0:
+        return {}
+    params = text[open_paren + 1:close_paren]
+    out: dict[str, str] = {}
+    for param in split_top_level_commas(params):
+        param = param.split("=", 1)[0].strip()
+        m = re.search(r"([A-Za-z_][A-Za-z_0-9]*)\s*(?:\[[^\]]*\]\s*)*$", param)
+        if not m:
+            continue
+        name = m.group(1)
+        type_part = param[:m.start(1)].strip()
+        value_type = sanitize_cxx_value_type(type_part)
+        if value_type:
+            out[name] = value_type
+    return out
+
+
+def cxx_scalar_type(t: dict[str, Any], source_type: str | None = None) -> str:
+    if source_type:
+        if not source_type.startswith("std::array<") and not source_type.startswith("array<"):
+            return source_type
+    name = str(t.get("name", ""))
+    if name == "bool":
+        return "bool"
+    if name.startswith("Int<"):
+        return name
+    builtin = {
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "unsigned char", "unsigned short", "unsigned int", "unsigned long",
+        "unsigned long long", "char", "short", "int", "long", "long long",
+    }
+    if name in builtin:
+        return name
+    hw_kind = str(t.get("hw_kind", ""))
+    if hw_kind == "bool":
+        return "bool"
+    if hw_kind == "Int":
+        return f"Int<{type_width(t)}>"
+    raise ValueError(f"unsupported port scalar type for C++ harness: {t}")
+
+
+def cxx_port_type(t: dict[str, Any], source_type: str | None = None) -> str:
+    if source_type and ("std::array<" in source_type or "array<" in source_type):
+        return source_type
+    result = cxx_scalar_type(t, source_type)
+    for dim in reversed(t.get("array_dims", [])):
+        result = f"std::array<{result}, {int(dim)}>"
+    return result
+
+
+def access_indices(base: str, indices: list[int]) -> str:
+    out = base
+    for idx in indices:
+        out += f"[{idx}]"
+    return out
+
+
+def element_indices(port: dict[str, Any], flat: int) -> list[int]:
+    elements = port.get("elements", [])
+    if flat < len(elements):
+        return [int(v) for v in elements[flat].get("indices", [])]
+    if port["type"].get("is_array"):
+        return [flat]
+    return []
+
+
+def assign_from_argv(expr: str, t: dict[str, Any], argv_index: int,
+                     source_type: str | None = None) -> str:
+    scalar = cxx_scalar_type(t, source_type)
+    if scalar == "bool":
+        return f"{expr} = std::strtoull(argv[{argv_index}], nullptr, 0) != 0;"
+    if scalar.startswith("Int<"):
+        return f"{expr} = {scalar}(std::strtoull(argv[{argv_index}], nullptr, 0));"
+    if scalar.startswith("int") or scalar in {"char", "short", "int", "long", "long long"}:
+        return f"{expr} = static_cast<{scalar}>(std::strtoll(argv[{argv_index}], nullptr, 0));"
+    return f"{expr} = static_cast<{scalar}>(std::strtoull(argv[{argv_index}], nullptr, 0));"
+
+
+def cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
+    scalar = cxx_scalar_type(t)
+    if scalar == "bool":
+        return f"({expr} ? 1ULL : 0ULL)"
+    if scalar.startswith("Int<"):
+        return f"static_cast<unsigned long long>({expr}.template to<unsigned long long>())"
+    return f"static_cast<unsigned long long>({expr})"
+
+
+def random_inputs(program: dict[str, Any], rng: random.Random) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for port in program["ports"]:
+        if port["direction"] != "Input":
+            continue
+        width = type_width(port["type"])
+        max_value = mask(width)
+        for element in port["element_symbols"]:
+            values[element] = rng.randrange(max_value + 1)
+    return values
+
+
+def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path) -> list[str]:
+    input_order: list[str] = []
+    source_types = source_param_types(source, top)
+    lines = [
+        "#include <array>",
+        "#include <cstdint>",
+        "#include <cstdlib>",
+        "#include <iostream>",
+        f'#include "{source}"',
+        "",
+        "int main(int argc, char** argv) {",
+    ]
+
+    arg_index = 1
+    argc_check_index = len(lines)
+    call_args: list[str] = []
+    for port in program["ports"]:
+        var = "p_" + sanitize_identifier(port["name"])
+        source_type = source_types.get(port["name"])
+        call_args.append(var)
+        lines.append(f"  {cxx_port_type(port['type'], source_type)} {var}{{}};")
+        if port["direction"] != "Input":
+            continue
+        for flat, element in enumerate(port["element_symbols"]):
+            input_order.append(element)
+            expr = access_indices(var, element_indices(port, flat))
+            lines.append("  " + assign_from_argv(expr, port["type"], arg_index, source_type))
+            arg_index += 1
+
+    lines.insert(argc_check_index, f"  if (argc != {arg_index}) return 97;")
+    lines.append(f"  {top}({', '.join(call_args)});")
+
+    for port in program["ports"]:
+        if port["direction"] != "Output":
+            continue
+        var = "p_" + sanitize_identifier(port["name"])
+        for flat, element in enumerate(port["element_symbols"]):
+            expr = access_indices(var, element_indices(port, flat))
+            lines.append(
+                f'  std::cout << "{element}=" << {cpp_value_expr(expr, port["type"])} << "\\n";'
+            )
+
+    lines += [
+        "  return 0;",
+        "}",
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    return input_order
 
 
 def sanitize_identifier(text: str) -> str:
@@ -54,14 +299,14 @@ def verilator_member_name(name: str) -> str:
 
 
 def rtl_cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
-    width = lj.type_width(t)
+    width = type_width(t)
     if width <= 64:
         return f"static_cast<unsigned long long>({expr})"
     return f"hex_from_words({expr}, {width})"
 
 
 def rtl_cpp_assign_from_argv(expr: str, t: dict[str, Any], argv_index: int) -> str:
-    width = lj.type_width(t)
+    width = type_width(t)
     if width <= 64:
         return f"{expr} = std::strtoull(argv[{argv_index}], nullptr, 0);"
     words = (width + 31) // 32
@@ -190,7 +435,7 @@ def build_verilator(verilator: str, top: str, rtl: Path, harness: Path, work: Pa
         "-std=c++20",
     ]
     try:
-        lj.run(cmd, cwd=ROOT)
+        run(cmd, cwd=ROOT)
     except subprocess.CalledProcessError as exc:
         if exc.stdout:
             print(exc.stdout, file=sys.stderr, end="")
@@ -210,7 +455,7 @@ def main() -> int:
     ap.add_argument("--build-dir", type=Path, default=ROOT / "build")
     ap.add_argument("--cases", type=int, default=100)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--cxx", default=lj.default_cxx())
+    ap.add_argument("--cxx", default=default_cxx())
     ap.add_argument("--verilator", default=shutil.which("verilator") or "verilator")
     ap.add_argument("--beopt", action="append", default=[],
                     help="BEIR optimization option to pass to predicate-expand, e.g. none")
@@ -219,7 +464,7 @@ def main() -> int:
 
     source = args.source.resolve()
     build_dir = args.build_dir.resolve()
-    predicate = lj.find_exe(build_dir)
+    predicate = find_exe(build_dir)
     work = Path(tempfile.mkdtemp(prefix="rtlzz_rtl_diff_", dir="/tmp"))
     try:
         portmeta = work / "program.portmeta.json"
@@ -233,15 +478,15 @@ def main() -> int:
         ]
         for opt in args.beopt:
             common_args += ["--beopt", opt]
-        lj.run(common_args + ["--format", "portmeta", "-o", str(portmeta)], cwd=ROOT)
-        lj.run(common_args + ["--format", "rtl", "-o", str(rtl)], cwd=ROOT)
+        run(common_args + ["--format", "portmeta", "-o", str(portmeta)], cwd=ROOT)
+        run(common_args + ["--format", "rtl", "-o", str(rtl)], cwd=ROOT)
         program = json.loads(portmeta.read_text())
         resolved_top = program.get("function", args.top)
 
         oracle_cpp = work / "oracle.cpp"
-        oracle_input_order = lj.generate_harness(source, resolved_top, program, oracle_cpp)
+        oracle_input_order = generate_harness(source, resolved_top, program, oracle_cpp)
         oracle_exe = work / "oracle"
-        lj.run([
+        run([
             args.cxx, "-std=c++20", str(oracle_cpp),
             f"-I{ROOT}", f"-I{ROOT / 'third_party/vulsim/vullib'}",
             "-o", str(oracle_exe),
@@ -257,17 +502,17 @@ def main() -> int:
 
         rng = random.Random(args.seed)
         for case in range(args.cases):
-            inputs = lj.random_inputs(program, rng)
+            inputs = random_inputs(program, rng)
             argv = [str(inputs[name]) for name in rtl_input_order]
-            expected = parse_key_values(lj.run([str(oracle_exe)] + argv, cwd=ROOT).stdout)
-            actual = parse_key_values(lj.run([str(rtl_exe)] + argv, cwd=ROOT).stdout)
+            expected = parse_key_values(run([str(oracle_exe)] + argv, cwd=ROOT).stdout)
+            actual = parse_key_values(run([str(rtl_exe)] + argv, cwd=ROOT).stdout)
             for name, exp in expected.items():
                 got = actual.get(name)
-                width = lj.type_width(next(
+                width = type_width(next(
                     p["type"] for p in program["ports"]
                     if name in p.get("element_symbols", [])
                 ))
-                exp &= lj.mask(width)
+                exp &= mask(width)
                 if got != exp:
                     print(f"Mismatch case={case} output={name}: rtl={got} cpp={exp}", file=sys.stderr)
                     print(f"inputs={inputs}", file=sys.stderr)

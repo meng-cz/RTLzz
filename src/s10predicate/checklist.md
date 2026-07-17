@@ -7,8 +7,8 @@
 1. S10 的输入是否固定为 `s9ssa::S9SSAProgram`？
    - 是。S10 不再接收 S8/S7/旧 SSA，确保输入已经是 scalar、normalized operation、SSA value 语义，并且不再存在 `LookupWrite`。
 
-2. S10 是否重新定义独立的 `S10PredicateProgram`，不复用旧 `predicate/PredicateIR.h`？
-   - 是。旧 `PredicateIR` 基于 `ExprPtr`/字符串变量，和 S9 的 `S9ValueId`/normalized op 不匹配。S10 应定义 value-id based、width-aware 的 predicate IR。
+2. S10 是否重新定义独立的 `S10PredicateProgram`，不复用早期字符串表达式 IR？
+   - 是。早期字符串表达式 IR 基于 `ExprPtr`/字符串变量，和 S9 的 `S9ValueId`/normalized op 不匹配。S10 应定义 value-id based、width-aware 的 predicate IR。
 
 3. S10 输出是否保留 CFG block？
    - 不保留。S10 的主要职责就是消除控制流，输出 flat definitions / assignments。

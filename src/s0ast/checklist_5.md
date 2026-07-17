@@ -1,6 +1,6 @@
 # S0.5 PipelineBridge Checklist
 
-目标：把 S0V2 接入现有 V2 pipeline，同时保持原 `src/ast` 不变；定义 bridge、debug print、测试和迁移边界。
+目标：把 S0V2 接入现有 V2 pipeline；定义 bridge、debug print、测试和迁移边界。
 
 ## 需要确认的语义点
 
@@ -31,11 +31,11 @@
 9. 端到端 fixtures 首批目标？
    - `int_misc.logic.cpp`、`inline_misc.logic.cpp`、array ports fixture、s7 complex aggregate fixture。
 
-10. 是否继续支持旧 `listjson`？
-    - V2 不新增对旧 listjson 的依赖；差分脚本继续使用 `portmeta`。
+10. 是否继续支持 V2 之外的端口/IR 导出格式？
+    - V2 仅维护 `rtl`、`beir` 和 `portmeta`；差分脚本使用 `portmeta`。
 
 11. 与原 AST 并存策略？
-    - 源码目录独立 `src/s0ast`，namespace `pred::s0ast`；不 include 或修改 `src/ast/*`。
+    - 源码目录独立 `src/s0ast`，namespace `pred::s0ast`；不依赖其他 AST builder。
 
 12. CMake 接入边界？
     - 让cmake自动识别接入即可。
@@ -45,4 +45,3 @@
 
 14. 迁移期间如何保持已有阶段兼容？
     - S0V2 到 S1 的输出尽量一次收敛；后续 S3-S11 不应感知旧/新 AST 来源。
-

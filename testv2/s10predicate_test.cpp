@@ -1,4 +1,4 @@
-#include "ast/ASTBuilder.h"
+#include "s0ast/S0AST.h"
 #include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
@@ -19,6 +19,7 @@
 #include <vector>
 
 using namespace pred;
+using namespace pred::v2;
 
 [[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
     std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
@@ -36,11 +37,13 @@ static FunctionAST parseFixture(const std::string& file) {
         "-Ithird_party/vulsim/vullib",
         "-std=c++20",
     };
-    auto build = buildASTFromSource(file, "hls_main", clang_args);
-    if (!build.error.empty()) std::cerr << build.error << "\n";
-    CHECK(build.error.empty());
-    CHECK(build.function.has_value());
-    return std::move(build.function.value());
+    auto parsed = pred::s0ast::parseProgram(file, std::nullopt, "hls_main", clang_args);
+    if (!parsed.ok()) {
+        std::cerr << (parsed.error ? parsed.error->message : "unknown error") << "\n";
+    }
+    CHECK(parsed.ok());
+    CHECK(parsed.program.has_value());
+    return pred::s0ast::surfaceAST(*parsed.program);
 }
 
 static s8opnorm::S8Type intType(int width) {

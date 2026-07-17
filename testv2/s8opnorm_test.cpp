@@ -1,4 +1,4 @@
-#include "ast/ASTBuilder.h"
+#include "s0ast/S0AST.h"
 #include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
@@ -14,6 +14,7 @@
 #include <vector>
 
 using namespace pred;
+using namespace pred::v2;
 
 [[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
     std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
@@ -31,11 +32,13 @@ static FunctionAST parseFixture(const std::string& file) {
         "-Ithird_party/vulsim/vullib",
         "-std=c++20",
     };
-    auto build = buildASTFromSource(file, "hls_main", clang_args);
-    if (!build.error.empty()) std::cerr << build.error << "\n";
-    CHECK(build.error.empty());
-    CHECK(build.function.has_value());
-    return std::move(build.function.value());
+    auto parsed = pred::s0ast::parseProgram(file, std::nullopt, "hls_main", clang_args);
+    if (!parsed.ok()) {
+        std::cerr << (parsed.error ? parsed.error->message : "unknown error") << "\n";
+    }
+    CHECK(parsed.ok());
+    CHECK(parsed.program.has_value());
+    return pred::s0ast::surfaceAST(*parsed.program);
 }
 
 static TypeInfo intType(int width) {
@@ -348,7 +351,7 @@ static void divisorAboveInputRangeSimplifies() {
     CHECK(mod_debug.find("assign out8 = a<u8>") != std::string::npos);
 }
 
-static void signedConstantDivAndModUseAbsAndRestoreSign() {
+static void signedViewDivAndModAreRejected() {
     auto program = baseProgram();
     auto& fn = program.top;
     s7flatten::S7Operation div;
@@ -356,11 +359,10 @@ static void signedConstantDivAndModUseAbsAndRestoreSign() {
     div.binary_op = s7flatten::S7BinaryOp::Div;
     div.operands = {var(fn.symbols[2], {}, true), literal("3", bitsType(8))};
     fn.blocks[0].stmts.push_back(opStmt(4, std::move(div)));
-    auto div_debug = normalizeDebug(std::move(program));
-    CHECK(div_debug.find("__s8_norm_signbit_") != std::string::npos);
-    CHECK(div_debug.find("__s8_norm_abs_") != std::string::npos);
-    CHECK(div_debug.find("__s8_norm_sdiv_neg_") != std::string::npos);
-    CHECK(div_debug.find("__s8_norm_sdiv_mux_") != std::string::npos);
+    auto div_result = s8opnorm::normalizeOperations(program);
+    CHECK(!div_result.ok());
+    CHECK(div_result.error->message.find("signed_view operand is not allowed for Div") !=
+          std::string::npos);
 
     auto mod_program = baseProgram();
     auto& mod_fn = mod_program.top;
@@ -369,12 +371,13 @@ static void signedConstantDivAndModUseAbsAndRestoreSign() {
     mod.binary_op = s7flatten::S7BinaryOp::Mod;
     mod.operands = {var(mod_fn.symbols[2], {}, true), literal("3", bitsType(8))};
     mod_fn.blocks[0].stmts.push_back(opStmt(4, std::move(mod)));
-    auto mod_debug = normalizeDebug(std::move(mod_program));
-    CHECK(mod_debug.find("__s8_norm_smod_neg_") != std::string::npos);
-    CHECK(mod_debug.find("__s8_norm_smod_mux_") != std::string::npos);
+    auto mod_result = s8opnorm::normalizeOperations(mod_program);
+    CHECK(!mod_result.ok());
+    CHECK(mod_result.error->message.find("signed_view operand is not allowed for Mod") !=
+          std::string::npos);
 }
 
-static void negativeConstantDivisorFlipsQuotientSign() {
+static void negativeConstantDivisorUsesUnsignedBitPattern() {
     auto program = baseProgram();
     auto& fn = program.top;
     s7flatten::S7Operation div;
@@ -383,8 +386,9 @@ static void negativeConstantDivisorFlipsQuotientSign() {
     div.operands = {var(fn.symbols[2]), literal("-3", intType(8))};
     fn.blocks[0].stmts.push_back(opStmt(4, std::move(div)));
     auto debug = normalizeDebug(std::move(program));
-    CHECK(debug.find("__s8_norm_boolnot_") != std::string::npos);
-    CHECK(debug.find("__s8_norm_sdiv_mux_") != std::string::npos);
+    CHECK(debug.find("__s8_norm_boolnot_") == std::string::npos);
+    CHECK(debug.find("__s8_norm_sdiv_") == std::string::npos);
+    CHECK(debug.find("assign out8 =") != std::string::npos);
 
     auto mod_program = baseProgram();
     auto& mod_fn = mod_program.top;
@@ -395,7 +399,8 @@ static void negativeConstantDivisorFlipsQuotientSign() {
     mod_fn.blocks[0].stmts.push_back(opStmt(4, std::move(mod)));
     auto mod_debug = normalizeDebug(std::move(mod_program));
     CHECK(mod_debug.find("__s8_norm_boolnot_") == std::string::npos);
-    CHECK(mod_debug.find("__s8_norm_smod_mux_") != std::string::npos);
+    CHECK(mod_debug.find("__s8_norm_smod_") == std::string::npos);
+    CHECK(mod_debug.find("assign out8 =") != std::string::npos);
 }
 
 static void sourcePipelineRunsThroughS8() {
@@ -417,8 +422,8 @@ int main() {
     nonPowerOfTwoDivAndModUseMagicMultiply();
     nonPowerOfTwoDivisionUsesCorrectionWhenNeeded();
     divisorAboveInputRangeSimplifies();
-    signedConstantDivAndModUseAbsAndRestoreSign();
-    negativeConstantDivisorFlipsQuotientSign();
+    signedViewDivAndModAreRejected();
+    negativeConstantDivisorUsesUnsignedBitPattern();
     sourcePipelineRunsThroughS8();
     return 0;
 }

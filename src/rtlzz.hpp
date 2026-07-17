@@ -41,7 +41,6 @@ struct CompileResult {
 namespace detail {
 
 enum class OutputKind {
-    ListJson,
     PortMetadata,
     Beir,
     Rtl,
@@ -49,8 +48,6 @@ enum class OutputKind {
 
 inline const char* outputKindName(OutputKind kind) {
     switch (kind) {
-    case OutputKind::ListJson:
-        return "listjson";
     case OutputKind::PortMetadata:
         return "portmeta";
     case OutputKind::Beir:
@@ -103,10 +100,6 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
         return {{}, "top_function must not be empty"};
     }
 
-    if (output_kind == OutputKind::ListJson) {
-        return {{}, "listjson output is not supported by pipelinev2"};
-    }
-
     pred::pipelinev2::PipelineConfig config;
     config.source_name = "rtlzz_input.logic.cpp";
     config.source_text = joinCodeLines(options.source_codelines);
@@ -133,10 +126,6 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
 
 inline CompileResult compileToRtl(CompileOptions options) {
     return detail::compileSource(options, detail::OutputKind::Rtl);
-}
-
-inline CompileResult compileToListJson(CompileOptions options) {
-    return detail::compileSource(options, detail::OutputKind::ListJson);
 }
 
 inline CompileResult compileToPortMetadata(CompileOptions options) {

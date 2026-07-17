@@ -158,6 +158,23 @@ void emitTypeMetadata(std::ostream& os,
     os << "}";
 }
 
+TypeInfo sourceScalarTypeForMetadata(const s7flatten::S7PortGroup& group) {
+    TypeInfo type = group.source_type;
+    type.is_array = false;
+    type.array_size = 0;
+    type.array_dims.clear();
+    if (type.width <= 0) {
+        type.width = group.scalar_type.width;
+    }
+    if (type.name.empty()) {
+        type.name = group.scalar_type.name;
+    }
+    if (type.hw_kind.empty()) {
+        type.hw_kind = group.scalar_type.hw_kind;
+    }
+    return type;
+}
+
 std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program) {
     const auto& fn = program.top;
     std::ostringstream os;
@@ -180,7 +197,7 @@ std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program) {
         emitJsonString(os, passingName(group.passing));
         os << ",\n";
         os << "      \"type\": ";
-        emitTypeMetadata(os, group.scalar_type, group.array_dims);
+        emitTypeMetadata(os, sourceScalarTypeForMetadata(group), group.array_dims);
         os << ",\n";
         os << "      \"element_symbols\": [";
         for (std::size_t j = 0; j < group.elements.size(); ++j) {

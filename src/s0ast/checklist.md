@@ -1,8 +1,8 @@
 # S0AST V2 Planning Checklist
 
-本文档只做 S0AST 的需求拆分和确认，不实现代码。S0AST 是 V2 pipeline 的新入口，允许新增全新的 AST 数据结构和流程，并直接接入 V2；原 `src/ast` 保持不变。
+本文档只做 S0AST 的需求拆分和确认，不实现代码。S0AST 是 V2 pipeline 的新入口，允许新增全新的 AST 数据结构和流程，并直接接入 V2。
 
-## 原 `src/ast` 当前承担的功能
+## 早期 AST builder 承担过的功能
 
 1. 调用 libclang 解析 C++ 源文件或内存源文本，自动补 `fixint.hpp` wrapper，并定位 top function。
 2. 识别 `TypeInfo`：`bool`、C++ builtin 整数、`Int<N>`、`UInt<N>`、`IntSignedView<N>`、`std::array<T,N>`、record/struct、enum underlying type。
@@ -45,4 +45,3 @@ S0AST 建议拆成以下子阶段，并分别确认语义：
 - `checklist_3.md`: S0.3 expression/statement construction
 - `checklist_4.md`: S0.4 name/call resolution and surface validation
 - `checklist_5.md`: S0.5 V2 pipeline bridge and tests
-

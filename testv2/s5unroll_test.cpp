@@ -1,4 +1,5 @@
-#include "ast/AST.h"
+#include "v2/V2AST.h"
+#include "s1apinorm/S1APINorm.h"
 #include "s3statementize/S3Statementize.h"
 #include "s4cfg/S4CFG.h"
 #include "s5unroll/S5Unroll.h"
@@ -11,6 +12,7 @@
 #include <vector>
 
 using namespace pred;
+using namespace pred::v2;
 
 [[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
     std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
@@ -29,6 +31,14 @@ static TypeInfo uint32Type() {
     type.is_signed = false;
     type.hw_kind = "builtin";
     return type;
+}
+
+static pred::s1apinorm::S1FunctionAST normalizeS1OrFail(const FunctionAST& fn) {
+    auto result = pred::s1apinorm::normalizeAPIs(fn);
+    if (!result.ok()) std::cerr << result.error->formatted << "\n";
+    CHECK(result.ok());
+    CHECK(result.function.has_value());
+    return std::move(result.function.value());
 }
 
 static TypeInfo boolType() {
@@ -138,7 +148,8 @@ struct S5Run {
 };
 
 static S5Run runS5(const FunctionAST& fn) {
-    auto s3 = pred::s3statementize::statementizeFunctionASTOrThrow(fn);
+    auto s1 = normalizeS1OrFail(fn);
+    auto s3 = pred::s3statementize::statementizeFunctionASTOrThrow(s1);
     auto s4 = pred::s4cfg::buildCFGProgram(s3);
     CHECK(s4.ok());
     CHECK(s4.program.has_value());

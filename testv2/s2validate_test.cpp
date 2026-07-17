@@ -1,4 +1,5 @@
-#include "ast/ASTBuilder.h"
+#include "s0ast/S0AST.h"
+#include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <vector>
 
 using namespace pred;
+using namespace pred::v2;
 
 [[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
     std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
@@ -166,19 +168,25 @@ static FunctionAST parseFixture(const std::string& file) {
         "-Ithird_party/vulsim/vullib",
         "-std=c++20",
     };
-    auto build = buildASTFromSource(file, "hls_main", clang_args);
-    if (!build.error.empty()) {
-        std::cerr << "AST build failed for " << file << ": " << build.error << "\n";
+    auto parsed = pred::s0ast::parseProgram(file, std::nullopt, "hls_main", clang_args);
+    if (!parsed.ok()) {
+        std::cerr << "S0 parse failed for " << file << ": "
+                  << (parsed.error ? parsed.error->message : "unknown error") << "\n";
     }
-    CHECK(build.error.empty());
-    CHECK(build.function.has_value());
-    return std::move(build.function.value());
+    CHECK(parsed.ok());
+    CHECK(parsed.program.has_value());
+    return pred::s0ast::surfaceAST(*parsed.program);
 }
 
 static void expectOk(const FunctionAST& fn) {
+    auto s1 = pred::s1apinorm::normalizeAPIs(fn);
+    if (!s1.ok()) std::cerr << s1.error->formatted << "\n";
+    CHECK(s1.ok());
+    CHECK(s1.function.has_value());
+
     pred::s2validate::ValidateOptions options;
     options.debug_print = true;
-    auto result = pred::s2validate::validateFunctionAST(fn, options);
+    auto result = pred::s2validate::validateFunctionAST(*s1.function, options);
     if (!result.ok()) {
         std::cerr << result.error->formatted << "\n";
     }
@@ -187,7 +195,12 @@ static void expectOk(const FunctionAST& fn) {
 }
 
 static void expectErrorContains(const FunctionAST& fn, const std::string& needle) {
-    auto result = pred::s2validate::validateFunctionAST(fn);
+    auto s1 = pred::s1apinorm::normalizeAPIs(fn);
+    if (!s1.ok()) std::cerr << s1.error->formatted << "\n";
+    CHECK(s1.ok());
+    CHECK(s1.function.has_value());
+
+    auto result = pred::s2validate::validateFunctionAST(*s1.function);
     if (result.ok()) {
         std::cerr << "Expected validation error containing: " << needle << "\n";
     }

@@ -1,4 +1,5 @@
-#include "ast/AST.h"
+#include "v2/V2AST.h"
+#include "s1apinorm/S1APINorm.h"
 #include "s3statementize/S3Statementize.h"
 #include "s4cfg/S4CFG.h"
 
@@ -9,6 +10,7 @@
 #include <vector>
 
 using namespace pred;
+using namespace pred::v2;
 
 [[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
     std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
@@ -22,6 +24,14 @@ using namespace pred;
 
 static TypeInfo int8() {
     return make_hw_type("Int", 8, false);
+}
+
+static pred::s1apinorm::S1FunctionAST normalizeS1OrFail(const FunctionAST& fn) {
+    auto result = pred::s1apinorm::normalizeAPIs(fn);
+    if (!result.ok()) std::cerr << result.error->formatted << "\n";
+    CHECK(result.ok());
+    CHECK(result.function.has_value());
+    return std::move(result.function.value());
 }
 
 static TypeInfo boolType() {
@@ -157,7 +167,8 @@ static FunctionAST baseTop() {
 }
 
 static std::string cfgDebug(const FunctionAST& fn) {
-    auto s3 = pred::s3statementize::statementizeFunctionASTOrThrow(fn);
+    auto s1 = normalizeS1OrFail(fn);
+    auto s3 = pred::s3statementize::statementizeFunctionASTOrThrow(s1);
     pred::s4cfg::CFGOptions options;
     options.debug_print = true;
     auto result = pred::s4cfg::buildCFGProgram(s3, options);
@@ -202,7 +213,8 @@ static void straightLineAndCallsStayInBlocks() {
     expectInOrder(debug, {
         "bb1",
         "call out = f(a)",
-        "term return",
+        "term jump bb2",
+        "term exit",
     });
 }
 
@@ -221,7 +233,7 @@ static void ifElseAndReturnSlotAreBuilt() {
     expectContains(debug, "term branch cond ?");
     expectContains(debug, "assign __ret_helper_ret_0 = a");
     expectContains(debug, "assign __ret_helper_ret_0 = 0");
-    expectContains(debug, "term return __ret_helper_ret_0");
+    expectContains(debug, "term exit");
 }
 
 static void whileContinueTargetsConditionPrelude() {
@@ -318,7 +330,8 @@ static void helpersAndLambdasAreBuilt() {
 static void invalidBreakIsError() {
     auto top = baseTop();
     top.body.push_back(breakStmt());
-    auto s3 = pred::s3statementize::statementizeFunctionASTOrThrow(top);
+    auto s1 = normalizeS1OrFail(top);
+    auto s3 = pred::s3statementize::statementizeFunctionASTOrThrow(s1);
     auto result = pred::s4cfg::buildCFGProgram(s3);
     CHECK(!result.ok());
     CHECK(result.error->formatted.find("break statement is not inside") != std::string::npos);
