@@ -139,13 +139,11 @@ std::optional<TypeInfo> recognizeHwIntType(CXType type) {
     std::string combined = spelling + " " + canonical;
 
     if (auto width = parseTemplateWidth(combined, "IntSignedView")) {
-        TypeInfo out = make_hw_type("Int", *width, true);
+        TypeInfo out = make_hw_type("Int", *width, false);
         out.name = "IntSignedView<" + std::to_string(*width) + ">";
+        out.is_signed = true;
         out.hw_kind = "signed_view";
         return out;
-    }
-    if (auto width = parseTemplateWidth(combined, "UInt")) {
-        return make_hw_type("UInt", *width, false);
     }
     if (auto width = parseTemplateWidth(combined, "Int")) {
         return make_hw_type("Int", *width, false);
@@ -173,9 +171,7 @@ std::optional<TypeInfo> recognizeStdArrayType(
         elem = convert_elem(elem_type);
     } else {
         std::string elem_text = parseStdArrayElementText(array_text);
-        if (auto hw = parseTemplateWidth(elem_text, "UInt")) {
-            elem = make_hw_type("UInt", *hw, false);
-        } else if (auto hw = parseTemplateWidth(elem_text, "Int")) {
+        if (auto hw = parseTemplateWidth(elem_text, "Int")) {
             elem = make_hw_type("Int", *hw, false);
         } else if (auto builtin = recognizeBuiltinName(elem_text)) {
             elem = *builtin;

@@ -244,7 +244,7 @@ inline ExprPtr make_zext(ExprPtr expr, int to_width) {
     e->cast_expr = std::move(expr);
     e->debug_loc = firstDebugLoc({e->cast_expr});
     e->to_width = to_width;
-    e->type = make_hw_type("UInt", to_width, false);
+    e->type = make_hw_type("Int", to_width, false);
     return e;
 }
 
@@ -264,7 +264,7 @@ inline ExprPtr make_trunc(ExprPtr expr, int to_width, bool is_signed = false) {
     e->cast_expr = std::move(expr);
     e->debug_loc = firstDebugLoc({e->cast_expr});
     e->to_width = to_width;
-    e->type = make_hw_type(is_signed ? "Int" : "UInt", to_width, is_signed);
+    e->type = make_hw_type("Int", to_width, is_signed);
     return e;
 }
 
@@ -275,7 +275,7 @@ inline ExprPtr make_slice(ExprPtr base, int hi, int lo, TypeInfo type = {}) {
     e->debug_loc = firstDebugLoc({e->base});
     e->hi = hi;
     e->lo = lo;
-    if (type.width <= 0) type = make_hw_type("UInt", hi >= lo ? hi - lo + 1 : 0, false);
+    if (type.width <= 0) type = make_hw_type("Int", hi >= lo ? hi - lo + 1 : 0, false);
     int slice_width = hi >= lo ? hi - lo + 1 : type.width;
     e->type = canonicalize_bool_type(std::move(type));
     e->type.width = slice_width;
@@ -354,7 +354,7 @@ inline ExprPtr make_concat(std::vector<ExprPtr> parts) {
             is_signed = is_signed || p->type.is_signed;
         }
     }
-    e->type = make_hw_type(is_signed ? "Int" : "UInt", width, is_signed);
+    e->type = make_hw_type("Int", width, is_signed);
     return e;
 }
 
@@ -366,7 +366,7 @@ inline ExprPtr make_repeat(ExprPtr expr, int times) {
     e->times = times;
     int width = (e->operand ? e->operand->type.width : 0) * times;
     bool is_signed = e->operand ? e->operand->type.is_signed : false;
-    e->type = make_hw_type(is_signed ? "Int" : "UInt", width, is_signed);
+    e->type = make_hw_type("Int", width, is_signed);
     return e;
 }
 

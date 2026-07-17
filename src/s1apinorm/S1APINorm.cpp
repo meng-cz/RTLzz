@@ -97,7 +97,7 @@ S1ExprPtr makeCast(S1ExprPtr value, TypeInfo target) {
 }
 
 S1ExprPtr makeZExt(S1ExprPtr value, int width) {
-    auto out = makeHardware(S1HardwareOp::ZExt, make_hw_type("UInt", width, false),
+    auto out = makeHardware(S1HardwareOp::ZExt, make_hw_type("Int", width, false),
                             value ? value->debug_loc : DebugLoc{});
     out->cast_expr = std::move(value);
     out->to_width = width;
@@ -105,7 +105,7 @@ S1ExprPtr makeZExt(S1ExprPtr value, int width) {
 }
 
 S1ExprPtr makeSExt(S1ExprPtr value, int width) {
-    auto out = makeHardware(S1HardwareOp::SExt, make_hw_type("Int", width, true),
+    auto out = makeHardware(S1HardwareOp::SExt, make_hw_type("Int", width, false),
                             value ? value->debug_loc : DebugLoc{});
     out->cast_expr = std::move(value);
     out->to_width = width;
@@ -114,7 +114,7 @@ S1ExprPtr makeSExt(S1ExprPtr value, int width) {
 
 S1ExprPtr makeTrunc(S1ExprPtr value, int width, bool is_signed) {
     auto out = makeHardware(S1HardwareOp::Trunc,
-                            make_hw_type(is_signed ? "Int" : "UInt", width, is_signed),
+                            make_hw_type("Int", width, is_signed),
                             value ? value->debug_loc : DebugLoc{});
     out->cast_expr = std::move(value);
     out->to_width = width;
@@ -122,7 +122,7 @@ S1ExprPtr makeTrunc(S1ExprPtr value, int width, bool is_signed) {
 }
 
 S1ExprPtr makeSlice(S1ExprPtr base, int hi, int lo, TypeInfo type) {
-    if (type.width <= 0) type = make_hw_type("UInt", hi >= lo ? hi - lo + 1 : 0, false);
+    if (type.width <= 0) type = make_hw_type("Int", hi >= lo ? hi - lo + 1 : 0, false);
     int width = hi >= lo ? hi - lo + 1 : type.width;
     type = canonicalize_bool_type(std::move(type));
     type.width = width;
@@ -143,7 +143,7 @@ S1ExprPtr makeBitSelect(S1ExprPtr base, int bit) {
 }
 
 S1ExprPtr makeDynamicSlice(S1ExprPtr base, S1ExprPtr index, TypeInfo type, int width) {
-    if (type.width <= 0 && width > 0) type = make_hw_type("UInt", width, false);
+    if (type.width <= 0 && width > 0) type = make_hw_type("Int", width, false);
     auto out = makeHardware(S1HardwareOp::DynamicSlice, std::move(type),
                             base ? base->debug_loc : DebugLoc{});
     out->base = std::move(base);
@@ -204,23 +204,20 @@ S1ExprPtr makeDynamicWriteBit(S1ExprPtr base, S1ExprPtr index, S1ExprPtr value) 
 
 S1ExprPtr makeConcat(std::vector<S1ExprPtr> parts) {
     int width = 0;
-    bool is_signed = false;
     for (const auto& part : parts) {
         if (!part) continue;
         width += part->type.width;
-        is_signed = is_signed || part->type.is_signed;
     }
     auto out = makeHardware(S1HardwareOp::Concat,
-                            make_hw_type(is_signed ? "Int" : "UInt", width, is_signed));
+                            make_hw_type("Int", width, false));
     out->parts = std::move(parts);
     return out;
 }
 
 S1ExprPtr makeRepeat(S1ExprPtr value, int times) {
     int width = value ? value->type.width * times : 0;
-    bool is_signed = value ? value->type.is_signed : false;
     auto out = makeHardware(S1HardwareOp::Repeat,
-                            make_hw_type(is_signed ? "Int" : "UInt", width, is_signed),
+                            make_hw_type("Int", width, false),
                             value ? value->debug_loc : DebugLoc{});
     out->operand = std::move(value);
     out->times = times;
@@ -441,7 +438,7 @@ private:
         if (!decl_type.name.empty()) type_names.push_back(decl_type.name);
         if (!init->type.struct_name.empty()) type_names.push_back(init->type.struct_name);
         if (!init->type.name.empty()) type_names.push_back(init->type.name);
-        if (decl_type.hw_kind == "Int" || decl_type.hw_kind == "UInt" ||
+        if (decl_type.hw_kind == "Int" ||
             decl_type.hw_kind == "bool") {
             type_names.push_back(decl_type.hw_kind);
         }

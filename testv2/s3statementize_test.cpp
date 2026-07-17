@@ -20,7 +20,7 @@ using namespace pred;
     } while (false)
 
 static TypeInfo int8() {
-    return make_hw_type("Int", 8, true);
+    return make_hw_type("Int", 8, false);
 }
 
 static TypeInfo boolType() {

@@ -731,10 +731,9 @@ std::optional<LoopAnalysis> analyzeLoop(const FunctionCFG& fn,
                 fail("Cannot statically analyze loop: condition prelude contains a call");
             }
             if (stmt.stmt && stmt.stmt->kind == S3StmtKind::Construct &&
-                stmt.stmt->callee != "Int" && stmt.stmt->callee != "UInt" &&
+                stmt.stmt->callee != "Int" &&
                 stmt.stmt->callee != "bool" &&
-                stmt.stmt->callee.rfind("Int<", 0) != 0 &&
-                stmt.stmt->callee.rfind("UInt<", 0) != 0) {
+                stmt.stmt->callee.rfind("Int<", 0) != 0) {
                 fail("Cannot statically analyze loop: condition prelude contains a constructor with possible side effects");
             }
         }

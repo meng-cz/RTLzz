@@ -293,7 +293,9 @@ static TypeInfo convertType(CXType t) {
             ti.width = static_cast<int>(clang_Type_getSizeOf(t)) * 8;
             if (ti.width < 0) ti.width = 32;
         }
-        return make_hw_type(ti.is_signed ? "Int" : "UInt", ti.width, ti.is_signed);
+        TypeInfo out = make_hw_type("Int", ti.width, false);
+        out.is_signed = ti.is_signed;
+        return out;
     }
 
     if (auto array = recognizeStdArrayType(t, convertType)) return *array;
@@ -342,9 +344,9 @@ static bool isStandardIntegerToTarget(const TypeInfo& type) {
 }
 
 static TypeInfo hardwareIntegerTypeForStandardTarget(const TypeInfo& type) {
-    return make_hw_type(type.is_signed ? "Int" : "UInt",
-                        type.width,
-                        type.is_signed);
+    TypeInfo out = make_hw_type("Int", type.width, false);
+    out.is_signed = type.is_signed;
+    return out;
 }
 
 static bool sameIntegerType(const TypeInfo& lhs, const TypeInfo& rhs) {
@@ -1939,7 +1941,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 result->to_width = *vul_call.template_value;
             }
             if (!is_bit_at && result->type.width <= 0 && vul_call.template_value.has_value()) {
-                result->type = make_hw_type("UInt", *vul_call.template_value, false);
+                result->type = make_hw_type("Int", *vul_call.template_value, false);
             }
             if (vul_call.has_receiver) {
                 result->args.push_back(convertExpr(vul_call.receiver_cursor));
@@ -1962,7 +1964,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             }
             return result;
         }
-        if ((spelling == "UInt" || spelling == "Int") && !children.empty()) {
+        if (spelling == "Int" && !children.empty()) {
             auto inner = convertExpr(children.back());
             TypeInfo target = convertType(type);
             if (target.width > 0 && (!inner || inner->type.width != target.width)) {
@@ -2131,7 +2133,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             TypeInfo target = convertType(type);
             auto inner = convertExpr(children.back());
             if (target.width <= 0 && vul_call.template_value.has_value()) {
-                target = make_hw_type("UInt", *vul_call.template_value, false);
+                target = make_hw_type("Int", *vul_call.template_value, false);
             }
             auto result = makeSurfaceCall(vul_call.kind == VulCallKind::Trunc ? "trunc" : "zext",
                                           target, {inner}, debugLocFromCursor(cursor));
@@ -2310,9 +2312,9 @@ static std::vector<StmtPtr> convertBlock(CXCursor cursor) {
 
 static bool isVulFixedIntType(const TypeInfo& type) {
     return type.width > 0 &&
-           (type.hw_kind == "Int" || type.hw_kind == "UInt" ||
+           (type.hw_kind == "Int" ||
             type.hw_kind == "signed_view" || type.name.rfind("Int<", 0) == 0 ||
-            type.name.rfind("UInt<", 0) == 0);
+            type.name.rfind("IntSignedView<", 0) == 0);
 }
 
 static std::string canonicalStructLookupName(const TypeInfo& type) {

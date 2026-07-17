@@ -137,9 +137,6 @@ std::string typeNameForMetadata(const TypeInfo& type) {
     if (type.hw_kind == "Int" && type.width > 0) {
         return "Int<" + std::to_string(type.width) + ">";
     }
-    if (type.hw_kind == "UInt" && type.width > 0) {
-        return "UInt<" + std::to_string(type.width) + ">";
-    }
     if (!type.hw_kind.empty()) return type.hw_kind;
     return "bits";
 }

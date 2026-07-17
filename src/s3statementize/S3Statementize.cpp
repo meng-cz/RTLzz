@@ -55,15 +55,39 @@ bool isSignedViewType(const TypeInfo& type) {
            type.name.rfind("IntSignedView<", 0) == 0;
 }
 
+bool isSignedOperandUse(const TypeInfo& type) {
+    if (isSignedViewType(type)) return true;
+    if (type.is_array || type.is_pointer || type.is_reference ||
+        !type.struct_name.empty() || type.width <= 0) {
+        return false;
+    }
+    if (type.name == "bool" || type.hw_kind == "bool") return false;
+    if (type.hw_kind == "Int" && !type.is_signed) return false;
+    return type.is_signed;
+}
+
+bool isBoolSourceType(const TypeInfo& type) {
+    return type.name == "bool" || type.hw_kind == "bool";
+}
+
 TypeInfo storageType(TypeInfo type) {
     type.is_reference = false;
     type.is_pointer = false;
     type.is_const = false;
     type.is_mutable = true;
-    if (isSignedViewType(type)) {
+    if (type.name == "bool" || type.hw_kind == "bool") {
+        type.name = "bool";
+        type.width = 1;
+        type.is_signed = false;
+        type.is_hw_int = true;
+        type.hw_kind = "bool";
+        return type;
+    }
+    if (type.width > 0 && type.struct_name.empty()) {
         type.is_signed = false;
         type.hw_kind = "Int";
-        if (type.width > 0) type.name = "Int<" + std::to_string(type.width) + ">";
+        type.name = "Int<" + std::to_string(type.width) + ">";
+        type.is_hw_int = true;
     }
     return canonicalize_bool_type(std::move(type));
 }
@@ -182,7 +206,9 @@ Operand literalOperand(const std::string& value, TypeInfo type, DebugLoc loc = {
     Operand out;
     out.kind = OperandKind::Literal;
     out.literal_value = value;
-    out.signed_view = isSignedViewType(type);
+    out.signed_view = isSignedViewType(type) ||
+                      (type.is_signed && type.hw_kind != "builtin") ||
+                      (!value.empty() && value.front() == '-');
     out.type = storageType(std::move(type));
     out.debug_loc = std::move(loc);
     return out;
@@ -236,7 +262,7 @@ S3StmtPtr makeCall(std::optional<LValue> target,
     stmt->call_result = std::move(target);
     stmt->callee = callee;
     stmt->args = std::move(args);
-    stmt->result_type = canonicalize_bool_type(std::move(result_type));
+    stmt->result_type = storageType(std::move(result_type));
     return stmt;
 }
 
@@ -251,7 +277,7 @@ S3StmtPtr makeConstruct(LValue target,
     stmt->target = std::move(target);
     stmt->callee = callee;
     stmt->args = std::move(args);
-    stmt->result_type = canonicalize_bool_type(std::move(result_type));
+    stmt->result_type = storageType(std::move(result_type));
     return stmt;
 }
 
@@ -293,9 +319,19 @@ BinaryOp parseBinaryOp(const std::string& op, DebugLoc loc) {
     fail(std::move(loc), "Unsupported binary operator '" + op + "'");
 }
 
+bool binaryOpAcceptsSignedUse(BinaryOp op) {
+    return op == BinaryOp::Mul ||
+           op == BinaryOp::Lt || op == BinaryOp::Le ||
+           op == BinaryOp::Gt || op == BinaryOp::Ge;
+}
+
+void markSignedSourceUse(Operand& operand, const TypeInfo& source_type) {
+    if (isSignedOperandUse(source_type)) operand.signed_view = true;
+}
+
 bool isHardwareConstructorName(const std::string& callee) {
-    return callee == "Int" || callee == "UInt" || callee == "bool" ||
-           callee.rfind("Int<", 0) == 0 || callee.rfind("UInt<", 0) == 0;
+    return callee == "Int" || callee == "bool" ||
+           callee.rfind("Int<", 0) == 0;
 }
 
 bool isConstructorCall(const ExprPtr& expr, const LowerContext& ctx) {
@@ -444,8 +480,9 @@ public:
     StatementizedFunction lowerFunction(const FunctionAST& fn) {
         StatementizedFunction out;
         out.name = fn.name;
-        out.return_type = fn.return_type;
+        out.return_type = storageType(fn.return_type);
         out.params = fn.params;
+        for (auto& param : out.params) param.type = storageType(param.type);
         if (ctx_.scopes.empty()) {
             createScope(ctx_, std::nullopt, S3ScopeKind::Function, fn.name);
             ctx_.scope_stack.push_back(0);
@@ -464,8 +501,9 @@ public:
     StatementizedFunction lowerFunction(const s1apinorm::S1FunctionAST& fn) {
         StatementizedFunction out;
         out.name = fn.name;
-        out.return_type = fn.return_type;
+        out.return_type = storageType(fn.return_type);
         out.params = fn.params;
+        for (auto& param : out.params) param.type = storageType(param.type);
         if (ctx_.scopes.empty()) {
             createScope(ctx_, std::nullopt, S3ScopeKind::Function, fn.name);
             ctx_.scope_stack.push_back(0);
@@ -611,9 +649,22 @@ private:
                 result.operand = std::move(value.operand);
                 return result;
             }
+            if (!isBoolSourceType(expr->cast_expr ? expr->cast_expr->type : TypeInfo{}) &&
+                (isSignedOperandUse(expr->cast_type) || isSignedOperandUse(expr->type))) {
+                const int source_width = value.operand.type.width;
+                value.operand.signed_view =
+                    expr->cast_expr && isSignedOperandUse(expr->cast_expr->type);
+                value.operand.type = storageType(expr->cast_type.width > 0 ? expr->cast_type
+                                                                           : expr->type);
+                if (source_width == value.operand.type.width) {
+                    value.operand.signed_view = true;
+                    result.operand = std::move(value.operand);
+                    return result;
+                }
+            }
             OpExpr op;
             op.kind = OpExpr::Kind::Cast;
-            op.type = expr->type;
+            op.type = storageType(expr->type);
             op.cast_type = expr->cast_type;
             op.debug_loc = expr->debug_loc;
             op.operands.push_back(std::move(value.operand));
@@ -629,7 +680,7 @@ private:
             result.prelude = std::move(value.prelude);
             OpExpr op;
             op.kind = OpExpr::Kind::Unary;
-            op.type = expr->type;
+            op.type = storageType(expr->type);
             op.debug_loc = expr->debug_loc;
             op.unary_op = parseUnaryOp(expr->op, expr->debug_loc);
             op.operands.push_back(std::move(value.operand));
@@ -645,11 +696,18 @@ private:
             result.prelude = std::move(lhs.prelude);
             auto rhs = lowerExpr(expr->right);
             result.prelude.insert(result.prelude.end(), rhs.prelude.begin(), rhs.prelude.end());
+            BinaryOp binary = parseBinaryOp(expr->op, expr->debug_loc);
+            if (binaryOpAcceptsSignedUse(binary)) {
+                if (expr->left) markSignedSourceUse(lhs.operand, expr->left->type);
+                if (expr->right) markSignedSourceUse(rhs.operand, expr->right->type);
+            } else if (binary == BinaryOp::Shr && expr->left) {
+                markSignedSourceUse(lhs.operand, expr->left->type);
+            }
             OpExpr op;
             op.kind = OpExpr::Kind::Binary;
-            op.type = expr->type;
+            op.type = storageType(expr->type);
             op.debug_loc = expr->debug_loc;
-            op.binary_op = parseBinaryOp(expr->op, expr->debug_loc);
+            op.binary_op = binary;
             op.operands.push_back(std::move(lhs.operand));
             op.operands.push_back(std::move(rhs.operand));
             result.operand = materializeOp(std::move(op), "binary", expr->debug_loc, result.prelude);
@@ -724,9 +782,22 @@ private:
                 result.operand = std::move(value.operand);
                 return result;
             }
+            if (!isBoolSourceType(expr->cast_expr ? expr->cast_expr->type : TypeInfo{}) &&
+                (isSignedOperandUse(expr->cast_type) || isSignedOperandUse(expr->type))) {
+                const int source_width = value.operand.type.width;
+                value.operand.signed_view =
+                    expr->cast_expr && isSignedOperandUse(expr->cast_expr->type);
+                value.operand.type = storageType(expr->cast_type.width > 0 ? expr->cast_type
+                                                                           : expr->type);
+                if (source_width == value.operand.type.width) {
+                    value.operand.signed_view = true;
+                    result.operand = std::move(value.operand);
+                    return result;
+                }
+            }
             OpExpr op;
             op.kind = OpExpr::Kind::Cast;
-            op.type = expr->type;
+            op.type = storageType(expr->type);
             op.cast_type = expr->cast_type;
             op.debug_loc = expr->debug_loc;
             op.operands.push_back(std::move(value.operand));
@@ -742,7 +813,7 @@ private:
             result.prelude = std::move(value.prelude);
             OpExpr op;
             op.kind = OpExpr::Kind::Unary;
-            op.type = expr->type;
+            op.type = storageType(expr->type);
             op.debug_loc = expr->debug_loc;
             op.unary_op = parseUnaryOp(expr->op, expr->debug_loc);
             op.operands.push_back(std::move(value.operand));
@@ -758,11 +829,18 @@ private:
             result.prelude = std::move(lhs.prelude);
             auto rhs = lowerExpr(expr->right);
             result.prelude.insert(result.prelude.end(), rhs.prelude.begin(), rhs.prelude.end());
+            BinaryOp binary = parseBinaryOp(expr->op, expr->debug_loc);
+            if (binaryOpAcceptsSignedUse(binary)) {
+                if (expr->left) markSignedSourceUse(lhs.operand, expr->left->type);
+                if (expr->right) markSignedSourceUse(rhs.operand, expr->right->type);
+            } else if (binary == BinaryOp::Shr && expr->left) {
+                markSignedSourceUse(lhs.operand, expr->left->type);
+            }
             OpExpr op;
             op.kind = OpExpr::Kind::Binary;
-            op.type = expr->type;
+            op.type = storageType(expr->type);
             op.debug_loc = expr->debug_loc;
-            op.binary_op = parseBinaryOp(expr->op, expr->debug_loc);
+            op.binary_op = binary;
             op.operands.push_back(std::move(lhs.operand));
             op.operands.push_back(std::move(rhs.operand));
             result.operand = materializeOp(std::move(op), "binary", expr->debug_loc, result.prelude);
@@ -946,7 +1024,7 @@ private:
         result.prelude.insert(result.prelude.end(), rhs.prelude.begin(), rhs.prelude.end());
         OpExpr op;
         op.kind = OpExpr::Kind::Binary;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.binary_op = parseBinaryOp(compoundBinaryOp(expr->op), expr->debug_loc);
         op.operands.push_back(lvalueOperand(lhs.lvalue));
@@ -965,7 +1043,7 @@ private:
         result.prelude.insert(result.prelude.end(), rhs.prelude.begin(), rhs.prelude.end());
         OpExpr op;
         op.kind = OpExpr::Kind::Binary;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.binary_op = parseBinaryOp(compoundBinaryOp(expr->op), expr->debug_loc);
         op.operands.push_back(lvalueOperand(lhs.lvalue));
@@ -989,7 +1067,7 @@ private:
         }
         OpExpr op;
         op.kind = OpExpr::Kind::Binary;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.binary_op = inc ? BinaryOp::Add : BinaryOp::Sub;
         op.operands.push_back(lvalueOperand(lv.lvalue));
@@ -1013,7 +1091,7 @@ private:
         }
         OpExpr op;
         op.kind = OpExpr::Kind::Binary;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.binary_op = inc ? BinaryOp::Add : BinaryOp::Sub;
         op.operands.push_back(lvalueOperand(lv.lvalue));
@@ -1044,7 +1122,7 @@ private:
                                           result.prelude);
             OpExpr not_op;
             not_op.kind = OpExpr::Kind::Unary;
-            not_op.type = expr->type;
+            not_op.type = storageType(expr->type);
             not_op.debug_loc = expr->debug_loc;
             not_op.unary_op = UnaryOp::LogicalNot;
             not_op.operands.push_back(lhs.operand);
@@ -1079,7 +1157,7 @@ private:
                                           result.prelude);
             OpExpr not_op;
             not_op.kind = OpExpr::Kind::Unary;
-            not_op.type = expr->type;
+            not_op.type = storageType(expr->type);
             not_op.debug_loc = expr->debug_loc;
             not_op.unary_op = UnaryOp::LogicalNot;
             not_op.operands.push_back(lhs.operand);
@@ -1109,8 +1187,10 @@ private:
             if_stmt->debug_loc = expr->debug_loc;
             if_stmt->condition = cond.operand;
             if_stmt->then_body = std::move(then_value.prelude);
+            then_value.operand.signed_view = false;
             if_stmt->then_body.push_back(makeAssign(target, then_value.operand, expr->debug_loc));
             if_stmt->else_body = std::move(else_value.prelude);
+            else_value.operand.signed_view = false;
             if_stmt->else_body.push_back(makeAssign(target, else_value.operand, expr->debug_loc));
             result.prelude.push_back(if_stmt);
             result.operand = varOperand(target.root, target.root_symbol, target.type,
@@ -1123,9 +1203,11 @@ private:
                               then_value.prelude.begin(), then_value.prelude.end());
         result.prelude.insert(result.prelude.end(),
                               else_value.prelude.begin(), else_value.prelude.end());
+        then_value.operand.signed_view = false;
+        else_value.operand.signed_view = false;
         OpExpr op;
         op.kind = OpExpr::Kind::Ternary;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.operands.push_back(std::move(cond.operand));
         op.operands.push_back(std::move(then_value.operand));
@@ -1149,8 +1231,10 @@ private:
             if_stmt->debug_loc = expr->debug_loc;
             if_stmt->condition = cond.operand;
             if_stmt->then_body = std::move(then_value.prelude);
+            then_value.operand.signed_view = false;
             if_stmt->then_body.push_back(makeAssign(target, then_value.operand, expr->debug_loc));
             if_stmt->else_body = std::move(else_value.prelude);
+            else_value.operand.signed_view = false;
             if_stmt->else_body.push_back(makeAssign(target, else_value.operand, expr->debug_loc));
             result.prelude.push_back(if_stmt);
             result.operand = varOperand(target.root, target.root_symbol, target.type,
@@ -1163,9 +1247,11 @@ private:
                               then_value.prelude.begin(), then_value.prelude.end());
         result.prelude.insert(result.prelude.end(),
                               else_value.prelude.begin(), else_value.prelude.end());
+        then_value.operand.signed_view = false;
+        else_value.operand.signed_view = false;
         OpExpr op;
         op.kind = OpExpr::Kind::Ternary;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.operands.push_back(std::move(cond.operand));
         op.operands.push_back(std::move(then_value.operand));
@@ -1327,7 +1413,7 @@ private:
         LowerResult result;
         OpExpr op;
         op.kind = OpExpr::Kind::Hardware;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.hardware_op = hardwareKind(expr);
         op.hi = expr->hi;
@@ -1356,7 +1442,7 @@ private:
         LowerResult result;
         OpExpr op;
         op.kind = OpExpr::Kind::Hardware;
-        op.type = expr->type;
+        op.type = storageType(expr->type);
         op.debug_loc = expr->debug_loc;
         op.hardware_op = hardwareKind(expr->hardware_op);
         op.hi = expr->hi;
@@ -1426,6 +1512,7 @@ private:
                     }
                 } else {
                     auto value = lowerExpr(stmt->decl_init.value());
+                    markSignedSourceUse(value.operand, stmt->decl_init.value()->type);
                     out.insert(out.end(), value.prelude.begin(), value.prelude.end());
                     out.push_back(makeAssign(varLValue(stmt->decl_name, decl_symbol,
                                                        stmt->decl_type,
@@ -1501,6 +1588,7 @@ private:
                 return out;
             }
             auto rhs = lowerExpr(stmt->assign_value);
+            if (stmt->assign_value) markSignedSourceUse(rhs.operand, stmt->assign_value->type);
             out.insert(out.end(), rhs.prelude.begin(), rhs.prelude.end());
             auto lhs = lowerLValue(stmt->assign_target);
             out.insert(out.end(), lhs.prelude.begin(), lhs.prelude.end());
@@ -1729,6 +1817,7 @@ private:
                 return out;
             }
             auto rhs = lowerExpr(stmt->assign_value);
+            if (stmt->assign_value) markSignedSourceUse(rhs.operand, stmt->assign_value->type);
             out.insert(out.end(), rhs.prelude.begin(), rhs.prelude.end());
             auto lhs = lowerLValue(stmt->assign_target);
             out.insert(out.end(), lhs.prelude.begin(), lhs.prelude.end());

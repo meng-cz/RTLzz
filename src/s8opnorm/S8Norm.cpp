@@ -38,9 +38,8 @@ bool typeEq(const S8Type& lhs, const S8Type& rhs) {
 
 bool typeSigned(const TypeInfo& type) {
     if (type.name == "bool" || type.hw_kind == "bool") return false;
-    if (type.hw_kind == "Int" || type.hw_kind == "UInt") return false;
-    if (type.name.rfind("Int<", 0) == 0 ||
-        type.name.rfind("UInt<", 0) == 0) {
+    if (type.hw_kind == "Int") return false;
+    if (type.name.rfind("Int<", 0) == 0) {
         return false;
     }
     if (type.name == "unsigned int" || type.name == "uint8_t" ||
@@ -395,6 +394,7 @@ Value castTo(Context& ctx,
     if (value.type.width <= 0 || target_type.width <= 0) fail("Invalid cast width", loc);
     if (typeEq(value.type, target_type)) {
         if (target_symbol) {
+            value.signed_view = false;
             out.push_back(makeAssign(*target_symbol, value, loc));
             value = varOperand(ctx.output, *target_symbol, value.signed_view, loc);
         }
@@ -995,7 +995,7 @@ Value normalizeCast(Context& ctx,
         rejectSignedView("narrowing cast", op.debug_loc);
     }
     auto value = castTo(ctx, std::move(operand), target_type, out, op.debug_loc);
-    value.operand.signed_view = false;
+    value.operand.signed_view = typeSigned(op.cast_type);
     return value;
 }
 
@@ -1184,7 +1184,6 @@ void emitCastToTarget(Context& ctx,
                       SymbolId target,
                       std::vector<S8Stmt>& out,
                       DebugLoc loc) {
-    if (value.signed_view) rejectSignedView("assignment", loc);
     castTo(ctx, std::move(value), symbolType(ctx.output, target), out, loc, target);
 }
 

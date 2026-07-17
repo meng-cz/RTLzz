@@ -15,6 +15,9 @@ namespace pred::v2 {
 struct TypeInfo {
     std::string name;
     int width = 0;
+    // Source signedness hint for C++ builtin integers or signed views. The
+    // RTL storage type Int<N> itself is unsigned; operation operands carry
+    // signed interpretation explicitly via signed_view in later stages.
     bool is_signed = false;
     bool is_hw_int = false;
     std::string hw_kind;
@@ -100,12 +103,15 @@ struct StructConstructorInfo {
 };
 
 inline TypeInfo make_hw_type(const std::string& kind, int width, bool is_signed = false) {
+    (void)is_signed;
     TypeInfo t;
-    t.name = kind == "bool" ? "bool" : kind + "<" + std::to_string(width) + ">";
+    const bool is_bool = kind == "bool";
+    const std::string storage_kind = is_bool ? "bool" : "Int";
+    t.name = is_bool ? "bool" : storage_kind + "<" + std::to_string(width) + ">";
     t.width = width;
     t.is_hw_int = true;
-    t.is_signed = is_signed;
-    t.hw_kind = kind;
+    t.is_signed = false;
+    t.hw_kind = storage_kind;
     return t;
 }
 
@@ -115,11 +121,11 @@ inline TypeInfo make_bool_type() {
 
 inline TypeInfo make_bits_type(int width, bool is_signed = false) {
     TypeInfo t;
-    t.name = (is_signed ? "Int<" : "UInt<") + std::to_string(width) + ">";
+    t.name = "Int<" + std::to_string(width) + ">";
     t.width = width;
     t.is_signed = is_signed;
     t.is_hw_int = true;
-    t.hw_kind = is_signed ? "Int" : "UInt";
+    t.hw_kind = "Int";
     return t;
 }
 

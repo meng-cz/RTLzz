@@ -25,15 +25,15 @@ using namespace pred;
     } while (false)
 
 static TypeInfo int8() {
-    return make_hw_type("Int", 8, true);
+    return make_hw_type("Int", 8, false);
 }
 
 static TypeInfo int4() {
-    return make_hw_type("Int", 4, true);
+    return make_hw_type("Int", 4, false);
 }
 
-static TypeInfo uint16() {
-    return make_hw_type("UInt", 16, false);
+static TypeInfo int16() {
+    return make_hw_type("Int", 16, false);
 }
 
 static TypeInfo boolType() {
@@ -357,10 +357,10 @@ static void dynamicRangeWriteBecomesHardwareExpr() {
 static void residualZExtCallBecomesHardwareExpr() {
     auto top = baseTop();
     top.params.push_back(valueParam("n", int8()));
-    top.params.push_back(outputParam("out", uint16()));
-    auto zext = call("zext", {make_var("n", int8())}, uint16());
+    top.params.push_back(outputParam("out", int16()));
+    auto zext = call("zext", {make_var("n", int8())}, int16());
     zext->to_width = 16;
-    top.body.push_back(assign(make_var("out", uint16()), std::move(zext)));
+    top.body.push_back(assign(make_var("out", int16()), std::move(zext)));
 
     auto norm = normalizeS1Ok(top);
     CHECK(norm.body[0]->assign_value->kind == pred::s1apinorm::S1ExprKind::HardwareOp);

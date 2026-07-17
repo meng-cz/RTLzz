@@ -154,12 +154,10 @@ bool isSupportedScalar(const TypeInfo& type) {
     }
     if (isBoolType(type)) return true;
     if (type.width <= 0) return false;
-    if (type.hw_kind == "Int" || type.hw_kind == "UInt" ||
-        type.hw_kind == "builtin") {
+    if (type.hw_kind == "Int" || type.hw_kind == "builtin") {
         return true;
     }
     if (type.name.rfind("Int<", 0) == 0 ||
-        type.name.rfind("UInt<", 0) == 0 ||
         type.name == "int" || type.name == "unsigned int" ||
         type.name == "uint8_t" || type.name == "int8_t" ||
         type.name == "uint16_t" || type.name == "int16_t" ||
@@ -365,9 +363,8 @@ std::optional<TypeInfo> lookupSymbol(const std::vector<Scope>& scopes,
 
 bool isAllowedConstructorCall(const Context& ctx, const ExprPtr& expr) {
     if (!expr || expr->kind != ExprKind::Call) return false;
-    if (expr->callee == "Int" || expr->callee == "UInt" ||
+    if (expr->callee == "Int" ||
         expr->callee.rfind("Int<", 0) == 0 ||
-        expr->callee.rfind("UInt<", 0) == 0 ||
         expr->callee == "bool") {
         return true;
     }

@@ -39,11 +39,11 @@ static FunctionAST parseFixture(const std::string& file) {
 }
 
 static TypeInfo intType(int width) {
-    return make_hw_type("Int", width, true);
+    return make_hw_type("Int", width, false);
 }
 
-static TypeInfo uintType(int width) {
-    return make_hw_type("UInt", width, false);
+static TypeInfo bitsType(int width) {
+    return make_hw_type("Int", width, false);
 }
 
 static TypeInfo boolType() {
@@ -62,13 +62,16 @@ static s7flatten::S7Symbol symbol(s7flatten::SymbolId id,
     return out;
 }
 
-static s7flatten::S7Operand var(const s7flatten::S7Symbol& symbol, TypeInfo use_type = {}) {
+static s7flatten::S7Operand var(const s7flatten::S7Symbol& symbol,
+                                TypeInfo use_type = {},
+                                bool signed_view = false) {
     s7flatten::S7Operand out;
     out.kind = s7flatten::S7OperandKind::Var;
     out.symbol = symbol.id;
     out.type = use_type.width > 0 || use_type.name == "bool" || use_type.hw_kind == "bool"
         ? std::move(use_type)
         : symbol.type;
+    out.signed_view = signed_view;
     return out;
 }
 
@@ -104,12 +107,12 @@ static s7flatten::S7FlattenedProgram baseProgram() {
     fn.name = "hls_main";
     fn.entry = 0;
     fn.exit = 0;
-    fn.symbols.push_back(symbol(0, "a", uintType(8), s7flatten::S7SymbolRole::Port));
-    fn.symbols.push_back(symbol(1, "b", uintType(4), s7flatten::S7SymbolRole::Port));
+    fn.symbols.push_back(symbol(0, "a", bitsType(8), s7flatten::S7SymbolRole::Port));
+    fn.symbols.push_back(symbol(1, "b", bitsType(4), s7flatten::S7SymbolRole::Port));
     fn.symbols.push_back(symbol(2, "s", intType(8), s7flatten::S7SymbolRole::Port));
     fn.symbols.push_back(symbol(3, "cond", boolType(), s7flatten::S7SymbolRole::Port));
-    fn.symbols.push_back(symbol(4, "out8", uintType(8), s7flatten::S7SymbolRole::Port));
-    fn.symbols.push_back(symbol(5, "out12", uintType(12), s7flatten::S7SymbolRole::Port));
+    fn.symbols.push_back(symbol(4, "out8", bitsType(8), s7flatten::S7SymbolRole::Port));
+    fn.symbols.push_back(symbol(5, "out12", bitsType(12), s7flatten::S7SymbolRole::Port));
     fn.ports.push_back(s7flatten::S7Port{0, ParamDirection::Input, ParamPassingKind::Value});
     fn.ports.push_back(s7flatten::S7Port{1, ParamDirection::Input, ParamPassingKind::Value});
     fn.ports.push_back(s7flatten::S7Port{2, ParamDirection::Input, ParamPassingKind::Value});
@@ -210,7 +213,7 @@ static void signedRightShiftUsesOperandSignedView() {
     s7flatten::S7Operation shr;
     shr.kind = s7flatten::S7OpKind::Binary;
     shr.binary_op = s7flatten::S7BinaryOp::Shr;
-    shr.operands = {var(fn.symbols[2]), literal("1", uintType(4))};
+    shr.operands = {var(fn.symbols[2], {}, true), literal("1", bitsType(4))};
     fn.blocks[0].stmts.push_back(opStmt(4, std::move(shr)));
 
     auto debug = normalizeDebug(std::move(program));
@@ -222,7 +225,7 @@ static void muxCastsConditionAndArmsToTarget() {
     auto& fn = program.top;
     s7flatten::S7Operation mux;
     mux.kind = s7flatten::S7OpKind::Ternary;
-    mux.operands = {var(fn.symbols[0]), var(fn.symbols[1]), literal("0x7", uintType(4))};
+    mux.operands = {var(fn.symbols[0]), var(fn.symbols[1]), literal("0x7", bitsType(4))};
     fn.blocks[0].stmts.push_back(opStmt(4, std::move(mux)));
 
     auto debug = normalizeDebug(std::move(program));
@@ -238,7 +241,7 @@ static void lookupElementsCastToTarget() {
     lookup.kind = s7flatten::S7StmtKind::Lookup;
     lookup.target = 4;
     lookup.lookup_index = var(fn.symbols[1]);
-    lookup.lookup_elements = {literal("1", uintType(4)), literal("2", uintType(4))};
+    lookup.lookup_elements = {literal("1", bitsType(4)), literal("2", bitsType(4))};
     fn.blocks[0].stmts.push_back(std::move(lookup));
 
     auto debug = normalizeDebug(std::move(program));
@@ -265,7 +268,7 @@ static void powerOfTwoDivAndModUseSlice() {
     s7flatten::S7Operation div;
     div.kind = s7flatten::S7OpKind::Binary;
     div.binary_op = s7flatten::S7BinaryOp::Div;
-    div.operands = {var(div_fn.symbols[0]), literal("8", uintType(8))};
+    div.operands = {var(div_fn.symbols[0]), literal("8", bitsType(8))};
     div_fn.blocks[0].stmts.push_back(opStmt(4, std::move(div)));
     auto div_debug = normalizeDebug(std::move(div_program));
     CHECK(div_debug.find("Slice<5>(a<u8>) meta{hi=7,lo=3") != std::string::npos);
@@ -276,7 +279,7 @@ static void powerOfTwoDivAndModUseSlice() {
     s7flatten::S7Operation mod;
     mod.kind = s7flatten::S7OpKind::Binary;
     mod.binary_op = s7flatten::S7BinaryOp::Mod;
-    mod.operands = {var(mod_fn.symbols[0]), literal("8", uintType(8))};
+    mod.operands = {var(mod_fn.symbols[0]), literal("8", bitsType(8))};
     mod_fn.blocks[0].stmts.push_back(opStmt(4, std::move(mod)));
     auto mod_debug = normalizeDebug(std::move(mod_program));
     CHECK(mod_debug.find("Slice<3>(a<u8>) meta{hi=2,lo=0") != std::string::npos);
@@ -289,7 +292,7 @@ static void nonPowerOfTwoDivAndModUseMagicMultiply() {
     s7flatten::S7Operation div;
     div.kind = s7flatten::S7OpKind::Binary;
     div.binary_op = s7flatten::S7BinaryOp::Div;
-    div.operands = {var(div_fn.symbols[0]), literal("10", uintType(8))};
+    div.operands = {var(div_fn.symbols[0]), literal("10", bitsType(8))};
     div_fn.blocks[0].stmts.push_back(opStmt(4, std::move(div)));
     auto div_debug = normalizeDebug(std::move(div_program));
     CHECK(div_debug.find("Mul<16>(a<u8>") != std::string::npos);
@@ -301,7 +304,7 @@ static void nonPowerOfTwoDivAndModUseMagicMultiply() {
     s7flatten::S7Operation mod;
     mod.kind = s7flatten::S7OpKind::Binary;
     mod.binary_op = s7flatten::S7BinaryOp::Mod;
-    mod.operands = {var(mod_fn.symbols[0]), literal("10", uintType(8))};
+    mod.operands = {var(mod_fn.symbols[0]), literal("10", bitsType(8))};
     mod_fn.blocks[0].stmts.push_back(opStmt(4, std::move(mod)));
     auto mod_debug = normalizeDebug(std::move(mod_program));
     CHECK(mod_debug.find("Mul<16>(a<u8>") != std::string::npos);
@@ -315,7 +318,7 @@ static void nonPowerOfTwoDivisionUsesCorrectionWhenNeeded() {
     s7flatten::S7Operation div;
     div.kind = s7flatten::S7OpKind::Binary;
     div.binary_op = s7flatten::S7BinaryOp::Div;
-    div.operands = {var(fn.symbols[0]), literal("7", uintType(8))};
+    div.operands = {var(fn.symbols[0]), literal("7", bitsType(8))};
     fn.blocks[0].stmts.push_back(opStmt(4, std::move(div)));
     auto debug = normalizeDebug(std::move(program));
     CHECK(debug.find("__s8_norm_divcorr_sub_") != std::string::npos);
@@ -329,7 +332,7 @@ static void divisorAboveInputRangeSimplifies() {
     s7flatten::S7Operation div;
     div.kind = s7flatten::S7OpKind::Binary;
     div.binary_op = s7flatten::S7BinaryOp::Div;
-    div.operands = {var(div_fn.symbols[0]), literal("300", uintType(16))};
+    div.operands = {var(div_fn.symbols[0]), literal("300", bitsType(16))};
     div_fn.blocks[0].stmts.push_back(opStmt(4, std::move(div)));
     auto div_debug = normalizeDebug(std::move(div_program));
     CHECK(div_debug.find("assign out8 = 0x0<u8>") != std::string::npos);
@@ -339,7 +342,7 @@ static void divisorAboveInputRangeSimplifies() {
     s7flatten::S7Operation mod;
     mod.kind = s7flatten::S7OpKind::Binary;
     mod.binary_op = s7flatten::S7BinaryOp::Mod;
-    mod.operands = {var(mod_fn.symbols[0]), literal("300", uintType(16))};
+    mod.operands = {var(mod_fn.symbols[0]), literal("300", bitsType(16))};
     mod_fn.blocks[0].stmts.push_back(opStmt(4, std::move(mod)));
     auto mod_debug = normalizeDebug(std::move(mod_program));
     CHECK(mod_debug.find("assign out8 = a<u8>") != std::string::npos);
@@ -351,7 +354,7 @@ static void signedConstantDivAndModUseAbsAndRestoreSign() {
     s7flatten::S7Operation div;
     div.kind = s7flatten::S7OpKind::Binary;
     div.binary_op = s7flatten::S7BinaryOp::Div;
-    div.operands = {var(fn.symbols[2]), literal("3", uintType(8))};
+    div.operands = {var(fn.symbols[2], {}, true), literal("3", bitsType(8))};
     fn.blocks[0].stmts.push_back(opStmt(4, std::move(div)));
     auto div_debug = normalizeDebug(std::move(program));
     CHECK(div_debug.find("__s8_norm_signbit_") != std::string::npos);
@@ -364,7 +367,7 @@ static void signedConstantDivAndModUseAbsAndRestoreSign() {
     s7flatten::S7Operation mod;
     mod.kind = s7flatten::S7OpKind::Binary;
     mod.binary_op = s7flatten::S7BinaryOp::Mod;
-    mod.operands = {var(mod_fn.symbols[2]), literal("3", uintType(8))};
+    mod.operands = {var(mod_fn.symbols[2], {}, true), literal("3", bitsType(8))};
     mod_fn.blocks[0].stmts.push_back(opStmt(4, std::move(mod)));
     auto mod_debug = normalizeDebug(std::move(mod_program));
     CHECK(mod_debug.find("__s8_norm_smod_neg_") != std::string::npos);

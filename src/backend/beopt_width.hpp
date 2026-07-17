@@ -29,6 +29,34 @@ inline void trim(std::vector<std::uint64_t>& limbs, int width) {
     limbs.back() &= ((std::uint64_t{1} << (width % 64)) - 1);
 }
 
+inline void resizeLiteralLimbs(std::vector<std::uint64_t>& limbs,
+                               int old_width,
+                               int new_width,
+                               bool signed_view) {
+    if (new_width <= 0) {
+        limbs.clear();
+        return;
+    }
+    bool sign = false;
+    if (signed_view && old_width > 0) {
+        const std::size_t sign_limb = static_cast<std::size_t>((old_width - 1) / 64);
+        const int sign_bit = (old_width - 1) % 64;
+        sign = sign_limb < limbs.size() &&
+               (((limbs[sign_limb] >> sign_bit) & 1ULL) != 0);
+    }
+    limbs.resize(limbCount(new_width), sign ? ~std::uint64_t{0} : 0);
+    if (sign && old_width > 0) {
+        const int old_rem = old_width % 64;
+        if (old_rem != 0) {
+            const std::size_t limb = static_cast<std::size_t>(old_width / 64);
+            if (limb < limbs.size()) {
+                limbs[limb] |= ~((std::uint64_t{1} << old_rem) - 1);
+            }
+        }
+    }
+    trim(limbs, new_width);
+}
+
 inline bool getBit(const std::vector<std::uint64_t>& limbs, int bit) {
     if (bit < 0) return false;
     std::size_t limb = static_cast<std::size_t>(bit / 64);
@@ -348,6 +376,18 @@ inline Operand appendZExtTemp(Program& program, Operand operand, int width) {
     setResize(op, OperationKind::ZExt, std::move(operand), type,
               "inserted zero extension for comprehensive width optimization", program);
     Operand out = appendTemp(program, type, std::move(op), "inserted zero extension for comprehensive width optimization");
+    out.signed_view = signed_view;
+    return out;
+}
+
+inline Operand appendSExtTemp(Program& program, Operand operand, int width) {
+    bool signed_view = operand.signed_view;
+    ValueType type = operand.type;
+    type.width = width;
+    Operation op;
+    setResize(op, OperationKind::SExt, std::move(operand), type,
+              "inserted sign extension for comprehensive width optimization", program);
+    Operand out = appendTemp(program, type, std::move(op), "inserted sign extension for comprehensive width optimization");
     out.signed_view = signed_view;
     return out;
 }
@@ -832,15 +872,19 @@ inline Operand resizeOperandForUse(Program& program, Operand operand, int width)
     width = std::max(1, width);
     if (current == width) return operand;
     if (operand.kind == OperandKind::Literal) {
+        int old_width = widthOf(operand.type);
         operand.type.width = width;
         operand.constant.width = width;
-        trim(operand.constant.limbs, width);
+        resizeLiteralLimbs(operand.constant.limbs, old_width, width,
+                           operand.signed_view || operand.constant.signed_view);
         return operand;
     }
     if (operand.kind != OperandKind::Symbol) return operand;
     return current > width
         ? appendTruncTemp(program, std::move(operand), width)
-        : appendZExtTemp(program, std::move(operand), width);
+        : ((operand.signed_view || operand.constant.signed_view)
+               ? appendSExtTemp(program, std::move(operand), width)
+               : appendZExtTemp(program, std::move(operand), width));
 }
 
 inline void narrowOperationResult(Operation& op, int width) {

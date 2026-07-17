@@ -1,6 +1,16 @@
 #include <cstdint>
 #include <fixint.hpp>
 
+enum class UnsignedMode : uint8_t {
+    Low = 0x02,
+    Hi = 0x80,
+};
+
+enum class SignedMode : int8_t {
+    NegTwo = -2,
+    PosSeven = 7,
+};
+
 void hls_main(Int<8> a,
               Int<8> b,
               Int<16> word,
@@ -26,7 +36,20 @@ void hls_main(Int<8> a,
               bool& reduce_parity,
               Int<16>& cast_unsigned,
               Int<16>& cast_signed,
-              Int<8>& cast_trunc) {
+              Int<8>& cast_trunc,
+              Int<8>& enum_unsigned_value,
+              Int<8>& enum_signed_value,
+              bool& enum_unsigned_cmp,
+              bool& enum_signed_cmp,
+              Int<16>& enum_signed_ext,
+              Int<16>& stdmix_add_u8,
+              Int<16>& stdmix_mul_u8,
+              Int<16>& stdmix_mul_s8,
+              Int<16>& stdmix_mul_sint_s8,
+              bool& stdmix_cmp_u8,
+              bool& stdmix_cmp_s8,
+              Int<16>& stdmix_assign_u8,
+              Int<16>& stdmix_assign_s8) {
     Int<8> low = Int<8>(word.at<7, 0>());
     Int<8> high = Int<8>(word.at<15, 8>());
 
@@ -59,4 +82,27 @@ void hls_main(Int<8> a,
     cast_unsigned = Int<16>(a);
     cast_signed = Int<16>(a.sint());
     cast_trunc = Int<8>(word);
+
+    UnsignedMode unsigned_mode = sel ? UnsignedMode::Hi : UnsignedMode::Low;
+    SignedMode signed_mode = sel ? SignedMode::NegTwo : SignedMode::PosSeven;
+    enum_unsigned_value = static_cast<uint8_t>(unsigned_mode);
+    enum_signed_value = static_cast<int8_t>(signed_mode);
+    enum_unsigned_cmp =
+        static_cast<uint8_t>(UnsignedMode::Hi) >
+        static_cast<uint8_t>(UnsignedMode::Low);
+    enum_signed_cmp =
+        static_cast<int8_t>(SignedMode::NegTwo) <
+        static_cast<int8_t>(SignedMode::PosSeven);
+    enum_signed_ext = static_cast<int8_t>(signed_mode);
+
+    uint8_t std_u8 = a.template to<uint8_t>();
+    int8_t std_s8 = b.template to<int8_t>();
+    stdmix_add_u8 = a + std_u8;
+    stdmix_mul_u8 = a * std_u8;
+    stdmix_mul_s8 = a * std_s8;
+    stdmix_mul_sint_s8 = a.sint() * std_s8;
+    stdmix_cmp_u8 = a > std_u8;
+    stdmix_cmp_s8 = b.sint() < std_s8;
+    stdmix_assign_u8 = std_u8;
+    stdmix_assign_s8 = std_s8;
 }

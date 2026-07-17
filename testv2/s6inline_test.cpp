@@ -26,11 +26,11 @@ using namespace pred;
     } while (false)
 
 static TypeInfo int8() {
-    return make_hw_type("Int", 8, true);
+    return make_hw_type("Int", 8, false);
 }
 
-static TypeInfo uint8() {
-    return make_hw_type("UInt", 8, false);
+static TypeInfo int16() {
+    return make_hw_type("Int", 16, false);
 }
 
 static TypeInfo boolType() {
@@ -388,35 +388,35 @@ static void deeperMultiLevelHelperInline() {
 static void overloadResolutionInline() {
     auto top = baseTop();
     top.params.push_back(valueParam("a", int8()));
-    top.params.push_back(valueParam("b", uint8()));
+    top.params.push_back(valueParam("b", int16()));
     top.params.push_back(outputParam("out_a", int8()));
-    top.params.push_back(outputParam("out_b", uint8()));
+    top.params.push_back(outputParam("out_b", int16()));
     top.body.push_back(assign(make_var("out_a", int8()),
                               call("pick", {make_var("a", int8())}, int8())));
-    top.body.push_back(assign(make_var("out_b", uint8()),
-                              call("pick", {make_var("b", uint8())}, uint8())));
+    top.body.push_back(assign(make_var("out_b", int16()),
+                              call("pick", {make_var("b", int16())}, int16())));
 
-    auto pick_signed = std::make_shared<FunctionAST>();
-    pick_signed->name = "pick";
-    pick_signed->return_type = int8();
-    pick_signed->params.push_back(valueParam("x", int8()));
-    pick_signed->body.push_back(decl("signed_marker", int8(), make_var("x", int8())));
-    pick_signed->body.push_back(ret(make_var("signed_marker", int8())));
-    top.helpers.push_back(pick_signed);
+    auto pick_8 = std::make_shared<FunctionAST>();
+    pick_8->name = "pick";
+    pick_8->return_type = int8();
+    pick_8->params.push_back(valueParam("x", int8()));
+    pick_8->body.push_back(decl("width8_marker", int8(), make_var("x", int8())));
+    pick_8->body.push_back(ret(make_var("width8_marker", int8())));
+    top.helpers.push_back(pick_8);
 
-    auto pick_unsigned = std::make_shared<FunctionAST>();
-    pick_unsigned->name = "pick";
-    pick_unsigned->return_type = uint8();
-    pick_unsigned->params.push_back(valueParam("x", uint8()));
-    pick_unsigned->body.push_back(decl("unsigned_marker", uint8(), make_var("x", uint8())));
-    pick_unsigned->body.push_back(ret(make_var("unsigned_marker", uint8())));
-    top.helpers.push_back(pick_unsigned);
+    auto pick_16 = std::make_shared<FunctionAST>();
+    pick_16->name = "pick";
+    pick_16->return_type = int16();
+    pick_16->params.push_back(valueParam("x", int16()));
+    pick_16->body.push_back(decl("width16_marker", int16(), make_var("x", int16())));
+    pick_16->body.push_back(ret(make_var("width16_marker", int16())));
+    top.helpers.push_back(pick_16);
 
     auto s6 = runS6(top);
     expectNoCalls(s6.program->top);
     CHECK(s6.summaries.size() == 2);
-    CHECK(hasSymbolContaining(s6.program->top, "signed_marker"));
-    CHECK(hasSymbolContaining(s6.program->top, "unsigned_marker"));
+    CHECK(hasSymbolContaining(s6.program->top, "width8_marker"));
+    CHECK(hasSymbolContaining(s6.program->top, "width16_marker"));
 }
 
 static void lambdaWinsOverSameNameHelper() {
