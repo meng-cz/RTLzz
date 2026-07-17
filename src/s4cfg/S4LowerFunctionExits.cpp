@@ -97,39 +97,52 @@ S3StmtPtr makeAssign(const std::string& name, SymbolId symbol, TypeInfo type, Op
 } // namespace
 
 void lowerFunctionExits(FunctionCFG& cfg, std::vector<CFGWarning>&) {
-    if (isVoidType(cfg.return_type)) return;
+    const bool void_return = isVoidType(cfg.return_type);
+    std::string slot;
+    SymbolId slot_symbol = -1;
+    if (!void_return) {
+        slot = makeReturnSlotName(cfg);
+        cfg.return_slot = slot;
+        slot_symbol = static_cast<SymbolId>(cfg.symbols.size());
+        cfg.return_slot_symbol = slot_symbol;
+        SymbolInfo info;
+        info.id = slot_symbol;
+        info.name = slot;
+        info.type = cfg.return_type;
+        info.declaring_scope = -1;
+        cfg.symbols.push_back(std::move(info));
 
-    std::string slot = makeReturnSlotName(cfg);
-    cfg.return_slot = slot;
-    SymbolId slot_symbol = static_cast<SymbolId>(cfg.symbols.size());
-    cfg.return_slot_symbol = slot_symbol;
-    SymbolInfo info;
-    info.id = slot_symbol;
-    info.name = slot;
-    info.type = cfg.return_type;
-    info.declaring_scope = -1;
-    cfg.symbols.push_back(std::move(info));
-
-    auto* entry = cfg.blocks.empty() ? nullptr : cfg.blocks[static_cast<std::size_t>(cfg.entry)].get();
-    if (entry) {
-        entry->stmts.insert(entry->stmts.begin(),
-                            CFGStmt{CFGStmtKind::Decl,
-                                    makeDecl(slot, slot_symbol, cfg.return_type)});
+        auto* entry = cfg.blocks.empty() ? nullptr : cfg.blocks[static_cast<std::size_t>(cfg.entry)].get();
+        if (entry) {
+            entry->stmts.insert(entry->stmts.begin(),
+                                CFGStmt{CFGStmtKind::Decl,
+                                        makeDecl(slot, slot_symbol, cfg.return_type)});
+        }
     }
 
     for (auto& block : cfg.blocks) {
         if (block->terminator.kind != TermKind::Return) continue;
-        if (!block->terminator.return_value) {
+        if (!void_return && !block->terminator.return_value) {
             ErrorContext context;
             context.stage = "s4cfg";
             throwRTLZZ(std::move(context),
                        "Non-void function '" + cfg.name + "' has return without value");
         }
-        auto value = block->terminator.return_value.value();
-        block->stmts.push_back(
-            CFGStmt{CFGStmtKind::Assign,
-                    makeAssign(slot, slot_symbol, cfg.return_type, value)});
-        block->terminator.return_value = slotOperand(slot, slot_symbol, cfg.return_type);
+        if (void_return && block->terminator.return_value) {
+            ErrorContext context;
+            context.stage = "s4cfg";
+            throwRTLZZ(std::move(context),
+                       "Void function '" + cfg.name + "' has return with value");
+        }
+        if (!void_return) {
+            auto value = block->terminator.return_value.value();
+            block->stmts.push_back(
+                CFGStmt{CFGStmtKind::Assign,
+                        makeAssign(slot, slot_symbol, cfg.return_type, value)});
+        }
+        block->terminator.kind = TermKind::Jump;
+        block->terminator.jump_target = cfg.exit;
+        block->terminator.return_value.reset();
     }
 }
 
