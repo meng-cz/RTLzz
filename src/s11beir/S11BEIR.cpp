@@ -675,56 +675,43 @@ struct Builder {
             return;
         }
 
-        beir::Operand current = elems.back();
-        for (int i = static_cast<int>(elems.size()) - 2; i >= 0; --i) {
-            beir::Operation eq;
-            eq.kind = beir::OperationKind::Binary;
-            eq.op = beir::OpCode::Eq;
-            eq.type = convertType(S10Type{s8opnorm::S8TypeKind::Bool, 1});
-            eq.to_width = 1;
-            eq.operands.push_back(index);
-            eq.operands.push_back(literalOperand(static_cast<std::uint64_t>(i),
-                                                 def.lookup_index.type));
-            if (def.debug_loc.valid()) eq.source_locs.push_back(def.debug_loc);
-            eq.debug = generatedDebug("S11 lookup index compare", eq.operands,
+        beir::ValueType scalar_type = convertType(target.type);
+        beir::ValueType array_type = scalar_type;
+        array_type.array_dims.push_back(static_cast<int>(elems.size()));
+
+        beir::Operation aggregate = baseOperation(beir::OperationKind::Aggregate,
+                                                  array_type,
+                                                  def.debug_loc,
+                                                  "S11 lookup table aggregate");
+        aggregate.operands = std::move(elems);
+        aggregate.debug = generatedDebug("S11 lookup table aggregate",
+                                         aggregate.operands,
+                                         def.debug_loc);
+        aggregate.debug.derived_names.push_back("lowered_lookup_table");
+        auto& array_signal = addGeneratedSignal("lookup_table",
+                                                array_type,
+                                                aggregate.operands,
+                                                def.debug_loc);
+        setDriver(array_signal.id, std::move(aggregate));
+        ++summary.generated_lookup_nodes;
+
+        beir::Operand array_operand;
+        array_operand.kind = beir::OperandKind::Symbol;
+        array_operand.node = array_signal.id;
+        array_operand.text = array_signal.name;
+        array_operand.type = array_signal.type;
+
+        beir::Operation access = baseOperation(beir::OperationKind::ArrayAccess,
+                                               scalar_type,
+                                               def.debug_loc,
+                                               "S11 lowered lookup array access");
+        access.operands.push_back(std::move(array_operand));
+        access.operands.push_back(std::move(index));
+        access.debug = generatedDebug("S11 lowered lookup array access",
+                                      access.operands,
                                       def.debug_loc);
-            auto& eq_signal = addGeneratedSignal("lookup_eq", eq.type, eq.operands,
-                                                 def.debug_loc);
-            setDriver(eq_signal.id, std::move(eq));
-            ++summary.generated_lookup_nodes;
-
-            beir::Operand cond;
-            cond.kind = beir::OperandKind::Symbol;
-            cond.node = eq_signal.id;
-            cond.text = eq_signal.name;
-            cond.type = eq_signal.type;
-
-            beir::Operation mux;
-            mux.kind = beir::OperationKind::Ite;
-            mux.type = convertType(target.type);
-            mux.to_width = target.type.width;
-            mux.operands = {std::move(cond), elems[static_cast<std::size_t>(i)], current};
-            if (def.debug_loc.valid()) mux.source_locs.push_back(def.debug_loc);
-            mux.debug = generatedDebug("S11 lowered lookup mux", mux.operands,
-                                       def.debug_loc);
-
-            if (i == 0) {
-                setDriver(target_node, std::move(mux));
-                current = valueOperand(target.id);
-            } else {
-                auto& mux_signal = addGeneratedSignal("lookup_mux", mux.type,
-                                                      mux.operands,
-                                                      def.debug_loc);
-                setDriver(mux_signal.id, std::move(mux));
-                ++summary.generated_lookup_nodes;
-                beir::Operand next;
-                next.kind = beir::OperandKind::Symbol;
-                next.node = mux_signal.id;
-                next.text = mux_signal.name;
-                next.type = mux_signal.type;
-                current = std::move(next);
-            }
-        }
+        access.debug.derived_names.push_back("lowered_lookup_array_access");
+        setDriver(target_node, std::move(access));
     }
 
     void emitDefinition(const S10Definition& def) {

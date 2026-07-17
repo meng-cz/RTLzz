@@ -268,7 +268,7 @@ static void straightLineBuildsPortsAndOutputAssign() {
     CHECK(countKind(beir_program, beir::OperationKind::PortRead) == 3);
 }
 
-static void lookupLowersToScalarIteTree() {
+static void lookupLowersToBEIRArrayAccess() {
     auto program = baseProgram();
     auto& block = program.top.blocks[0];
     block.stmts.push_back(lookupStmt(4, var(3, intType(2)),
@@ -277,16 +277,22 @@ static void lookupLowersToScalarIteTree() {
 
     auto beir_program = lowerToBEIR(program);
     CHECK(countKind(beir_program, beir::OperationKind::Lookup) == 0);
-    CHECK(countKind(beir_program, beir::OperationKind::Ite) >= 2);
-    int eq_count = 0;
+    CHECK(countKind(beir_program, beir::OperationKind::Aggregate) == 1);
+    CHECK(countKind(beir_program, beir::OperationKind::ArrayAccess) == 1);
+    CHECK(countKind(beir_program, beir::OperationKind::Ite) == 0);
+    CHECK(countKind(beir_program, beir::OperationKind::Binary) == 0);
+    bool found_array = false;
     for (const auto& signal : beir_program.signals) {
         if (signal.driver &&
-            signal.driver->kind == beir::OperationKind::Binary &&
-            signal.driver->op == beir::OpCode::Eq) {
-            ++eq_count;
+            signal.driver->kind == beir::OperationKind::Aggregate) {
+            CHECK(signal.type.width == 8);
+            CHECK(signal.type.array_dims.size() == 1);
+            CHECK(signal.type.array_dims[0] == 3);
+            CHECK(signal.driver->operands.size() == 3);
+            found_array = true;
         }
     }
-    CHECK(eq_count >= 2);
+    CHECK(found_array);
 }
 
 static void signedArithmeticShiftMapsToShrSignedView() {
@@ -420,7 +426,8 @@ static void sourcePipelineRunsThroughBEIR() {
     CHECK(text.find("Output out") != std::string::npos);
     CHECK(text.find("driver lookup") == std::string::npos);
     CHECK(countKind(beir_program, beir::OperationKind::Lookup) == 0);
-    CHECK(countKind(beir_program, beir::OperationKind::Ite) >= 1);
+    CHECK(countKind(beir_program, beir::OperationKind::Aggregate) >= 1);
+    CHECK(countKind(beir_program, beir::OperationKind::ArrayAccess) >= 1);
 }
 
 static void sourcePipelinePreservesArrayPortGroupsInBEIR() {
@@ -443,7 +450,7 @@ static void sourcePipelinePreservesArrayPortGroupsInBEIR() {
 
 int main() {
     straightLineBuildsPortsAndOutputAssign();
-    lookupLowersToScalarIteTree();
+    lookupLowersToBEIRArrayAccess();
     signedArithmeticShiftMapsToShrSignedView();
     outputInitialReadIsRejected();
     groupedOutputArrayBuildsBEIRArrayPort();

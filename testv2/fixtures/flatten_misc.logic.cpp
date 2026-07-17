@@ -103,6 +103,7 @@ void hls_main(Int<8> seed,
               Int<8>& nested_dynamic_read,
               Int<8>& nested_dynamic_write,
               Int<8>& internal_struct_array,
+              Int<8>& const_lookup,
               Int<8>& final_mix) {
     int lane_idx = 0;
     int tap_idx = 0;
@@ -172,10 +173,17 @@ void hls_main(Int<8> seed,
         locals[tap_idx].hi +
         local_arrays[lane_idx][tap_idx];
 
+    static const Int<8> const_table[2] = {
+        Int<8>(0x13),
+        Int<8>(0x57),
+    };
+    const_lookup = const_table[tap_idx] ^ locals[lane_idx].hi;
+
     final_mix =
         aggregate_pos ^
         helper_struct_return ^
         nested_dynamic_read ^
         nested_dynamic_write ^
-        internal_struct_array;
+        internal_struct_array ^
+        const_lookup;
 }
