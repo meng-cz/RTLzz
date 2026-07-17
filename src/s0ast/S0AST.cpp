@@ -475,6 +475,19 @@ std::string blankPreserveLines(std::string text) {
     return text;
 }
 
+std::string linePreservingReplacement(const std::string& original,
+                                      std::string replacement) {
+    std::size_t original_newlines = static_cast<std::size_t>(
+        std::count(original.begin(), original.end(), '\n'));
+    std::size_t replacement_newlines = static_cast<std::size_t>(
+        std::count(replacement.begin(), replacement.end(), '\n'));
+    while (replacement_newlines < original_newlines) {
+        replacement.push_back('\n');
+        ++replacement_newlines;
+    }
+    return replacement;
+}
+
 std::string combinedParamList(const LambdaRewrite& rewrite) {
     std::vector<std::string> parts;
     for (std::size_t i = 0; i < rewrite.captures.size(); ++i) {
@@ -541,34 +554,20 @@ std::optional<std::string> rewriteLocalLambdasForNativeParser(const std::string&
 
     std::string transformed = source;
     for (auto it = rewrites.rbegin(); it != rewrites.rend(); ++it) {
+        std::string original = source.substr(it->begin, it->end - it->begin);
+        std::string declaration = it->return_type + " " + it->generated_name +
+                                  "(" + combinedParamList(*it) + ");";
         transformed.replace(it->begin, it->end - it->begin,
-                            blankPreserveLines(source.substr(it->begin,
-                                                             it->end - it->begin)));
+                            linePreservingReplacement(original, std::move(declaration)));
     }
     for (const auto& rewrite : rewrites) replaceLambdaCalls(transformed, rewrite);
 
-    std::ostringstream prototypes;
     std::ostringstream definitions;
     for (const auto& rewrite : rewrites) {
         std::string params = combinedParamList(rewrite);
-        prototypes << rewrite.return_type << " " << rewrite.generated_name
-                   << "(" << params << ");\n";
         definitions << "\n" << rewrite.return_type << " " << rewrite.generated_name
                     << "(" << params << ") " << rewrite.body << "\n";
     }
-
-    std::size_t insert_pos = 0;
-    std::size_t search = 0;
-    while (search < transformed.size()) {
-        std::size_t line_end = transformed.find('\n', search);
-        std::size_t end = line_end == std::string::npos ? transformed.size() : line_end + 1;
-        std::string line = transformed.substr(search, end - search);
-        std::string stripped = trim(line);
-        if (stripped.rfind("#include", 0) == 0) insert_pos = end;
-        search = end;
-        if (line_end == std::string::npos) break;
-    }
-    transformed.insert(insert_pos, prototypes.str());
     transformed += definitions.str();
     return transformed;
 }

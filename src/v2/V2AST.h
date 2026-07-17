@@ -139,6 +139,7 @@ struct Stmt {
     std::vector<CaseClause> switch_cases;
 
     std::vector<StmtPtr> block_stmts;
+    bool synthetic_flatten_block = false;
 
     std::optional<ExprPtr> return_value;
     ExprPtr expr_stmt;

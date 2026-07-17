@@ -358,6 +358,9 @@ private:
             out->switch_cases = normalizeCases(stmt->switch_cases, stats);
             return {out};
         case StmtKind::Block:
+            if (stmt->synthetic_flatten_block) {
+                return normalizeStmtList(stmt->block_stmts, stats);
+            }
             out->kind = S1StmtKind::Block;
             out->block_stmts = normalizeStmtList(stmt->block_stmts, stats);
             return {out};

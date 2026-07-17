@@ -2541,6 +2541,7 @@ static StmtPtr expandAggregateInitDecl(
 
     auto block = std::make_shared<Stmt>();
     block->kind = StmtKind::Block;
+    block->synthetic_flatten_block = true;
 
     auto decl = std::make_shared<Stmt>(*stmt);
     decl->decl_init = std::nullopt;
