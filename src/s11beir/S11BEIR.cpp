@@ -173,7 +173,7 @@ beir::Operand::Constant makeConstant(const S10Literal& literal,
                                      bool signed_view) {
     beir::Operand::Constant constant;
     constant.width = width;
-    constant.signed_view = literal.is_signed || signed_view;
+    constant.signed_view = signed_view;
     constant.limbs = literal.words;
     std::size_t words = width <= 0 ? 0 : static_cast<std::size_t>((width + 63) / 64);
     constant.limbs.resize(words, 0);

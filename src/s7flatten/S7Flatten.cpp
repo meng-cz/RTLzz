@@ -128,6 +128,7 @@ S7Operand literalOperand(const Operand& operand) {
     S7Operand out;
     out.kind = S7OperandKind::Literal;
     out.type = operand.type;
+    out.signed_view = operand.signed_view;
     out.debug_loc = operand.debug_loc;
     out.literal_value = operand.literal_value;
     return out;
@@ -155,6 +156,10 @@ S7Operand varOperand(const LeafInfo& leaf) {
     out.debug_loc = leaf.debug_loc;
     out.symbol = leaf.id;
     return out;
+}
+
+void applyUseSignedView(S7Operand& out, const Operand& operand) {
+    out.signed_view = out.signed_view || operand.signed_view;
 }
 
 std::string pathName(const std::string& root, const std::vector<std::string>& path) {
@@ -643,6 +648,7 @@ Value flattenValue(Context& ctx, const Operand& operand, std::vector<S7Stmt>& ou
     case OperandKind::Var: {
         const auto& map = leafMap(ctx, operand.var_symbol);
         for (const auto& leaf : map.leaves) value.operands.push_back(varOperand(leaf));
+        if (value.operands.size() == 1) applyUseSignedView(value.operands.front(), operand);
         return value;
     }
     case OperandKind::LValueRead: {
@@ -652,6 +658,7 @@ Value flattenValue(Context& ctx, const Operand& operand, std::vector<S7Stmt>& ou
             return value;
         }
         for (const auto& leaf : selection.leaves) value.operands.push_back(varOperand(leaf));
+        if (value.operands.size() == 1) applyUseSignedView(value.operands.front(), operand);
         return value;
     }
     }
@@ -663,7 +670,10 @@ S7Operand flattenOperand(Context& ctx,
                            std::vector<S7Stmt>& out) {
     Value value = flattenValue(ctx, operand, out);
     if (value.dynamic) {
-        return materializeDynamicRead(ctx, *value.dynamic, 0, out, operand.debug_loc);
+        S7Operand result = materializeDynamicRead(ctx, *value.dynamic, 0, out,
+                                                  operand.debug_loc);
+        applyUseSignedView(result, operand);
+        return result;
     }
     if (value.operands.size() != 1) {
         fail("Expected scalar operand after flattening, got " +
@@ -681,7 +691,9 @@ std::vector<S7Operand> flattenOpOperands(Context& ctx,
     for (const auto& operand : operands) {
         Value value = flattenValue(ctx, operand, out);
         if (value.dynamic) {
-            flat.push_back(materializeDynamicRead(ctx, *value.dynamic, 0, out, loc));
+            S7Operand result = materializeDynamicRead(ctx, *value.dynamic, 0, out, loc);
+            applyUseSignedView(result, operand);
+            flat.push_back(std::move(result));
             continue;
         }
         if (value.operands.size() != 1) {

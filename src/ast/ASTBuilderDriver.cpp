@@ -2169,11 +2169,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             auto rhs = convertExpr(children[1]);
             markSignedViewIfCursorMentions(lhs, children[0]);
             markSignedViewIfCursorMentions(rhs, children[1]);
-            if (cursorMentionsToken(cursor, "IntSignedView") ||
-                cursorMentionsToken(cursor, "sint")) {
-                forceSignedView(lhs);
-                forceSignedView(rhs);
-            }
             return make_binary(op, lhs, rhs, convertType(type));
         }
         break;
@@ -2217,15 +2212,21 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
     case CXCursor_CallExpr: {
         std::string spelling = cxToStr(clang_getCursorSpelling(cursor));
         bool spelling_was_empty = spelling.empty();
+        if (spelling.empty()) {
+            CXCursor referenced = clang_getCursorReferenced(cursor);
+            if (!clang_Cursor_isNull(referenced)) {
+                spelling = cxToStr(clang_getCursorSpelling(referenced));
+            }
+        }
         std::string first_child_spelling;
         if (!children.empty()) {
             first_child_spelling = firstSpellingDeep(children[0]);
             if (first_child_spelling.rfind("operator", 0) == 0) {
-                spelling = first_child_spelling;
+                if (spelling.empty()) spelling = first_child_spelling;
             } else if (first_child_spelling == "setnext" || first_child_spelling == "get" ||
                        first_child_spelling == "call" ||
                        first_child_spelling == "output") {
-                spelling = first_child_spelling;
+                if (spelling.empty()) spelling = first_child_spelling;
             }
         }
         VulCallInfo vul_call = recognizeVulCall(cursor, children, spelling, first_child_spelling);
@@ -2308,9 +2309,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             for (int i = 0; i < arg_count; ++i) {
                 call_args.push_back(clang_Cursor_getArgument(cursor, static_cast<unsigned>(i)));
             }
-            bool operator_uses_signed_view =
-                cursorMentionsToken(cursor, "IntSignedView") ||
-                cursorMentionsToken(cursor, "sint");
             if ((op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" ||
                  op == "<<" || op == ">>" || op == "==" || op == "!=" || op == "<" ||
                  op == "<=" || op == ">" || op == ">=")) {
@@ -2319,10 +2317,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                     auto rhs = convertExpr(call_args[1]);
                     markSignedViewIfCursorMentions(lhs, call_args[0]);
                     markSignedViewIfCursorMentions(rhs, call_args[1]);
-                    if (operator_uses_signed_view) {
-                        forceSignedView(lhs);
-                        forceSignedView(rhs);
-                    }
                     return make_binary(op, lhs, rhs, convertType(type));
                 }
                 auto first = get_first_call_child();
@@ -2331,11 +2325,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 children.size() >= 2) {
                 auto rhs = convertExpr(children.back());
                 markSignedViewIfCursorMentions(rhs, children.back());
-                if (operator_uses_signed_view) {
-                    first->struct_base = unwrapSignedViewMemberAccess(first->struct_base);
-                    forceSignedView(first->struct_base);
-                    forceSignedView(rhs);
-                }
                 return make_binary(op, first->struct_base, rhs, convertType(type));
             }
             if (children.size() >= 3) {
@@ -2352,10 +2341,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                     auto rhs = operands[1].first;
                     markSignedViewIfCursorMentions(lhs, operands[0].second);
                     markSignedViewIfCursorMentions(rhs, operands[1].second);
-                    if (operator_uses_signed_view) {
-                        forceSignedView(lhs);
-                        forceSignedView(rhs);
-                    }
                     return make_binary(op, lhs, rhs, convertType(type));
                 }
             }
@@ -2365,10 +2350,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 auto rhs = convertExpr(children[children.size() - 1]);
                     markSignedViewIfCursorMentions(lhs, children[children.size() - 2]);
                     markSignedViewIfCursorMentions(rhs, children[children.size() - 1]);
-                    if (operator_uses_signed_view) {
-                        forceSignedView(lhs);
-                        forceSignedView(rhs);
-                    }
                     return make_binary(op, lhs, rhs, convertType(type));
                 }
             }

@@ -126,6 +126,10 @@ enum class OperandKind {
 struct Operand {
     OperandKind kind = OperandKind::Var;
     TypeInfo type;
+    // Use-level signed interpretation, e.g. an Int<N>.sint() operand.
+    // This is not part of symbol storage type and must travel with the
+    // operand into later operation-normalization stages.
+    bool signed_view = false;
     DebugLoc debug_loc;
     std::string literal_value;
     std::string var_name;

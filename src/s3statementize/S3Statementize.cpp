@@ -35,11 +35,21 @@ TypeInfo unknownType() {
     return type;
 }
 
+bool isSignedViewType(const TypeInfo& type) {
+    return type.hw_kind == "signed_view" ||
+           type.name.rfind("IntSignedView<", 0) == 0;
+}
+
 TypeInfo storageType(TypeInfo type) {
     type.is_reference = false;
     type.is_pointer = false;
     type.is_const = false;
     type.is_mutable = true;
+    if (isSignedViewType(type)) {
+        type.is_signed = false;
+        type.hw_kind = "Int";
+        if (type.width > 0) type.name = "Int<" + std::to_string(type.width) + ">";
+    }
     return canonicalize_bool_type(std::move(type));
 }
 
@@ -147,7 +157,8 @@ Operand varOperand(const std::string& name, SymbolId symbol, TypeInfo type, Debu
     out.kind = OperandKind::Var;
     out.var_name = name;
     out.var_symbol = symbol;
-    out.type = canonicalize_bool_type(std::move(type));
+    out.signed_view = isSignedViewType(type);
+    out.type = storageType(std::move(type));
     out.debug_loc = std::move(loc);
     return out;
 }
@@ -156,7 +167,8 @@ Operand literalOperand(const std::string& value, TypeInfo type, DebugLoc loc = {
     Operand out;
     out.kind = OperandKind::Literal;
     out.literal_value = value;
-    out.type = canonicalize_bool_type(std::move(type));
+    out.signed_view = isSignedViewType(type);
+    out.type = storageType(std::move(type));
     out.debug_loc = std::move(loc);
     return out;
 }
@@ -164,7 +176,8 @@ Operand literalOperand(const std::string& value, TypeInfo type, DebugLoc loc = {
 Operand lvalueOperand(LValue lvalue) {
     Operand out;
     out.kind = OperandKind::LValueRead;
-    out.type = lvalue.type;
+    out.signed_view = isSignedViewType(lvalue.type);
+    out.type = storageType(lvalue.type);
     out.debug_loc = lvalue.debug_loc;
     out.lvalue = std::move(lvalue);
     return out;
@@ -174,7 +187,7 @@ LValue varLValue(const std::string& name, SymbolId symbol, TypeInfo type, DebugL
     LValue out;
     out.root = name;
     out.root_symbol = symbol;
-    out.type = canonicalize_bool_type(std::move(type));
+    out.type = storageType(std::move(type));
     out.debug_loc = std::move(loc);
     return out;
 }
@@ -576,6 +589,13 @@ private:
         case ExprKind::Cast: {
             auto value = lowerExpr(expr->cast_expr);
             result.prelude = std::move(value.prelude);
+            if (isSignedViewType(expr->cast_type) || isSignedViewType(expr->type)) {
+                value.operand.signed_view = true;
+                value.operand.type = storageType(expr->cast_type.width > 0 ? expr->cast_type
+                                                                           : expr->type);
+                result.operand = std::move(value.operand);
+                return result;
+            }
             OpExpr op;
             op.kind = OpExpr::Kind::Cast;
             op.type = expr->type;
@@ -682,6 +702,13 @@ private:
         case s1apinorm::S1ExprKind::Cast: {
             auto value = lowerExpr(expr->cast_expr);
             result.prelude = std::move(value.prelude);
+            if (isSignedViewType(expr->cast_type) || isSignedViewType(expr->type)) {
+                value.operand.signed_view = true;
+                value.operand.type = storageType(expr->cast_type.width > 0 ? expr->cast_type
+                                                                           : expr->type);
+                result.operand = std::move(value.operand);
+                return result;
+            }
             OpExpr op;
             op.kind = OpExpr::Kind::Cast;
             op.type = expr->type;

@@ -38,10 +38,11 @@ bool typeEq(const S8Type& lhs, const S8Type& rhs) {
 
 bool typeSigned(const TypeInfo& type) {
     if (type.name == "bool" || type.hw_kind == "bool") return false;
-    if (type.hw_kind == "Int") return true;
-    if (type.hw_kind == "UInt") return false;
-    if (type.name.rfind("Int<", 0) == 0) return true;
-    if (type.name.rfind("UInt<", 0) == 0) return false;
+    if (type.hw_kind == "Int" || type.hw_kind == "UInt") return false;
+    if (type.name.rfind("Int<", 0) == 0 ||
+        type.name.rfind("UInt<", 0) == 0) {
+        return false;
+    }
     if (type.name == "unsigned int" || type.name == "uint8_t" ||
         type.name == "uint16_t" || type.name == "uint32_t" ||
         type.name == "uint64_t") {
@@ -53,6 +54,33 @@ bool typeSigned(const TypeInfo& type) {
         return true;
     }
     return type.is_signed;
+}
+
+bool hasSignedView(const S8Operand& operand) {
+    return operand.signed_view;
+}
+
+bool hasSignedView(const std::vector<S8Operand>& operands) {
+    for (const auto& operand : operands) {
+        if (operand.signed_view) return true;
+    }
+    return false;
+}
+
+[[noreturn]] void rejectSignedView(const std::string& op_name, DebugLoc loc) {
+    fail("signed_view operand is not allowed for " + op_name, std::move(loc));
+}
+
+void rejectSignedView(const std::string& op_name,
+                      const S8Operand& operand,
+                      DebugLoc loc) {
+    if (operand.signed_view) rejectSignedView(op_name, std::move(loc));
+}
+
+void rejectSignedView(const std::string& op_name,
+                      const std::vector<S8Operand>& operands,
+                      DebugLoc loc) {
+    if (hasSignedView(operands)) rejectSignedView(op_name, std::move(loc));
 }
 
 S8Type normType(const TypeInfo& type, DebugLoc loc = {}) {
@@ -313,11 +341,12 @@ SymbolId createTemp(Context& ctx, S8Type type, const std::string& hint) {
 S8Operand normalizeOperand(Context& ctx, const S7Operand& operand) {
     S8Operand out;
     out.type = normType(operand.type, operand.debug_loc);
-    out.signed_view = typeSigned(operand.type);
+    out.signed_view = operand.signed_view;
     out.debug_loc = operand.debug_loc;
     if (operand.kind == S7OperandKind::Literal) {
         out.kind = S8OperandKind::Literal;
-        out.literal = parseLiteral(operand.literal_value, out.type, out.signed_view,
+        out.literal = parseLiteral(operand.literal_value, out.type,
+                                   out.signed_view || typeSigned(operand.type),
                                    operand.debug_loc);
         ++ctx.summary.parsed_literals;
         return out;
@@ -422,21 +451,25 @@ Value normalizeUnary(Context& ctx,
     S8Operand operand = normalizeOperand(ctx, op.operands[0]);
     switch (op.unary_op) {
     case S7UnaryOp::LogicalNot: {
+        if (operand.signed_view) rejectSignedView("LogicalNot", op.debug_loc);
         auto bool_value = castToBool(ctx, std::move(operand), out, op.debug_loc).operand;
         return materializeOp(ctx, S8OpKind::LogicalNot, S8Type{S8TypeKind::Bool, 1},
                              {std::move(bool_value)}, out, op.debug_loc, "not");
     }
     case S7UnaryOp::BitNot: {
+        if (operand.signed_view) rejectSignedView("BitNot", op.debug_loc);
         auto v = castTo(ctx, std::move(operand), target_type, out, op.debug_loc).operand;
         return materializeOp(ctx, S8OpKind::BitNot, target_type, {std::move(v)},
                              out, op.debug_loc, "bitnot");
     }
     case S7UnaryOp::Negate: {
+        if (operand.signed_view) rejectSignedView("Negate", op.debug_loc);
         auto v = castTo(ctx, std::move(operand), target_type, out, op.debug_loc).operand;
         return materializeOp(ctx, S8OpKind::Neg, target_type, {std::move(v)},
                              out, op.debug_loc, "neg");
     }
     case S7UnaryOp::Plus:
+        if (operand.signed_view) rejectSignedView("UnaryPlus", op.debug_loc);
         return castTo(ctx, std::move(operand), target_type, out, op.debug_loc);
     }
     fail("Unknown unary op", op.debug_loc);
@@ -837,15 +870,13 @@ Value normalizeBinary(Context& ctx,
     switch (op.binary_op) {
     case S7BinaryOp::Div:
     case S7BinaryOp::Mod: {
+        if (lhs.signed_view || rhs.signed_view) {
+            rejectSignedView(op.binary_op == S7BinaryOp::Div ? "Div" : "Mod",
+                             op.debug_loc);
+        }
         auto divisor = literalUInt64(rhs);
         if (!divisor) {
             fail("Div/Mod are only supported when the second operand is a constant", op.debug_loc);
-        }
-        if (lhs.signed_view || rhs.signed_view) {
-            if (op.binary_op == S7BinaryOp::Div) {
-                return lowerSignedDivConst(ctx, std::move(lhs), rhs, out, op.debug_loc);
-            }
-            return lowerSignedModConst(ctx, std::move(lhs), rhs, out, op.debug_loc);
         }
         if (op.binary_op == S7BinaryOp::Div) {
             return lowerUnsignedDivConst(ctx, std::move(lhs), *divisor, out, op.debug_loc);
@@ -853,6 +884,7 @@ Value normalizeBinary(Context& ctx,
         return lowerUnsignedModConst(ctx, std::move(lhs), *divisor, out, op.debug_loc);
     }
     case S7BinaryOp::Add: {
+        if (lhs.signed_view || rhs.signed_view) rejectSignedView("Add", op.debug_loc);
         S8Type op_type{S8TypeKind::Int, addResultWidth(lhs, rhs)};
         auto l = castTo(ctx, lhs, op_type, out, op.debug_loc).operand;
         auto r = castTo(ctx, rhs, op_type, out, op.debug_loc).operand;
@@ -860,6 +892,7 @@ Value normalizeBinary(Context& ctx,
                              out, op.debug_loc, "add");
     }
     case S7BinaryOp::Sub: {
+        if (lhs.signed_view || rhs.signed_view) rejectSignedView("Sub", op.debug_loc);
         S8Type op_type{S8TypeKind::Int, subResultWidth(lhs, rhs)};
         auto l = castTo(ctx, lhs, op_type, out, op.debug_loc).operand;
         auto r = castTo(ctx, rhs, op_type, out, op.debug_loc).operand;
@@ -874,6 +907,7 @@ Value normalizeBinary(Context& ctx,
     case S7BinaryOp::BitAnd:
     case S7BinaryOp::BitOr:
     case S7BinaryOp::BitXor: {
+        if (lhs.signed_view || rhs.signed_view) rejectSignedView("bitwise op", op.debug_loc);
         int width = std::max({lhs.type.width, rhs.type.width, target_type.width});
         S8Type op_type{S8TypeKind::Int, width};
         auto l = castTo(ctx, lhs, op_type, out, op.debug_loc).operand;
@@ -885,6 +919,7 @@ Value normalizeBinary(Context& ctx,
     }
     case S7BinaryOp::LogicalAnd:
     case S7BinaryOp::LogicalOr: {
+        if (lhs.signed_view || rhs.signed_view) rejectSignedView("logical op", op.debug_loc);
         auto l = castToBool(ctx, lhs, out, op.debug_loc).operand;
         auto r = castToBool(ctx, rhs, out, op.debug_loc).operand;
         return materializeOp(ctx,
@@ -895,6 +930,10 @@ Value normalizeBinary(Context& ctx,
     }
     case S7BinaryOp::Shl:
     case S7BinaryOp::Shr: {
+        if (rhs.signed_view) rejectSignedView("shift amount", op.debug_loc);
+        if (op.binary_op == S7BinaryOp::Shl && lhs.signed_view) {
+            rejectSignedView("left shift", op.debug_loc);
+        }
         auto l = castTo(ctx, lhs, target_type, out, op.debug_loc).operand;
         S8OpKind kind = op.binary_op == S7BinaryOp::Shl ? S8OpKind::Shl :
             (l.signed_view ? S8OpKind::AShr : S8OpKind::LShr);
@@ -907,6 +946,10 @@ Value normalizeBinary(Context& ctx,
     case S7BinaryOp::Le:
     case S7BinaryOp::Gt:
     case S7BinaryOp::Ge: {
+        if ((op.binary_op == S7BinaryOp::Eq || op.binary_op == S7BinaryOp::Ne) &&
+            (lhs.signed_view || rhs.signed_view)) {
+            rejectSignedView("equality comparison", op.debug_loc);
+        }
         int width = std::max(lhs.type.width, rhs.type.width);
         S8Type cmp_type{S8TypeKind::Int, width};
         auto l = castTo(ctx, lhs, cmp_type, out, op.debug_loc).operand;
@@ -929,11 +972,14 @@ Value normalizeMux(Context& ctx,
                    S8Type target_type,
                    std::vector<S8Stmt>& out) {
     if (op.operands.size() != 3) fail("Malformed ternary op", op.debug_loc);
-    auto cond = castToBool(ctx, normalizeOperand(ctx, op.operands[0]), out, op.debug_loc).operand;
-    auto then_value = castTo(ctx, normalizeOperand(ctx, op.operands[1]), target_type,
-                             out, op.debug_loc).operand;
-    auto else_value = castTo(ctx, normalizeOperand(ctx, op.operands[2]), target_type,
-                             out, op.debug_loc).operand;
+    auto cond_in = normalizeOperand(ctx, op.operands[0]);
+    auto then_in = normalizeOperand(ctx, op.operands[1]);
+    auto else_in = normalizeOperand(ctx, op.operands[2]);
+    rejectSignedView("Mux condition", cond_in, op.debug_loc);
+    if (then_in.signed_view || else_in.signed_view) rejectSignedView("Mux value", op.debug_loc);
+    auto cond = castToBool(ctx, std::move(cond_in), out, op.debug_loc).operand;
+    auto then_value = castTo(ctx, std::move(then_in), target_type, out, op.debug_loc).operand;
+    auto else_value = castTo(ctx, std::move(else_in), target_type, out, op.debug_loc).operand;
     return materializeOp(ctx, S8OpKind::Mux, target_type,
                          {std::move(cond), std::move(then_value), std::move(else_value)},
                          out, op.debug_loc, "mux");
@@ -944,8 +990,13 @@ Value normalizeCast(Context& ctx,
                     S8Type target_type,
                     std::vector<S8Stmt>& out) {
     if (op.operands.size() != 1) fail("Malformed cast op", op.debug_loc);
-    return castTo(ctx, normalizeOperand(ctx, op.operands[0]), target_type,
-                  out, op.debug_loc);
+    auto operand = normalizeOperand(ctx, op.operands[0]);
+    if (operand.signed_view && target_type.width < operand.type.width) {
+        rejectSignedView("narrowing cast", op.debug_loc);
+    }
+    auto value = castTo(ctx, std::move(operand), target_type, out, op.debug_loc);
+    value.operand.signed_view = false;
+    return value;
 }
 
 S8Type hardwareRawType(const S7Operation& op, S8Type target_type,
@@ -1019,6 +1070,7 @@ Value normalizeHardware(Context& ctx,
     switch (op.hardware_op) {
     case S7HardwareOp::ZExt:
         checkArity(op, operands.size(), 1);
+        rejectSignedView("ZExt", operands, op.debug_loc);
         if (target_type.width < operands[0].type.width) fail("ZExt target narrower than source", op.debug_loc);
         break;
     case S7HardwareOp::SExt:
@@ -1028,31 +1080,35 @@ Value normalizeHardware(Context& ctx,
         break;
     case S7HardwareOp::Trunc:
         checkArity(op, operands.size(), 1);
+        rejectSignedView("Trunc", operands, op.debug_loc);
         if (target_type.width > operands[0].type.width) fail("Trunc target wider than source", op.debug_loc);
         break;
     case S7HardwareOp::Slice:
         checkArity(op, operands.size(), 1);
+        rejectSignedView("Slice", operands, op.debug_loc);
         if (op.lo < 0 || op.hi < op.lo || op.hi >= operands[0].type.width) {
             fail("Slice out of bounds", op.debug_loc);
         }
         break;
     case S7HardwareOp::BitSelect:
         checkArity(op, operands.size(), 1);
+        rejectSignedView("BitSelect", operands, op.debug_loc);
         if (op.bit < 0 || op.bit >= operands[0].type.width) fail("BitSelect out of bounds", op.debug_loc);
         break;
     case S7HardwareOp::DynamicSlice:
         checkArity(op, operands.size(), 2);
+        rejectSignedView("DynamicSlice", operands, op.debug_loc);
         if (target_type.width <= 0 || target_type.width > operands[0].type.width) {
             fail("DynamicSlice width out of bounds", op.debug_loc);
         }
-        operands[1].signed_view = false;
         break;
     case S7HardwareOp::DynamicBitSelect:
         checkArity(op, operands.size(), 2);
-        operands[1].signed_view = false;
+        rejectSignedView("DynamicBitSelect", operands, op.debug_loc);
         break;
     case S7HardwareOp::WriteSlice:
         checkArity(op, operands.size(), 2);
+        rejectSignedView("WriteSlice", operands, op.debug_loc);
         if (op.lo < 0 || op.hi < op.lo || op.hi >= operands[0].type.width) {
             fail("WriteSlice out of bounds", op.debug_loc);
         }
@@ -1061,32 +1117,36 @@ Value normalizeHardware(Context& ctx,
         break;
     case S7HardwareOp::WriteBit:
         checkArity(op, operands.size(), 2);
+        rejectSignedView("WriteBit", operands, op.debug_loc);
         if (op.bit < 0 || op.bit >= operands[0].type.width) fail("WriteBit out of bounds", op.debug_loc);
         operands[1] = castToBool(ctx, operands[1], out, op.debug_loc).operand;
         break;
     case S7HardwareOp::DynamicWriteSlice:
         checkArity(op, operands.size(), 3);
+        rejectSignedView("DynamicWriteSlice", operands, op.debug_loc);
         if (operands[2].type.width > operands[0].type.width) {
             fail("DynamicWriteSlice value wider than base", op.debug_loc);
         }
-        operands[1].signed_view = false;
         break;
     case S7HardwareOp::DynamicWriteBit:
         checkArity(op, operands.size(), 3);
-        operands[1].signed_view = false;
+        rejectSignedView("DynamicWriteBit", operands, op.debug_loc);
         operands[2] = castToBool(ctx, operands[2], out, op.debug_loc).operand;
         break;
     case S7HardwareOp::Concat:
         if (operands.empty()) fail("Concat expects at least one operand", op.debug_loc);
+        rejectSignedView("Concat", operands, op.debug_loc);
         break;
     case S7HardwareOp::Repeat:
         checkArity(op, operands.size(), 1);
+        rejectSignedView("Repeat", operands, op.debug_loc);
         if (op.times <= 0) fail("Repeat expects positive times", op.debug_loc);
         break;
     case S7HardwareOp::ReduceOr:
     case S7HardwareOp::ReduceAnd:
     case S7HardwareOp::ReduceXor:
         checkArity(op, operands.size(), 1);
+        rejectSignedView("Reduce", operands, op.debug_loc);
         break;
     }
 
@@ -1124,6 +1184,7 @@ void emitCastToTarget(Context& ctx,
                       SymbolId target,
                       std::vector<S8Stmt>& out,
                       DebugLoc loc) {
+    if (value.signed_view) rejectSignedView("assignment", loc);
     castTo(ctx, std::move(value), symbolType(ctx.output, target), out, loc, target);
 }
 
@@ -1134,10 +1195,12 @@ S8Stmt normalizeLookup(Context& ctx, const S7Stmt& stmt, std::vector<S8Stmt>& ou
     normalized.target = stmt.target;
     S8Type target_type = symbolType(ctx.output, stmt.target);
     normalized.lookup_index = normalizeOperand(ctx, stmt.lookup_index);
-    normalized.lookup_index.signed_view = false;
+    rejectSignedView("Lookup index", normalized.lookup_index, stmt.debug_loc);
     for (const auto& elem : stmt.lookup_elements) {
+        auto operand = normalizeOperand(ctx, elem);
+        rejectSignedView("Lookup element", operand, stmt.debug_loc);
         normalized.lookup_elements.push_back(
-            castTo(ctx, normalizeOperand(ctx, elem), target_type, out, stmt.debug_loc).operand);
+            castTo(ctx, std::move(operand), target_type, out, stmt.debug_loc).operand);
     }
     return normalized;
 }
@@ -1153,12 +1216,16 @@ S8Stmt normalizeLookupWrite(Context& ctx, const S7Stmt& stmt, std::vector<S8Stmt
     normalized.kind = S8StmtKind::LookupWrite;
     normalized.debug_loc = stmt.debug_loc;
     normalized.lookup_index = normalizeOperand(ctx, stmt.lookup_index);
-    normalized.lookup_index.signed_view = false;
-    normalized.lookup_value = castTo(ctx, normalizeOperand(ctx, stmt.lookup_value),
+    rejectSignedView("LookupWrite index", normalized.lookup_index, stmt.debug_loc);
+    auto lookup_value = normalizeOperand(ctx, stmt.lookup_value);
+    rejectSignedView("LookupWrite value", lookup_value, stmt.debug_loc);
+    normalized.lookup_value = castTo(ctx, std::move(lookup_value),
                                      wide, out, stmt.debug_loc).operand;
     for (const auto& elem : stmt.lookup_elements) {
+        auto operand = normalizeOperand(ctx, elem);
+        rejectSignedView("LookupWrite element", operand, stmt.debug_loc);
         normalized.lookup_elements.push_back(
-            castTo(ctx, normalizeOperand(ctx, elem), wide, out, stmt.debug_loc).operand);
+            castTo(ctx, std::move(operand), wide, out, stmt.debug_loc).operand);
     }
     normalized.lookup_write_targets = stmt.lookup_write_targets;
     return normalized;

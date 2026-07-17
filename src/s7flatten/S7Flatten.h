@@ -54,6 +54,9 @@ enum class S7OperandKind {
 struct S7Operand {
     S7OperandKind kind = S7OperandKind::Literal;
     TypeInfo type;
+    // Use-level signed interpretation carried from S3. Symbols remain
+    // function-unique storage objects; this flag belongs to this operand use.
+    bool signed_view = false;
     DebugLoc debug_loc;
     std::string literal_value;
     SymbolId symbol = -1;

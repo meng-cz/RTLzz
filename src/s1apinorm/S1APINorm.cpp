@@ -735,8 +735,10 @@ private:
             TypeInfo target = value ? value->type : expr.type;
             target.is_signed = true;
             target.is_hw_int = true;
-            target.hw_kind = "Int";
-            if (target.width > 0) target.name = "Int<" + std::to_string(target.width) + ">";
+            target.hw_kind = "signed_view";
+            if (target.width > 0) {
+                target.name = "IntSignedView<" + std::to_string(target.width) + ">";
+            }
             ++stats.normalized_calls;
             return makeCast(std::move(value), std::move(target));
         }
