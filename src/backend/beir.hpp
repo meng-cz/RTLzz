@@ -9,10 +9,6 @@
 #include <unordered_set>
 #include <vector>
 
-namespace pred {
-struct PredicateProgram;
-}
-
 namespace pred::beir {
 
 using NodeId = std::uint64_t;
@@ -280,8 +276,6 @@ private:
     void analyzeValueFacts();
 };
 
-Program buildProgram(const PredicateProgram& source, bool optimize = true);
 std::string emitText(const Program& program);
-std::string emitText(const PredicateProgram& source);
 
 } // namespace pred::beir

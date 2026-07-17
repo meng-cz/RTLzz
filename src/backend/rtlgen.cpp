@@ -1,5 +1,4 @@
 #include "backend/rtlgen.hpp"
-#include "predicate/PredicateIR.h"
 
 #include <algorithm>
 #include <cctype>
@@ -684,10 +683,6 @@ private:
 
 std::string emitSystemVerilog(const beir::Program& program) {
     return Emitter(program).emit();
-}
-
-std::string emitSystemVerilog(const PredicateProgram& source) {
-    return emitSystemVerilog(beir::buildProgram(source));
 }
 
 } // namespace pred::rtlgen
