@@ -166,6 +166,13 @@ def cxx_scalar_type(t: dict[str, Any], source_type: str | None = None) -> str:
     raise ValueError(f"unsupported port scalar type for C++ harness: {t}")
 
 
+def int_width_from_scalar(scalar: str) -> int | None:
+    match = re.fullmatch(r"Int\s*<\s*(\d+)\s*>", scalar)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def cxx_port_type(t: dict[str, Any], source_type: str | None = None) -> str:
     if source_type and ("std::array<" in source_type or "array<" in source_type):
         return source_type
@@ -196,7 +203,10 @@ def assign_from_argv(expr: str, t: dict[str, Any], argv_index: int,
     scalar = cxx_scalar_type(t, source_type)
     if scalar == "bool":
         return f"{expr} = std::strtoull(argv[{argv_index}], nullptr, 0) != 0;"
-    if scalar.startswith("Int<"):
+    int_width = int_width_from_scalar(scalar)
+    if int_width is not None and int_width > 64:
+        return f"{expr} = int_from_decimal<{int_width}>(argv[{argv_index}]);"
+    if int_width is not None:
         return f"{expr} = {scalar}(std::strtoull(argv[{argv_index}], nullptr, 0));"
     if scalar.startswith("int") or scalar in {"char", "short", "int", "long", "long long"}:
         return f"{expr} = static_cast<{scalar}>(std::strtoll(argv[{argv_index}], nullptr, 0));"
@@ -207,7 +217,10 @@ def cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
     scalar = cxx_scalar_type(t)
     if scalar == "bool":
         return f"({expr} ? 1ULL : 0ULL)"
-    if scalar.startswith("Int<"):
+    int_width = int_width_from_scalar(scalar)
+    if int_width is not None and int_width > 64:
+        return f"hex_from_int<{int_width}>({expr})"
+    if int_width is not None:
         return f"static_cast<unsigned long long>({expr}.template to<unsigned long long>())"
     return f"static_cast<unsigned long long>({expr})"
 
@@ -231,8 +244,69 @@ def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path
         "#include <array>",
         "#include <cstdint>",
         "#include <cstdlib>",
+        "#include <iomanip>",
         "#include <iostream>",
+        "#include <sstream>",
+        "#include <vector>",
         f'#include "{source}"',
+        "",
+        "static std::vector<uint64_t> parse_words64(const char* text, int width) {",
+        "  int nwords = (width + 63) / 64;",
+        "  std::vector<uint64_t> words(nwords, 0);",
+        "  for (const char* p = text; *p; ++p) {",
+        "    if (*p < '0' || *p > '9') continue;",
+        "    unsigned __int128 carry = static_cast<unsigned __int128>(*p - '0');",
+        "    for (int i = 0; i < nwords; ++i) {",
+        "      unsigned __int128 next = static_cast<unsigned __int128>(words[i]) * 10 + carry;",
+        "      words[i] = static_cast<uint64_t>(next);",
+        "      carry = next >> 64;",
+        "    }",
+        "  }",
+        "  int top_bits = width % 64;",
+        "  if (top_bits != 0 && nwords > 0) words[nwords - 1] &= ((uint64_t{1} << top_bits) - 1ULL);",
+        "  return words;",
+        "}",
+        "",
+        "template <uint32_t Width, uint32_t Lo>",
+        "static void assign_int_words(Int<Width>& value, const std::vector<uint64_t>& words) {",
+        "  if constexpr (Lo < Width) {",
+        "    constexpr uint32_t chunk = (Width - Lo >= 64) ? 64 : (Width - Lo);",
+        "    value.template at<Lo + chunk - 1, Lo>() = Int<chunk>(words[Lo / 64]);",
+        "    assign_int_words<Width, Lo + 64>(value, words);",
+        "  }",
+        "}",
+        "",
+        "template <uint32_t Width>",
+        "static Int<Width> int_from_decimal(const char* text) {",
+        "  Int<Width> value(0);",
+        "  auto words = parse_words64(text, Width);",
+        "  assign_int_words<Width, 0>(value, words);",
+        "  return value;",
+        "}",
+        "",
+        "template <uint32_t Width, uint32_t Lo>",
+        "static void collect_int_words(const Int<Width>& value, std::vector<uint64_t>& words) {",
+        "  if constexpr (Lo < Width) {",
+        "    constexpr uint32_t chunk = (Width - Lo >= 64) ? 64 : (Width - Lo);",
+        "    auto part = Int<chunk>(value.template at<Lo + chunk - 1, Lo>());",
+        "    words.push_back(part.template to<uint64_t>());",
+        "    collect_int_words<Width, Lo + 64>(value, words);",
+        "  }",
+        "}",
+        "",
+        "template <uint32_t Width>",
+        "static std::string hex_from_int(const Int<Width>& value) {",
+        "  std::vector<uint64_t> words;",
+        "  collect_int_words<Width, 0>(value, words);",
+        "  int top = static_cast<int>(words.size()) - 1;",
+        "  while (top > 0 && words[top] == 0) --top;",
+        "  std::ostringstream os;",
+        "  os << \"0x\" << std::hex << words[top];",
+        "  for (int i = top - 1; i >= 0; --i) {",
+        "    os << std::setw(16) << std::setfill('0') << words[i];",
+        "  }",
+        "  return os.str();",
+        "}",
         "",
         "int main(int argc, char** argv) {",
     ]

@@ -16,6 +16,9 @@ void hls_main(Int<8> a,
               Int<16> word,
               Int<3> sh,
               Int<2> dyn,
+              Int<96> wide_a,
+              Int<96> wide_b,
+              Int<6> wide_sh,
               bool sel,
               Int<9>& arith_add,
               Int<8>& arith_sub_neg,
@@ -49,7 +52,22 @@ void hls_main(Int<8> a,
               bool& stdmix_cmp_u8,
               bool& stdmix_cmp_s8,
               Int<16>& stdmix_assign_u8,
-              Int<16>& stdmix_assign_s8) {
+              Int<16>& stdmix_assign_s8,
+              Int<97>& wide_add,
+              Int<96>& wide_sub,
+              Int<192>& wide_mul,
+              Int<96>& wide_bit_mix,
+              Int<96>& wide_shift_logical,
+              Int<96>& wide_shift_signed,
+              bool& wide_cmp_unsigned,
+              bool& wide_cmp_signed,
+              Int<128>& wide_cat,
+              Int<128>& wide_repeat,
+              Int<128>& wide_ext_mix,
+              Int<96>& wide_dynamic,
+              bool& wide_reduce_any,
+              bool& wide_reduce_all,
+              bool& wide_reduce_parity) {
     Int<8> low = Int<8>(word.at<7, 0>());
     Int<8> high = Int<8>(word.at<15, 8>());
 
@@ -105,4 +123,27 @@ void hls_main(Int<8> a,
     stdmix_cmp_s8 = b.sint() < std_s8;
     stdmix_assign_u8 = std_u8;
     stdmix_assign_s8 = std_s8;
+
+    Int<96> wide_mix = wide_a ^ wide_b;
+    Int<128> wide_ext = Int<128>(wide_a);
+    Int<80> wide_low80 = Int<80>(wide_a.at<79, 0>());
+    Int<48> wide_high48 = Int<48>(wide_b.at<95, 48>());
+    Int<64> wide_low64 = Int<64>(wide_mix.at<63, 0>());
+    Int<16> wide_dyn16 = wide_a.pick<16>(dyn);
+
+    wide_add = wide_a + wide_b;
+    wide_sub = wide_a - wide_b;
+    wide_mul = wide_a * wide_b;
+    wide_bit_mix = (wide_a & wide_b) | (~wide_b);
+    wide_shift_logical = wide_a >> wide_sh;
+    wide_shift_signed = wide_a.sint() >> wide_sh;
+    wide_cmp_unsigned = wide_a > wide_b;
+    wide_cmp_signed = wide_a.sint() < wide_b.sint();
+    wide_cat = Cat(wide_low80, wide_high48);
+    wide_repeat = Repeat<2>(wide_low64);
+    wide_ext_mix = wide_ext ^ wide_cat;
+    wide_dynamic = Int<96>(wide_dyn16);
+    wide_reduce_any = ReduceOr(wide_a);
+    wide_reduce_all = ReduceAnd(wide_b);
+    wide_reduce_parity = ReduceXor(wide_mix);
 }
