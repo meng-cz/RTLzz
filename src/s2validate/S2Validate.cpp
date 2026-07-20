@@ -602,17 +602,28 @@ void validateStmtList(Context& ctx,
     }
 }
 
+void collectNestedLambdas(Context& ctx,
+                          const FunctionAST& fn,
+                          std::unordered_set<std::string>& seen) {
+    for (const auto& [name, lambda] : fn.lambdas) {
+        if (!lambda) continue;
+        if (seen.count(name)) continue;
+        seen.insert(name);
+        ctx.functions.push_back(FunctionView{lambda.get(), FunctionKind::Lambda,
+                                             name, ctx.functions.size()});
+        collectNestedLambdas(ctx, *lambda, seen);
+    }
+}
+
 void collectFunctions(Context& ctx) {
+    std::unordered_set<std::string> seen_lambdas;
     ctx.functions.push_back(FunctionView{&ctx.top, FunctionKind::Top, ctx.top.name, 0});
+    collectNestedLambdas(ctx, ctx.top, seen_lambdas);
     for (const auto& helper : ctx.top.helpers) {
         if (!helper) continue;
         ctx.functions.push_back(FunctionView{helper.get(), FunctionKind::Helper,
                                              helper->name, ctx.functions.size()});
-    }
-    for (const auto& [name, lambda] : ctx.top.lambdas) {
-        if (!lambda) continue;
-        ctx.functions.push_back(FunctionView{lambda.get(), FunctionKind::Lambda,
-                                             name, ctx.functions.size()});
+        collectNestedLambdas(ctx, *helper, seen_lambdas);
     }
     for (const auto& view : ctx.functions) {
         ctx.functions_by_name[view.name].push_back(view.id);

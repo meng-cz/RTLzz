@@ -53,6 +53,9 @@ void hls_main(Int<8> a,
               bool& stdmix_cmp_s8,
               Int<16>& stdmix_assign_u8,
               Int<16>& stdmix_assign_s8,
+              Int<32>& std_to_plain_u32,
+              Int<32>& std_to_template_u32,
+              bool& std_to_u32_equal,
               Int<97>& wide_add,
               Int<96>& wide_sub,
               Int<192>& wide_mul,
@@ -123,6 +126,12 @@ void hls_main(Int<8> a,
     stdmix_cmp_s8 = b.sint() < std_s8;
     stdmix_assign_u8 = std_u8;
     stdmix_assign_s8 = std_s8;
+    Int<32> std_to_src = Cat(word, word);
+    uint32_t std_u32_plain = std_to_src.to<uint32_t>();
+    uint32_t std_u32_template = std_to_src.template to<uint32_t>();
+    std_to_plain_u32 = std_u32_plain;
+    std_to_template_u32 = std_u32_template;
+    std_to_u32_equal = std_u32_plain == std_u32_template;
 
     Int<96> wide_mix = wide_a ^ wide_b;
     Int<128> wide_ext = Int<128>(wide_a);

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <regex>
 #include <sstream>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -294,6 +295,21 @@ void appendFunction(S0Program& program,
     program.functions.push_back(std::move(out));
 }
 
+void appendLambdasRecursive(S0Program& program,
+                            const FunctionAST& fn,
+                            ConvertCtx& ctx,
+                            std::unordered_set<std::string>& seen) {
+    for (const auto& [name, lambda] : fn.lambdas) {
+        if (!lambda || seen.count(name)) continue;
+        seen.insert(name);
+        appendFunction(program, *lambda, S0FunctionKind::Lambda, ctx);
+        appendLambdasRecursive(program, *lambda, ctx, seen);
+    }
+    for (const auto& helper : fn.helpers) {
+        if (helper) appendLambdasRecursive(program, *helper, ctx, seen);
+    }
+}
+
 S0Program buildProgramFromNative(FunctionAST fn, const std::string& source_name) {
     S0Program program;
     program.source_name = source_name;
@@ -305,9 +321,8 @@ S0Program buildProgramFromNative(FunctionAST fn, const std::string& source_name)
     for (const auto& helper : fn.helpers) {
         if (helper) appendFunction(program, *helper, S0FunctionKind::Helper, ctx);
     }
-    for (const auto& [_, lambda] : fn.lambdas) {
-        if (lambda) appendFunction(program, *lambda, S0FunctionKind::Lambda, ctx);
-    }
+    std::unordered_set<std::string> seen_lambdas;
+    appendLambdasRecursive(program, fn, ctx, seen_lambdas);
     program.surface_ast = std::move(fn);
     return program;
 }
@@ -380,7 +395,7 @@ const std::unordered_set<std::string>& lambdaRewriteKeywords() {
         "switch", "true", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
         "int8_t", "int16_t", "int32_t", "int64_t", "unsigned", "void",
         "while", "Int", "Cat", "Repeat", "ReduceOr", "ReduceAnd",
-        "ReduceXor",
+        "ReduceXor", "typename", "decltype", "std",
     };
     return keywords;
 }
@@ -432,6 +447,27 @@ std::unordered_set<std::string> localDeclarationNames(const std::string& body) {
     return out;
 }
 
+bool isQualifiedIdentifierUse(const std::string& text,
+                              std::size_t pos,
+                              std::size_t after) {
+    return (pos >= 2 && text[pos - 1] == ':' && text[pos - 2] == ':') ||
+           (after + 1 < text.size() && text[after] == ':' && text[after + 1] == ':');
+}
+
+bool isMemberTemplateNameUse(const std::string& text, std::size_t before) {
+    constexpr std::string_view keyword = "template";
+    if (before < keyword.size()) return false;
+    std::size_t keyword_begin = before - keyword.size();
+    if (text.compare(keyword_begin, keyword.size(), keyword) != 0) return false;
+    if (keyword_begin > 0 && identChar(text[keyword_begin - 1])) return false;
+    std::size_t member_op = keyword_begin;
+    while (member_op > 0 && std::isspace(static_cast<unsigned char>(text[member_op - 1]))) {
+        --member_op;
+    }
+    return (member_op > 0 && text[member_op - 1] == '.') ||
+           (member_op >= 2 && text[member_op - 2] == '-' && text[member_op - 1] == '>');
+}
+
 bool identifierHasNonCallUse(const std::string& text, const std::string& name) {
     std::size_t pos = 0;
     while ((pos = text.find(name, pos)) != std::string::npos) {
@@ -444,9 +480,17 @@ bool identifierHasNonCallUse(const std::string& text, const std::string& name) {
             pos = after;
             continue;
         }
+        if (isQualifiedIdentifierUse(text, pos, after)) {
+            pos = after;
+            continue;
+        }
         std::size_t before = pos;
         while (before > 0 && std::isspace(static_cast<unsigned char>(text[before - 1]))) {
             --before;
+        }
+        if (isMemberTemplateNameUse(text, before)) {
+            pos = after;
+            continue;
         }
         if (before > 0 && text[before - 1] == '.') {
             pos = after;
@@ -546,14 +590,18 @@ std::size_t findMatching(const std::string& text,
 }
 
 std::string findIdentifierType(const std::string& prefix, const std::string& name) {
-    std::regex pattern("(?:^|[\\(,;\\{\\n])\\s*([A-Za-z_][A-Za-z0-9_:<> ]*(?:[&*]\\s*)?)\\s+" + name + "\\b");
+    std::regex pattern(
+        "(?:^|[\\(,;\\{\\n])\\s*"
+        "([A-Za-z_][A-Za-z0-9_:<> \t]*?)"
+        "(?:(\\s*[&*]+\\s*)|\\s+)" + name + "\\b");
     std::string found;
     for (std::sregex_iterator it(prefix.begin(), prefix.end(), pattern), end; it != end; ++it) {
-        std::string candidate = trim((*it)[1].str());
+        std::string candidate = trim((*it)[1].str() + (*it)[2].str());
         if (candidate.empty()) continue;
         if (candidate.find_first_of("=;(),{}[]") != std::string::npos) continue;
         if (candidate == "return" || candidate == "if" || candidate == "for" ||
-            candidate == "while" || candidate == "auto") {
+            candidate == "while" || candidate == "auto" || candidate == "using" ||
+            candidate.rfind("using ", 0) == 0) {
             continue;
         }
         found = std::move(candidate);
@@ -603,12 +651,20 @@ std::optional<LambdaRewrite> parseLambdaRewrite(const std::string& source,
     if (params_end == std::string::npos) return std::nullopt;
     std::string params = trim(source.substr(pos + 1, params_end - pos - 1));
     pos = skipSpaces(source, params_end + 1);
-    if (source.compare(pos, 2, "->") != 0) return std::nullopt;
-    pos = skipSpaces(source, pos + 2);
-    std::size_t ret_begin = pos;
-    std::size_t body_begin = source.find('{', pos);
-    if (body_begin == std::string::npos) return std::nullopt;
-    std::string return_type = trim(source.substr(ret_begin, body_begin - ret_begin));
+    std::string return_type;
+    std::size_t body_begin = std::string::npos;
+    if (source.compare(pos, 2, "->") == 0) {
+        pos = skipSpaces(source, pos + 2);
+        std::size_t ret_begin = pos;
+        body_begin = source.find('{', pos);
+        if (body_begin == std::string::npos) return std::nullopt;
+        return_type = trim(source.substr(ret_begin, body_begin - ret_begin));
+    } else if (pos < source.size() && source[pos] == '{') {
+        return_type = "void";
+        body_begin = pos;
+    } else {
+        return std::nullopt;
+    }
     std::size_t body_end = findMatching(source, body_begin, '{', '}');
     if (body_end == std::string::npos) return std::nullopt;
     pos = skipSpaces(source, body_end + 1);
@@ -708,7 +764,10 @@ std::string declarationForRewrite(const LambdaRewrite& rewrite) {
 std::string captureArgPrefix(const LambdaRewrite& rewrite) {
     if (rewrite.captures.empty()) return "";
     std::ostringstream os;
-    for (const auto& capture : rewrite.captures) os << capture << ", ";
+    for (std::size_t i = 0; i < rewrite.captures.size(); ++i) {
+        if (i) os << ", ";
+        os << rewrite.captures[i];
+    }
     return os.str();
 }
 
@@ -732,9 +791,16 @@ void replaceLambdaCalls(std::string& source, const LambdaRewrite& rewrite) {
             pos = after;
             continue;
         }
-        source.replace(pos, call_pos - pos + 1,
-                       rewrite.generated_name + "(" + prefix);
-        pos += rewrite.generated_name.size() + prefix.size() + 1;
+        std::string replacement = rewrite.generated_name + "(";
+        if (!prefix.empty()) {
+            replacement += prefix;
+            std::size_t first_arg = skipSpaces(source, call_pos + 1);
+            if (first_arg < source.size() && source[first_arg] != ')') {
+                replacement += ", ";
+            }
+        }
+        source.replace(pos, call_pos - pos + 1, replacement);
+        pos += replacement.size();
     }
 }
 
@@ -923,16 +989,6 @@ S0Result parseProgram(const std::string& source_name,
         if (!native_source_text) {
             native_source_text = readFile(source_name);
         }
-        if (native_source_text) {
-            std::string rewrite_error;
-            auto rewritten = rewriteLocalLambdasForNativeParser(*native_source_text, rewrite_error);
-            if (!rewritten) {
-                result.error = makeDiagnostic(S0Substage::ExprStmtBuild, rewrite_error);
-                return result;
-            }
-            native_source_text = std::move(*rewritten);
-        }
-
         NativeBuildResult parsed;
         if (native_source_text) {
             parsed = buildV2ASTFromSourceText(source_name, *native_source_text,

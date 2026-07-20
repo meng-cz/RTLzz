@@ -418,6 +418,7 @@ static StmtPtr convertStmt(CXCursor cursor);
 static StmtPtr convertStmtImpl(CXCursor cursor);
 static std::vector<StmtPtr> convertChildren(CXCursor cursor);
 static std::string cursorLocation(CXCursor cursor);
+static void collectLocalLambdas(CXCursor cursor, FunctionAST& func);
 
 [[noreturn]] static void failUnsupported(CXCursor cursor, const std::string& message) {
     throw std::runtime_error(message + " at " + cursorLocation(cursor));
@@ -488,7 +489,24 @@ static unsigned sourceRangeLineSpan(CXSourceRange range) {
 static std::unordered_map<std::string, std::string> lambda_operator_usr_to_name;
 static std::unordered_map<std::string, std::string> lambda_operator_location_to_name;
 static std::unordered_map<std::string, std::string> lambda_operator_signature_to_name;
+static std::unordered_map<std::string, std::string> lambda_var_usr_to_name;
+static std::unordered_map<std::string, std::string> lambda_var_location_to_name;
+static std::unordered_map<std::string, std::string> lambda_source_name_to_unique_name;
 static std::unordered_map<std::string, long long> global_const_int_values;
+static int lambda_unique_counter = 0;
+
+struct LambdaCaptureInfo {
+    std::string name;
+    TypeInfo type;
+    ParamPassingKind passing = ParamPassingKind::Value;
+    ParamDirection direction = ParamDirection::Input;
+    bool is_reference = false;
+    bool is_const = false;
+};
+
+static std::unordered_map<std::string, std::vector<LambdaCaptureInfo>> lambda_captures_by_name;
+static std::unordered_map<std::string, std::size_t> lambda_param_count_by_name;
+static std::unordered_set<std::string> known_lambda_names;
 
 static std::string cursorText(CXCursor cursor, bool allow_large = false) {
     CXSourceRange range = clang_getCursorExtent(cursor);
@@ -695,8 +713,92 @@ static std::string normalizeOperatorFunctionType(std::string type) {
     return "";
 }
 
+static std::string sanitizeLambdaNamePart(std::string text) {
+    for (char& ch : text) {
+        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_') ch = '_';
+    }
+    if (text.empty()) text = "lambda";
+    return text;
+}
+
+static std::string lambdaVarKey(CXCursor var_cursor) {
+    std::string usr = cursorUsr(var_cursor);
+    if (!usr.empty()) return "usr:" + usr;
+    return "loc:" + cursorLocation(var_cursor);
+}
+
+static std::string lambdaNameForVarCursor(CXCursor var_cursor) {
+    std::string usr = cursorUsr(var_cursor);
+    if (!usr.empty()) {
+        auto it = lambda_var_usr_to_name.find(usr);
+        if (it != lambda_var_usr_to_name.end()) return it->second;
+    }
+    std::string loc = cursorLocation(var_cursor);
+    auto loc_it = lambda_var_location_to_name.find(loc);
+    if (loc_it != lambda_var_location_to_name.end()) return loc_it->second;
+    return "";
+}
+
+static std::string ensureLambdaNameForVar(CXCursor var_cursor,
+                                          const std::string& source_name) {
+    std::string existing = lambdaNameForVarCursor(var_cursor);
+    if (!existing.empty()) return existing;
+
+    std::string generated = "__s0_lambda_" + sanitizeLambdaNamePart(source_name) +
+                            "_" + std::to_string(lambda_unique_counter++);
+    std::string usr = cursorUsr(var_cursor);
+    if (!usr.empty()) lambda_var_usr_to_name[usr] = generated;
+    std::string loc = cursorLocation(var_cursor);
+    if (!loc.empty()) lambda_var_location_to_name[loc] = generated;
+    auto [source_it, inserted] =
+        lambda_source_name_to_unique_name.emplace(source_name, generated);
+    if (!inserted && source_it->second != generated) source_it->second.clear();
+    known_lambda_names.insert(generated);
+    return generated;
+}
+
+static std::string lambdaNameForReferencedVar(CXCursor cursor) {
+    CXCursor referenced = clang_getCursorReferenced(cursor);
+    if (clang_Cursor_isNull(referenced)) return "";
+    if (clang_getCursorKind(referenced) != CXCursor_VarDecl) return "";
+    return lambdaNameForVarCursor(referenced);
+}
+
+static std::string lambdaNameForReceiverCursor(CXCursor cursor) {
+    if (auto name = lambdaNameForReferencedVar(cursor); !name.empty()) return name;
+    for (auto& child : getChildren(cursor)) {
+        if (auto name = lambdaNameForReceiverCursor(child); !name.empty()) return name;
+    }
+    return "";
+}
+
+static std::string lambdaNameFromCallSourceText(CXCursor cursor) {
+    std::string text = cursorText(cursor);
+    for (std::size_t pos = 0; pos < text.size(); ++pos) {
+        if (!(std::isalpha(static_cast<unsigned char>(text[pos])) || text[pos] == '_')) {
+            continue;
+        }
+        std::size_t begin = pos++;
+        while (pos < text.size() &&
+               (std::isalnum(static_cast<unsigned char>(text[pos])) || text[pos] == '_')) {
+            ++pos;
+        }
+        std::string source_name = text.substr(begin, pos - begin);
+        std::size_t after = pos;
+        while (after < text.size() &&
+               std::isspace(static_cast<unsigned char>(text[after]))) {
+            ++after;
+        }
+        if (after >= text.size() || text[after] != '(') continue;
+        auto it = lambda_source_name_to_unique_name.find(source_name);
+        if (it != lambda_source_name_to_unique_name.end()) return it->second;
+    }
+    return "";
+}
+
 static void registerLambdaOperatorName(CXCursor lambda_cursor, const std::string& name) {
     if (name.empty()) return;
+    known_lambda_names.insert(name);
     clang_visitChildren(lambda_cursor, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
         auto* name = static_cast<const std::string*>(data);
         if (clang_getCursorKind(c) == CXCursor_CXXMethod &&
@@ -741,9 +843,10 @@ static CXCursor findLambdaExpr(CXCursor cursor) {
 
 static void collectLambdaOperatorNames(CXCursor cursor) {
     if (clang_getCursorKind(cursor) == CXCursor_VarDecl) {
-        std::string name = cxToStr(clang_getCursorSpelling(cursor));
+        std::string source_name = cxToStr(clang_getCursorSpelling(cursor));
         CXCursor lambda = findLambdaExpr(cursor);
         if (!clang_equalCursors(lambda, clang_getNullCursor())) {
+            std::string name = ensureLambdaNameForVar(cursor, source_name);
             registerLambdaOperatorName(lambda, name);
         }
     }
@@ -762,9 +865,6 @@ static std::string lambdaNameForOperatorCursor(CXCursor cursor) {
         std::string location = cursorLocation(referenced);
         auto loc_it = lambda_operator_location_to_name.find(location);
         if (loc_it != lambda_operator_location_to_name.end() && !loc_it->second.empty()) return loc_it->second;
-        std::string sig = operatorSignature(referenced);
-        auto sig_it = lambda_operator_signature_to_name.find(sig);
-        if (sig_it != lambda_operator_signature_to_name.end() && !sig_it->second.empty()) return sig_it->second;
     }
     for (auto& child : getChildren(cursor)) {
         std::string name = lambdaNameForOperatorCursor(child);
@@ -895,6 +995,133 @@ static ExprPtr makeSurfaceCallFromCursors(std::string callee,
     return makeSurfaceCall(std::move(callee), std::move(type), std::move(args), std::move(loc));
 }
 
+static bool hasParamNamed(const FunctionAST& fn, const std::string& name) {
+    return std::any_of(fn.params.begin(), fn.params.end(), [&](const ParamDecl& param) {
+        return param.name == name;
+    });
+}
+
+static bool isLambdaClosureCapture(CXCursor capture_ref) {
+    return !lambdaNameForReferencedVar(capture_ref).empty();
+}
+
+static ParamDirection directionForCapturePassing(ParamPassingKind passing) {
+    return passing == ParamPassingKind::MutableRef || passing == ParamPassingKind::Pointer
+        ? ParamDirection::Output
+        : ParamDirection::Input;
+}
+
+static std::optional<LambdaCaptureInfo> captureInfoFromRefAndField(CXCursor ref,
+                                                                   CXCursor field) {
+    if (isLambdaClosureCapture(ref)) return std::nullopt;
+    CXCursor referenced = clang_getCursorReferenced(ref);
+    if (clang_Cursor_isNull(referenced)) return std::nullopt;
+    CXCursorKind referenced_kind = clang_getCursorKind(referenced);
+    if (referenced_kind != CXCursor_VarDecl && referenced_kind != CXCursor_ParmDecl) {
+        return std::nullopt;
+    }
+    std::string name = cxToStr(clang_getCursorSpelling(ref));
+    if (name.empty()) return std::nullopt;
+
+    CXType field_type = clang_Cursor_isNull(field)
+        ? clang_getCursorType(ref)
+        : clang_getCursorType(field);
+    LambdaCaptureInfo capture;
+    capture.name = name;
+    capture.type = convertType(field_type);
+    capture.passing = classifyParamPassing(field_type);
+    capture.direction = directionForCapturePassing(capture.passing);
+    capture.is_reference = capture.passing == ParamPassingKind::ConstRef ||
+                           capture.passing == ParamPassingKind::MutableRef;
+    capture.is_const = capture.type.is_const;
+    return capture;
+}
+
+static std::vector<LambdaCaptureInfo> collectLambdaCaptures(CXCursor lambda_cursor) {
+    std::vector<CXCursor> fields;
+    std::vector<CXCursor> refs;
+    for (auto& child : getChildren(lambda_cursor)) {
+        CXCursorKind kind = clang_getCursorKind(child);
+        if (kind == CXCursor_FieldDecl) {
+            fields.push_back(child);
+        } else if (kind == CXCursor_DeclRefExpr) {
+            refs.push_back(child);
+        }
+    }
+
+    std::vector<LambdaCaptureInfo> captures;
+    std::unordered_set<std::string> seen;
+    for (std::size_t i = 0; i < refs.size(); ++i) {
+        CXCursor field = i < fields.size() ? fields[i] : clang_getNullCursor();
+        auto capture = captureInfoFromRefAndField(refs[i], field);
+        if (!capture || seen.count(capture->name)) continue;
+        seen.insert(capture->name);
+        captures.push_back(std::move(*capture));
+    }
+    return captures;
+}
+
+static ParamDecl paramFromCapture(const LambdaCaptureInfo& capture) {
+    ParamDecl param;
+    param.name = capture.name;
+    param.type = capture.type;
+    param.passing = capture.passing;
+    param.direction = capture.direction;
+    param.is_output = param.direction != ParamDirection::Input;
+    param.is_reference = capture.is_reference;
+    param.is_const = capture.is_const;
+    param.is_pointer = capture.passing == ParamPassingKind::Pointer;
+    return param;
+}
+
+static bool appendCaptureParam(FunctionAST& fn, const LambdaCaptureInfo& capture) {
+    if (hasParamNamed(fn, capture.name)) return false;
+    fn.params.push_back(paramFromCapture(capture));
+    return true;
+}
+
+static bool addTransitiveCaptureParam(FunctionAST& fn,
+                                      const std::string& lambda_name,
+                                      const LambdaCaptureInfo& capture) {
+    if (hasParamNamed(fn, capture.name)) return false;
+    auto& captures = lambda_captures_by_name[lambda_name];
+    std::size_t insert_pos = captures.size();
+    captures.push_back(capture);
+    auto param = paramFromCapture(capture);
+    if (insert_pos > fn.params.size()) insert_pos = fn.params.size();
+    fn.params.insert(fn.params.begin() + static_cast<std::ptrdiff_t>(insert_pos),
+                     std::move(param));
+    lambda_param_count_by_name[lambda_name] = fn.params.size();
+    return true;
+}
+
+static ExprPtr makeCaptureArg(const LambdaCaptureInfo& capture, DebugLoc loc = {}) {
+    auto arg = make_var(capture.name, capture.type);
+    arg->debug_loc = std::move(loc);
+    return arg;
+}
+
+static std::vector<ExprPtr> lambdaCaptureArgs(const std::string& lambda_name,
+                                              DebugLoc loc = {}) {
+    std::vector<ExprPtr> args;
+    auto it = lambda_captures_by_name.find(lambda_name);
+    if (it == lambda_captures_by_name.end()) return args;
+    args.reserve(it->second.size());
+    for (const auto& capture : it->second) {
+        args.push_back(makeCaptureArg(capture, loc));
+    }
+    return args;
+}
+
+static void prependLambdaCaptureArgs(const std::string& lambda_name,
+                                     std::vector<ExprPtr>& args,
+                                     DebugLoc loc = {}) {
+    auto captures = lambdaCaptureArgs(lambda_name, std::move(loc));
+    if (captures.empty()) return;
+    captures.insert(captures.end(), args.begin(), args.end());
+    args = std::move(captures);
+}
+
 static StmtPtr makeAssignStmtAst(ExprPtr target, ExprPtr value) {
     auto s = std::make_shared<Stmt>();
     s->kind = StmtKind::Assign;
@@ -930,6 +1157,252 @@ static bool isSimpleIdentifierText(const std::string& s) {
         if (!(std::isalnum(c) || ch == '_')) return false;
     }
     return true;
+}
+
+static std::optional<std::string> simpleParenthesizedIdentifier(std::string text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isspace(ch);
+    }), text.end());
+    if (text.size() < 3 || text.front() != '(' || text.back() != ')') {
+        return std::nullopt;
+    }
+    std::string inner = text.substr(1, text.size() - 2);
+    if (!isSimpleIdentifierText(inner)) return std::nullopt;
+    return inner;
+}
+
+static bool isEmptyParenText(std::string text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isspace(ch);
+    }), text.end());
+    return text == "()";
+}
+
+static bool isParenIdentifierListText(std::string text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isspace(ch);
+    }), text.end());
+    if (text.size() < 3 || text.front() != '(' || text.back() != ')') return false;
+    std::string inner = text.substr(1, text.size() - 2);
+    if (inner.empty()) return true;
+    std::size_t begin = 0;
+    bool saw = false;
+    for (std::size_t i = 0; i <= inner.size(); ++i) {
+        if (i < inner.size() && inner[i] != ',') continue;
+        std::string part = inner.substr(begin, i - begin);
+        if (!isSimpleIdentifierText(part)) return false;
+        saw = true;
+        begin = i + 1;
+    }
+    return saw;
+}
+
+static ExprPtr parseSimpleIntConstructText(std::string text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isspace(ch);
+    }), text.end());
+    while (text.size() >= 2 && text.front() == '(' && text.back() == ')') {
+        text = text.substr(1, text.size() - 2);
+    }
+    if (text.rfind("Int<", 0) != 0) return nullptr;
+    auto gt = text.find('>');
+    if (gt == std::string::npos) return nullptr;
+    std::string width_text = text.substr(4, gt - 4);
+    if (width_text.empty() ||
+        !std::all_of(width_text.begin(), width_text.end(), [](unsigned char ch) {
+            return std::isdigit(ch);
+        })) {
+        return nullptr;
+    }
+    if (gt + 1 >= text.size() || text[gt + 1] != '(' || text.back() != ')') return nullptr;
+    int width = std::stoi(width_text);
+    std::string inner = text.substr(gt + 2, text.size() - gt - 3);
+    TypeInfo target = make_hw_type("Int", width, false);
+    if (isSimpleIdentifierText(inner)) {
+        auto cast = std::make_shared<Expr>();
+        cast->kind = ExprKind::Cast;
+        cast->cast_type = target;
+        cast->type = target;
+        cast->cast_expr = make_var(inner, make_unknown_type());
+        return cast;
+    }
+    bool numeric = !inner.empty() &&
+                   std::all_of(inner.begin(), inner.end(), [](unsigned char ch) {
+                       return std::isdigit(ch);
+                   });
+    if (numeric) return make_literal(inner, target);
+    return nullptr;
+}
+
+static ExprPtr parseSimpleRecoveredArgText(std::string text) {
+    text.erase(0, text.find_first_not_of(" \t\r\n"));
+    auto end = text.find_last_not_of(" \t\r\n");
+    if (end != std::string::npos) text.erase(end + 1);
+    if (isSimpleIdentifierText(text)) return make_var(text, make_unknown_type());
+    if (auto int_construct = parseSimpleIntConstructText(text)) return int_construct;
+    for (const std::string& op : {"+", "-", "^"}) {
+        auto pos = text.find(op);
+        if (pos == std::string::npos) continue;
+        auto lhs = parseSimpleRecoveredArgText(text.substr(0, pos));
+        auto rhs = parseSimpleRecoveredArgText(text.substr(pos + op.size()));
+        if (lhs && rhs) {
+            TypeInfo type = rhs->type.name == "unknown" ? lhs->type : rhs->type;
+            if (type.name == "unknown") type = make_unknown_type();
+            return make_binary(op, lhs, rhs, type);
+        }
+    }
+    return nullptr;
+}
+
+static ExprPtr wrapRecoveredCallWithTrailingBinary(ExprPtr call, const std::string& text) {
+    if (!call) return call;
+    std::size_t lparen = std::string::npos;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '(') continue;
+        std::size_t before = i;
+        while (before > 0 && std::isspace(static_cast<unsigned char>(text[before - 1]))) --before;
+        if (before > 0) {
+            char prev = text[before - 1];
+            if (std::isalnum(static_cast<unsigned char>(prev)) || prev == '_') {
+                lparen = i;
+                break;
+            }
+        }
+    }
+    if (lparen == std::string::npos) return call;
+    int depth = 0;
+    std::size_t rparen = std::string::npos;
+    for (std::size_t i = lparen; i < text.size(); ++i) {
+        if (text[i] == '(') ++depth;
+        if (text[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                rparen = i;
+                break;
+            }
+        }
+    }
+    if (rparen == std::string::npos) return call;
+    std::size_t op_pos = rparen + 1;
+    while (op_pos < text.size() && std::isspace(static_cast<unsigned char>(text[op_pos]))) ++op_pos;
+    if (op_pos >= text.size()) return call;
+    std::string op(1, text[op_pos]);
+    if (op != "+" && op != "-" && op != "^") return call;
+    auto rhs = parseSimpleRecoveredArgText(text.substr(op_pos + 1));
+    if (!rhs) return call;
+    TypeInfo type = call->type.name == "unknown" ? rhs->type : call->type;
+    return make_binary(op, std::move(call), std::move(rhs), type);
+}
+
+static void appendSimpleParenArgFromCursor(std::vector<ExprPtr>& args, CXCursor cursor) {
+    if (auto identifier = simpleParenthesizedIdentifier(cursorText(cursor))) {
+        args.push_back(make_var(*identifier, make_unknown_type()));
+    }
+}
+
+static std::optional<std::string> singleIdentifierCallArgFromText(const std::string& text) {
+    std::size_t lparen = std::string::npos;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '(') continue;
+        std::size_t before = i;
+        while (before > 0 && std::isspace(static_cast<unsigned char>(text[before - 1]))) {
+            --before;
+        }
+        if (before > 0) {
+            char prev = text[before - 1];
+            if (std::isalnum(static_cast<unsigned char>(prev)) || prev == '_') {
+                lparen = i;
+                break;
+            }
+        }
+    }
+    if (lparen == std::string::npos) {
+        return std::nullopt;
+    }
+    std::size_t rparen = std::string::npos;
+    int depth = 0;
+    for (std::size_t i = lparen; i < text.size(); ++i) {
+        if (text[i] == '(') ++depth;
+        if (text[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                rparen = i;
+                break;
+            }
+        }
+    }
+    if (rparen == std::string::npos || lparen >= rparen) return std::nullopt;
+    std::string inner = text.substr(lparen + 1, rparen - lparen - 1);
+    inner.erase(std::remove_if(inner.begin(), inner.end(), [](unsigned char ch) {
+        return std::isspace(ch);
+    }), inner.end());
+    if (!isSimpleIdentifierText(inner)) return std::nullopt;
+    return inner;
+}
+
+static void appendSingleIdentifierCallArgFromText(std::vector<ExprPtr>& args,
+                                                  const std::string& text) {
+    if (auto name = singleIdentifierCallArgFromText(text)) {
+        args.push_back(make_var(*name, make_unknown_type()));
+    }
+}
+
+static void appendSingleIdentifierCallArgFromCursor(std::vector<ExprPtr>& args, CXCursor cursor) {
+    appendSingleIdentifierCallArgFromText(args, cursorText(cursor));
+}
+
+static void appendIdentifierCallArgsFromText(std::vector<ExprPtr>& args,
+                                             const std::string& text) {
+    std::size_t lparen = std::string::npos;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '(') continue;
+        std::size_t before = i;
+        while (before > 0 && std::isspace(static_cast<unsigned char>(text[before - 1]))) --before;
+        if (before > 0) {
+            char prev = text[before - 1];
+            if (std::isalnum(static_cast<unsigned char>(prev)) || prev == '_') {
+                lparen = i;
+                break;
+            }
+        }
+    }
+    if (lparen == std::string::npos) return;
+    int depth = 0;
+    std::size_t rparen = std::string::npos;
+    for (std::size_t i = lparen; i < text.size(); ++i) {
+        if (text[i] == '(') ++depth;
+        if (text[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                rparen = i;
+                break;
+            }
+        }
+    }
+    if (rparen == std::string::npos || rparen <= lparen + 1) return;
+    std::string inner = text.substr(lparen + 1, rparen - lparen - 1);
+    std::size_t begin = 0;
+    depth = 0;
+    for (std::size_t i = 0; i <= inner.size(); ++i) {
+        char ch = i < inner.size() ? inner[i] : ',';
+        if (ch == '(' || ch == '[' || ch == '<') ++depth;
+        if (ch == ')' || ch == ']' || ch == '>') --depth;
+        if (ch != ',' || depth != 0) continue;
+        std::string part = inner.substr(begin, i - begin);
+        part.erase(std::remove_if(part.begin(), part.end(), [](unsigned char c) {
+            return std::isspace(c);
+        }), part.end());
+        if (!part.empty()) {
+            if (auto arg = parseSimpleRecoveredArgText(part)) {
+                args.push_back(std::move(arg));
+            }
+        }
+        begin = i + 1;
+    }
+}
+
+static void appendIdentifierCallArgsFromCursor(std::vector<ExprPtr>& args, CXCursor cursor) {
+    appendIdentifierCallArgsFromText(args, cursorText(cursor));
 }
 
 static void collectWrittenBases(const std::vector<StmtPtr>& stmts,
@@ -1706,19 +2179,42 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             return converted;
         }
         if (spelling == "operator()" && children.size() == 1 && first_child_spelling == spelling) {
-            std::string token_callee = lambdaNameForOperatorCursor(children.front());
-            if (token_callee.empty()) token_callee = lambdaNameForOperatorCursor(cursor);
-            if (token_callee.empty()) token_callee = lambdaNameForOperatorCallType(cursor);
+            std::string token_callee;
+            int arg_count = clang_Cursor_getNumArguments(cursor);
+            int receiver_arg_index = -1;
+            for (int i = 0; i < arg_count; ++i) {
+                CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                std::string receiver_callee = lambdaNameForReceiverCursor(arg_cursor);
+                if (!receiver_callee.empty()) {
+                    if (token_callee.empty() || token_callee == "operator()") {
+                        token_callee = receiver_callee;
+                    }
+                    if (receiver_callee == token_callee) {
+                        receiver_arg_index = i;
+                        break;
+                    }
+                }
+            }
+            if (token_callee.empty() || token_callee == "operator()") {
+                token_callee = lambdaNameFromCallSourceText(cursor);
+            }
             if (!token_callee.empty() && token_callee != "operator()") {
                 auto result = std::make_shared<Expr>();
                 result->kind = ExprKind::Call;
                 result->callee = token_callee;
                 result->type = convertType(type);
-                int arg_count = clang_Cursor_getNumArguments(cursor);
+                result->literal_value = cursorText(cursor);
                 for (int i = 0; i < arg_count; ++i) {
-                    result->args.push_back(convertExpr(clang_Cursor_getArgument(cursor, static_cast<unsigned>(i))));
+                    if (i == receiver_arg_index) continue;
+                    CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                    if (isEmptyParenText(cursorText(arg_cursor))) continue;
+                    result->args.push_back(convertExpr(arg_cursor));
                 }
-                return result;
+                if (result->args.empty()) appendSimpleParenArgFromCursor(result->args, cursor);
+                if (result->args.empty()) appendSingleIdentifierCallArgFromCursor(result->args, cursor);
+                if (result->args.empty()) appendIdentifierCallArgsFromCursor(result->args, cursor);
+                prependLambdaCaptureArgs(token_callee, result->args, result->debug_loc);
+                return wrapRecoveredCallWithTrailingBinary(result, cursorText(cursor));
             }
             failUnsupported(cursor, "S0 cannot resolve lambda/operator() receiver from cursor metadata");
         }
@@ -1797,14 +2293,44 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             size_t arg_start = receiver_index + 1;
             std::vector<ExprPtr> args;
             for (size_t i = arg_start; i < children.size(); ++i) args.push_back(convertExpr(children[i]));
-            std::string callee = astBaseName(receiver);
+            std::string callee;
+            if (children.size() > receiver_index) {
+                callee = lambdaNameForReceiverCursor(children[receiver_index]);
+            }
+            if (callee.empty() && spelling != "operator()") callee = astBaseName(receiver);
             if (!callee.empty()) {
+                int explicit_arg_count = clang_Cursor_getNumArguments(cursor);
+                int receiver_arg_index = -1;
+                for (int i = 0; i < explicit_arg_count; ++i) {
+                    CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                    if (lambdaNameForReceiverCursor(arg_cursor) == callee) {
+                        receiver_arg_index = i;
+                        break;
+                    }
+                }
+                if (explicit_arg_count > 0) {
+                    args.clear();
+                    for (int i = 0; i < explicit_arg_count; ++i) {
+                        if (i == receiver_arg_index) continue;
+                        CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                        if (isEmptyParenText(cursorText(arg_cursor))) continue;
+                        auto arg = convertExpr(arg_cursor);
+                        if (arg && !isOperatorOnlyExpr(arg)) args.push_back(std::move(arg));
+                    }
+                }
+                if (args.empty()) appendSimpleParenArgFromCursor(args, cursor);
+                if (args.empty()) appendSingleIdentifierCallArgFromCursor(args, cursor);
+                if (args.empty()) appendIdentifierCallArgsFromCursor(args, cursor);
                 auto result = std::make_shared<Expr>();
                 result->kind = ExprKind::Call;
                 result->callee = callee;
                 result->type = convertType(type);
+                result->literal_value = cursorText(cursor);
                 result->args = std::move(args);
-                return result;
+                if (known_lambda_names.count(callee)) {
+                    prependLambdaCaptureArgs(callee, result->args, debugLocFromCursor(cursor));
+                }
+                return wrapRecoveredCallWithTrailingBinary(result, cursorText(cursor));
             }
         }
         if (spelling == "array" && children.size() == 1) {
@@ -2145,17 +2671,32 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
         result->callee = spelling;
         result->type = convertType(type);
         size_t arg_start = 1;
+        int receiver_arg_index = -1;
         if (spelling == "operator()") {
             result->callee.clear();
             for (size_t i = 0; i < children.size(); ++i) {
                 if (firstSpellingDeep(children[i]) == "operator()") continue;
-                auto candidate = convertExpr(children[i]);
-                std::string name = astBaseName(candidate);
+                std::string name = lambdaNameForReceiverCursor(children[i]);
                 if (!name.empty() && name != "operator()") {
                     result->callee = name;
                     arg_start = i + 1;
                     break;
                 }
+            }
+            int op_arg_count = clang_Cursor_getNumArguments(cursor);
+            for (int i = 0; i < op_arg_count; ++i) {
+                CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                std::string receiver_callee = lambdaNameForReceiverCursor(arg_cursor);
+                if (!receiver_callee.empty()) {
+                    if (result->callee.empty()) result->callee = receiver_callee;
+                    if (receiver_callee == result->callee) {
+                        receiver_arg_index = i;
+                        break;
+                    }
+                }
+            }
+            if (result->callee.empty()) {
+                result->callee = lambdaNameFromCallSourceText(cursor);
             }
             if (result->callee.empty()) {
                 failUnsupported(cursor, "S0 cannot resolve operator() receiver from cursor metadata");
@@ -2177,8 +2718,10 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
         int explicit_arg_count = clang_Cursor_getNumArguments(cursor);
         if (explicit_arg_count >= 0) {
             for (int i = 0; i < explicit_arg_count; ++i) {
-                result->args.push_back(convertExpr(
-                    clang_Cursor_getArgument(cursor, static_cast<unsigned>(i))));
+                if (i == receiver_arg_index) continue;
+                CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                if (isEmptyParenText(cursorText(arg_cursor))) continue;
+                result->args.push_back(convertExpr(arg_cursor));
             }
             CXCursor referenced = clang_getCursorReferenced(cursor);
             const bool constructor_call =
@@ -2199,6 +2742,14 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 if (firstSpellingDeep(children[i]) == "operator()") continue;
                 result->args.push_back(convertExpr(children[i]));
             }
+        }
+        if (known_lambda_names.count(result->callee)) {
+            result->literal_value = cursorText(cursor);
+            if (result->args.empty()) appendSimpleParenArgFromCursor(result->args, cursor);
+            if (result->args.empty()) appendSingleIdentifierCallArgFromCursor(result->args, cursor);
+            if (result->args.empty()) appendIdentifierCallArgsFromCursor(result->args, cursor);
+            prependLambdaCaptureArgs(result->callee, result->args, debugLocFromCursor(cursor));
+            return wrapRecoveredCallWithTrailingBinary(result, cursorText(cursor));
         }
         return result;
     }
@@ -2224,6 +2775,30 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
     default: {
         // Try to recurse into first child for implicit casts
         if (!children.empty()) {
+            std::string lambda_callee;
+            std::size_t lambda_receiver_index = children.size();
+            for (std::size_t i = 0; i < children.size(); ++i) {
+                lambda_callee = lambdaNameForReceiverCursor(children[i]);
+                if (!lambda_callee.empty()) {
+                    lambda_receiver_index = i;
+                    break;
+                }
+            }
+            if (!lambda_callee.empty()) {
+                auto recovered = std::make_shared<Expr>();
+                recovered->kind = ExprKind::Call;
+                recovered->callee = lambda_callee;
+                recovered->type = convertType(type);
+                recovered->literal_value = cursorText(cursor);
+                for (std::size_t i = lambda_receiver_index + 1; i < children.size(); ++i) {
+                    if (!clang_isExpression(clang_getCursorKind(children[i]))) continue;
+                    if (firstSpellingDeep(children[i]).rfind("operator", 0) == 0) continue;
+                    auto arg = convertExpr(children[i]);
+                    if (arg && !isOperatorOnlyExpr(arg)) recovered->args.push_back(std::move(arg));
+                }
+                prependLambdaCaptureArgs(lambda_callee, recovered->args, debugLocFromCursor(cursor));
+                return wrapRecoveredCallWithTrailingBinary(recovered, cursorText(cursor));
+            }
             if (firstSpellingDeep(children.front()).rfind("operator", 0) == 0) {
                 auto converted = convertExpr(children.front());
                 TypeInfo target_type = convertType(type);
@@ -2269,15 +2844,52 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 }
                 return candidate;
             }
-            std::string callee = lambdaNameForOperatorCursor(children[0]);
-            if (callee.empty()) callee = lambdaNameForOperatorCursor(cursor);
-            if (callee.empty()) callee = lambdaNameForOperatorCallType(cursor);
+            std::string callee = lambdaNameFromCallSourceText(cursor);
             if (!callee.empty()) {
                 auto recovered = std::make_shared<Expr>();
                 recovered->kind = ExprKind::Call;
                 recovered->callee = callee;
                 recovered->type = convertType(type);
-                return recovered;
+                recovered->literal_value = cursorText(cursor);
+                int arg_count = clang_Cursor_getNumArguments(cursor);
+                int receiver_arg_index = -1;
+                for (int i = 0; i < arg_count; ++i) {
+                    CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                    if (lambdaNameForReceiverCursor(arg_cursor) == callee) {
+                        receiver_arg_index = i;
+                        break;
+                    }
+                }
+                for (int i = 0; i < arg_count; ++i) {
+                    if (i == receiver_arg_index) continue;
+                    CXCursor arg_cursor = clang_Cursor_getArgument(cursor, static_cast<unsigned>(i));
+                    if (isEmptyParenText(cursorText(arg_cursor))) continue;
+                    auto arg = convertExpr(arg_cursor);
+                    if (arg && !isOperatorOnlyExpr(arg)) recovered->args.push_back(std::move(arg));
+                }
+                if (recovered->args.empty()) {
+                    appendSimpleParenArgFromCursor(recovered->args, cursor);
+                }
+                if (recovered->args.empty()) {
+                    appendSingleIdentifierCallArgFromCursor(recovered->args, cursor);
+                }
+                if (recovered->args.empty()) {
+                    appendIdentifierCallArgsFromCursor(recovered->args, cursor);
+                }
+            prependLambdaCaptureArgs(callee, recovered->args, debugLocFromCursor(cursor));
+                return wrapRecoveredCallWithTrailingBinary(recovered, cursorText(cursor));
+            }
+            if (auto identifier = simpleParenthesizedIdentifier(cursorText(cursor))) {
+                return make_var(*identifier, convertType(type));
+            }
+            if (isEmptyParenText(cursorText(cursor))) {
+                return nullptr;
+            }
+            if (isParenIdentifierListText(cursorText(cursor))) {
+                return nullptr;
+            }
+            if (auto int_construct = parseSimpleIntConstructText(cursorText(cursor))) {
+                return int_construct;
             }
             failUnsupported(cursor, "S0 cannot resolve operator call receiver from cursor metadata");
         }
@@ -2612,6 +3224,7 @@ static void collectIntegerInitValues(CXCursor cursor,
 
 static StmtPtr convertStmtImpl(CXCursor cursor) {
     CXCursorKind kind = clang_getCursorKind(cursor);
+    if (kind == CXCursor_LambdaExpr) return nullptr;
     auto children = getChildren(cursor);
 
     switch (kind) {
@@ -2620,14 +3233,9 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
         for (auto& child : children) {
             if (clang_getCursorKind(child) == CXCursor_VarDecl) {
                 auto var_children = getChildren(child);
-                bool is_lambda_decl = false;
-                for (auto& vc : var_children) {
-                    if (clang_getCursorKind(vc) == CXCursor_LambdaExpr) {
-                        is_lambda_decl = true;
-                        break;
-                    }
+                if (!clang_equalCursors(findLambdaExpr(child), clang_getNullCursor())) {
+                    return nullptr;
                 }
-                if (is_lambda_decl) return nullptr;
 
                 auto stmt = std::make_shared<Stmt>();
                 stmt->kind = StmtKind::Decl;
@@ -2638,7 +3246,7 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                 }
                 CXCursor init_expr = clang_getNullCursor();
                 for (auto& vc : var_children) {
-                    if (clang_getCursorKind(vc) == CXCursor_LambdaExpr) continue;
+                    if (!clang_equalCursors(findLambdaExpr(vc), clang_getNullCursor())) continue;
                     if (clang_isExpression(clang_getCursorKind(vc))) {
                         init_expr = vc;
                     }
@@ -2982,50 +3590,46 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
     fn->name = name;
     registerLambdaOperatorName(lambda_cursor, name);
     fn->return_type = TypeInfo{"auto", 0, false};
-    auto collect_nested_lambdas = [&](CXCursor compound) {
-        for (auto& stmt_child : getChildren(compound)) {
-            if (clang_getCursorKind(stmt_child) != CXCursor_DeclStmt) continue;
-            for (auto& decl_child : getChildren(stmt_child)) {
-                if (clang_getCursorKind(decl_child) != CXCursor_VarDecl) continue;
-                std::string nested_name = cxToStr(clang_getCursorSpelling(decl_child));
-                for (auto& init_child : getChildren(decl_child)) {
-                    if (clang_getCursorKind(init_child) == CXCursor_LambdaExpr) {
-                        fn->lambdas[nested_name] = convertLambdaExpr(init_child, nested_name);
-                        break;
-                    }
-                }
-            }
-        }
-    };
-    auto lambda_children = getChildren(lambda_cursor);
-    for (auto& c : lambda_children) {
-        auto kind = clang_getCursorKind(c);
-        if (kind == CXCursor_ParmDecl) {
-            fn->params.push_back(makeParamDeclFromCursor(c));
-        } else if (kind == CXCursor_CompoundStmt && fn->body.empty()) {
-            fn->body = convertBlock(c);
-            collect_nested_lambdas(c);
-        }
+
+    auto captures = collectLambdaCaptures(lambda_cursor);
+    lambda_captures_by_name[name] = captures;
+    for (const auto& capture : captures) {
+        appendCaptureParam(*fn, capture);
     }
+
+    auto add_explicit_param = [&](CXCursor param_cursor) {
+        ParamDecl param = makeParamDeclFromCursor(param_cursor);
+        fn->params.push_back(std::move(param));
+    };
+
     auto collect_lambda_method = [&](CXCursor method) {
         TypeInfo method_return = convertType(clang_getCursorResultType(method));
         if (!method_return.name.empty() || method_return.width > 0) {
             fn->return_type = method_return;
         }
-        struct LambdaMethodCtx {
-            FunctionAST* fn;
-        } ctx{fn.get()};
-        clang_visitChildren(method, [](CXCursor mc, CXCursor, CXClientData data) {
-            auto* ctx = static_cast<LambdaMethodCtx*>(data);
+        for (auto& mc : getChildren(method)) {
             auto mk = clang_getCursorKind(mc);
             if (mk == CXCursor_ParmDecl) {
-                ctx->fn->params.push_back(makeParamDeclFromCursor(mc));
-            } else if (mk == CXCursor_CompoundStmt && ctx->fn->body.empty()) {
-                ctx->fn->body = convertBlock(mc);
+                add_explicit_param(mc);
+            } else if (mk == CXCursor_CompoundStmt && fn->body.empty()) {
+                fn->body = convertBlock(mc);
             }
-            return CXChildVisit_Continue;
-        }, &ctx);
+        }
     };
+
+    auto lambda_children = getChildren(lambda_cursor);
+    for (auto& c : lambda_children) {
+        auto kind = clang_getCursorKind(c);
+        if (kind == CXCursor_CXXMethod &&
+            cxToStr(clang_getCursorSpelling(c)) == "operator()") {
+            collect_lambda_method(c);
+        } else if (kind == CXCursor_ParmDecl) {
+            add_explicit_param(c);
+        } else if (kind == CXCursor_CompoundStmt && fn->body.empty()) {
+            fn->body = convertBlock(c);
+        }
+    }
+
     if (fn->body.empty()) {
         struct MethodSearchCtx {
             decltype(collect_lambda_method)* collect;
@@ -3043,22 +3647,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         }, &method_ctx);
     }
 
-    if (fn->body.empty()) {
-        for (auto& c : lambda_children) {
-            auto kind = clang_getCursorKind(c);
-            if (kind == CXCursor_ParmDecl) {
-                fn->params.push_back(makeParamDeclFromCursor(c));
-            } else if (kind == CXCursor_CompoundStmt && fn->body.empty()) {
-                fn->body = convertBlock(c);
-                collect_nested_lambdas(c);
-            } else if (kind == CXCursor_CXXMethod) {
-                std::string method_name = cxToStr(clang_getCursorSpelling(c));
-                if (method_name == "operator()") {
-                    collect_lambda_method(c);
-                }
-            }
-        }
-    }
+    collectLocalLambdas(lambda_cursor, *fn);
 
     for (auto& s : fn->body) {
         if (s && s->kind == StmtKind::Return && s->return_value.has_value()) {
@@ -3066,32 +3655,421 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
             break;
         }
     }
+    if (fn->return_type.name == "auto" && fn->return_type.width == 0) {
+        fn->return_type = TypeInfo{"void", 0, false};
+    }
+    lambda_param_count_by_name[name] = fn->params.size();
     return fn;
 }
 
 static void collectLocalLambdas(CXCursor cursor, FunctionAST& func) {
-    for (auto& fn_child : getChildren(cursor)) {
-        if (clang_getCursorKind(fn_child) != CXCursor_CompoundStmt) continue;
-        for (auto& stmt_child : getChildren(fn_child)) {
-            if (clang_getCursorKind(stmt_child) != CXCursor_DeclStmt) continue;
-            for (auto& decl_child : getChildren(stmt_child)) {
-                if (clang_getCursorKind(decl_child) != CXCursor_VarDecl) continue;
-                std::string name = cxToStr(clang_getCursorSpelling(decl_child));
-                for (auto& init_child : getChildren(decl_child)) {
-                    if (clang_getCursorKind(init_child) == CXCursor_LambdaExpr) {
-                        auto lambda = convertLambdaExpr(init_child, name);
-                        if (lambda) {
-                            for (auto& [nested_name, nested_lambda] : lambda->lambdas) {
-                                func.lambdas[nested_name] = nested_lambda;
-                            }
-                            func.lambdas[name] = lambda;
-                        }
+    for (auto& child : getChildren(cursor)) {
+        if (clang_getCursorKind(child) == CXCursor_VarDecl) {
+            std::string source_name = cxToStr(clang_getCursorSpelling(child));
+            CXCursor lambda_cursor = findLambdaExpr(child);
+            if (!clang_equalCursors(lambda_cursor, clang_getNullCursor())) {
+                std::string lambda_name = ensureLambdaNameForVar(child, source_name);
+                auto lambda = convertLambdaExpr(lambda_cursor, lambda_name);
+                if (lambda) func.lambdas[lambda_name] = lambda;
+                continue;
+            }
+        }
+        collectLocalLambdas(child, func);
+    }
+}
+
+static void collectFunctionLambdas(FunctionAST& fn,
+                                   std::unordered_map<std::string, FunctionAST*>& out) {
+    for (auto& [name, lambda] : fn.lambdas) {
+        if (!lambda) continue;
+        out[name] = lambda.get();
+        collectFunctionLambdas(*lambda, out);
+    }
+    for (auto& helper : fn.helpers) {
+        if (helper) collectFunctionLambdas(*helper, out);
+    }
+}
+
+static void collectCalledLambdasExpr(const ExprPtr& expr,
+                                     std::unordered_set<std::string>& out);
+static void collectLambdaCallArgVarsExpr(const ExprPtr& expr,
+                                         std::unordered_set<std::string>& out);
+
+static void collectCalledLambdasStmt(const StmtPtr& stmt,
+                                     std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    collectCalledLambdasExpr(stmt->assign_target, out);
+    collectCalledLambdasExpr(stmt->assign_value, out);
+    if (stmt->decl_init) collectCalledLambdasExpr(*stmt->decl_init, out);
+    for (const auto& arg : stmt->decl_init_args) collectCalledLambdasExpr(arg, out);
+    collectCalledLambdasExpr(stmt->if_cond, out);
+    if (stmt->for_init) collectCalledLambdasStmt(stmt->for_init, out);
+    collectCalledLambdasExpr(stmt->for_cond, out);
+    collectCalledLambdasExpr(stmt->for_step, out);
+    collectCalledLambdasExpr(stmt->while_cond, out);
+    collectCalledLambdasExpr(stmt->switch_expr, out);
+    for (const auto& child : stmt->if_then) collectCalledLambdasStmt(child, out);
+    for (const auto& child : stmt->if_else) collectCalledLambdasStmt(child, out);
+    for (const auto& child : stmt->for_body) collectCalledLambdasStmt(child, out);
+    for (const auto& child : stmt->while_body) collectCalledLambdasStmt(child, out);
+    for (const auto& child : stmt->block_stmts) collectCalledLambdasStmt(child, out);
+    for (const auto& clause : stmt->switch_cases) {
+        if (clause.value) collectCalledLambdasExpr(*clause.value, out);
+        for (const auto& child : clause.body) collectCalledLambdasStmt(child, out);
+    }
+    if (stmt->return_value) collectCalledLambdasExpr(*stmt->return_value, out);
+    collectCalledLambdasExpr(stmt->expr_stmt, out);
+}
+
+static void collectCalledLambdasExpr(const ExprPtr& expr,
+                                     std::unordered_set<std::string>& out) {
+    if (!expr) return;
+    if (expr->kind == ExprKind::Call && known_lambda_names.count(expr->callee)) {
+        out.insert(expr->callee);
+    }
+    for (const auto& child : {expr->left, expr->right, expr->operand, expr->array_base,
+                              expr->index, expr->struct_base, expr->cast_expr, expr->cond,
+                              expr->then_expr, expr->else_expr, expr->base, expr->value}) {
+        collectCalledLambdasExpr(child, out);
+    }
+    for (const auto& arg : expr->args) collectCalledLambdasExpr(arg, out);
+    for (const auto& part : expr->parts) collectCalledLambdasExpr(part, out);
+}
+
+static std::unordered_set<std::string> collectCalledLambdas(const FunctionAST& fn) {
+    std::unordered_set<std::string> out;
+    for (const auto& stmt : fn.body) collectCalledLambdasStmt(stmt, out);
+    return out;
+}
+
+static void collectLambdaCallArgVarsStmt(const StmtPtr& stmt,
+                                         std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    for (const auto& expr : {stmt->assign_target, stmt->assign_value, stmt->if_cond,
+                             stmt->for_cond, stmt->for_step, stmt->while_cond,
+                             stmt->switch_expr, stmt->expr_stmt}) {
+        collectLambdaCallArgVarsExpr(expr, out);
+    }
+    if (stmt->decl_init) collectLambdaCallArgVarsExpr(*stmt->decl_init, out);
+    for (const auto& arg : stmt->decl_init_args) collectLambdaCallArgVarsExpr(arg, out);
+    if (stmt->for_init) collectLambdaCallArgVarsStmt(stmt->for_init, out);
+    for (const auto& child : stmt->if_then) collectLambdaCallArgVarsStmt(child, out);
+    for (const auto& child : stmt->if_else) collectLambdaCallArgVarsStmt(child, out);
+    for (const auto& child : stmt->for_body) collectLambdaCallArgVarsStmt(child, out);
+    for (const auto& child : stmt->while_body) collectLambdaCallArgVarsStmt(child, out);
+    for (const auto& child : stmt->block_stmts) collectLambdaCallArgVarsStmt(child, out);
+    for (const auto& clause : stmt->switch_cases) {
+        if (clause.value) collectLambdaCallArgVarsExpr(*clause.value, out);
+        for (const auto& child : clause.body) collectLambdaCallArgVarsStmt(child, out);
+    }
+    if (stmt->return_value) collectLambdaCallArgVarsExpr(*stmt->return_value, out);
+}
+
+static void collectLambdaCallArgVarsExpr(const ExprPtr& expr,
+                                         std::unordered_set<std::string>& out) {
+    if (!expr) return;
+    if (expr->kind == ExprKind::Call && known_lambda_names.count(expr->callee)) {
+        for (const auto& arg : expr->args) {
+            if (arg && arg->kind == ExprKind::VarRef && !arg->var_name.empty()) {
+                out.insert(arg->var_name);
+            }
+        }
+        if (auto name = singleIdentifierCallArgFromText(expr->literal_value)) {
+            out.insert(*name);
+        }
+        std::vector<ExprPtr> token_args;
+        appendIdentifierCallArgsFromText(token_args, expr->literal_value);
+        for (const auto& arg : token_args) {
+            if (arg && arg->kind == ExprKind::VarRef && !arg->var_name.empty()) {
+                out.insert(arg->var_name);
+            }
+        }
+    }
+    for (const auto& child : {expr->left, expr->right, expr->operand, expr->array_base,
+                              expr->index, expr->struct_base, expr->cast_expr, expr->cond,
+                              expr->then_expr, expr->else_expr, expr->base, expr->value}) {
+        collectLambdaCallArgVarsExpr(child, out);
+    }
+    for (const auto& arg : expr->args) collectLambdaCallArgVarsExpr(arg, out);
+    for (const auto& part : expr->parts) collectLambdaCallArgVarsExpr(part, out);
+}
+
+static std::unordered_set<std::string> collectLambdaCallArgVars(const FunctionAST& fn) {
+    std::unordered_set<std::string> out;
+    for (const auto& stmt : fn.body) collectLambdaCallArgVarsStmt(stmt, out);
+    return out;
+}
+
+static void collectVarRefsExpr(const ExprPtr& expr, std::unordered_set<std::string>& out);
+
+static void collectVarRefsStmt(const StmtPtr& stmt, std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    for (const auto& expr : {stmt->assign_target, stmt->assign_value, stmt->if_cond,
+                             stmt->for_cond, stmt->for_step, stmt->while_cond,
+                             stmt->switch_expr, stmt->expr_stmt}) {
+        collectVarRefsExpr(expr, out);
+    }
+    if (stmt->decl_init) collectVarRefsExpr(*stmt->decl_init, out);
+    for (const auto& arg : stmt->decl_init_args) collectVarRefsExpr(arg, out);
+    if (stmt->for_init) collectVarRefsStmt(stmt->for_init, out);
+    for (const auto& child : stmt->if_then) collectVarRefsStmt(child, out);
+    for (const auto& child : stmt->if_else) collectVarRefsStmt(child, out);
+    for (const auto& child : stmt->for_body) collectVarRefsStmt(child, out);
+    for (const auto& child : stmt->while_body) collectVarRefsStmt(child, out);
+    for (const auto& child : stmt->block_stmts) collectVarRefsStmt(child, out);
+    for (const auto& clause : stmt->switch_cases) {
+        if (clause.value) collectVarRefsExpr(*clause.value, out);
+        for (const auto& child : clause.body) collectVarRefsStmt(child, out);
+    }
+    if (stmt->return_value) collectVarRefsExpr(*stmt->return_value, out);
+}
+
+static void collectVarRefsExpr(const ExprPtr& expr, std::unordered_set<std::string>& out) {
+    if (!expr) return;
+    if (expr->kind == ExprKind::VarRef && !expr->var_name.empty()) {
+        out.insert(expr->var_name);
+    }
+    for (const auto& child : {expr->left, expr->right, expr->operand, expr->array_base,
+                              expr->index, expr->struct_base, expr->cast_expr, expr->cond,
+                              expr->then_expr, expr->else_expr, expr->base, expr->value}) {
+        collectVarRefsExpr(child, out);
+    }
+    for (const auto& arg : expr->args) collectVarRefsExpr(arg, out);
+    for (const auto& part : expr->parts) collectVarRefsExpr(part, out);
+}
+
+static std::unordered_set<std::string> collectVarRefs(const FunctionAST& fn) {
+    std::unordered_set<std::string> out;
+    for (const auto& stmt : fn.body) collectVarRefsStmt(stmt, out);
+    return out;
+}
+
+static void collectLocalDeclNamesStmt(const StmtPtr& stmt, std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    if (stmt->kind == StmtKind::Decl && !stmt->decl_name.empty()) out.insert(stmt->decl_name);
+    if (stmt->for_init) collectLocalDeclNamesStmt(stmt->for_init, out);
+    for (const auto& child : stmt->if_then) collectLocalDeclNamesStmt(child, out);
+    for (const auto& child : stmt->if_else) collectLocalDeclNamesStmt(child, out);
+    for (const auto& child : stmt->for_body) collectLocalDeclNamesStmt(child, out);
+    for (const auto& child : stmt->while_body) collectLocalDeclNamesStmt(child, out);
+    for (const auto& child : stmt->block_stmts) collectLocalDeclNamesStmt(child, out);
+    for (const auto& clause : stmt->switch_cases) {
+        for (const auto& child : clause.body) collectLocalDeclNamesStmt(child, out);
+    }
+}
+
+static std::unordered_set<std::string> collectLocalDeclNames(const FunctionAST& fn) {
+    std::unordered_set<std::string> out;
+    for (const auto& stmt : fn.body) collectLocalDeclNamesStmt(stmt, out);
+    return out;
+}
+
+static std::unordered_map<std::string, ParamDecl> collectVisibleParams(const FunctionAST& root) {
+    std::unordered_map<std::string, ParamDecl> out;
+    auto collect_stmts = [&](const std::vector<StmtPtr>& stmts, auto& self) -> void {
+        for (const auto& stmt : stmts) {
+            if (!stmt) continue;
+            if (stmt->kind == StmtKind::Decl && !stmt->decl_name.empty()) {
+                ParamDecl param;
+                param.name = stmt->decl_name;
+                param.type = stmt->decl_type;
+                param.passing = ParamPassingKind::MutableRef;
+                param.direction = ParamDirection::Output;
+                param.is_output = true;
+                param.is_reference = true;
+                out.emplace(param.name, std::move(param));
+            }
+            if (stmt->for_init) self(std::vector<StmtPtr>{stmt->for_init}, self);
+            self(stmt->if_then, self);
+            self(stmt->if_else, self);
+            self(stmt->for_body, self);
+            self(stmt->while_body, self);
+            self(stmt->block_stmts, self);
+            for (const auto& clause : stmt->switch_cases) self(clause.body, self);
+        }
+    };
+    auto collect = [&](const FunctionAST& fn, auto& self) -> void {
+        for (const auto& param : fn.params) {
+            if (!param.name.empty()) out.emplace(param.name, param);
+        }
+        collect_stmts(fn.body, collect_stmts);
+        for (const auto& helper : fn.helpers) {
+            if (helper) self(*helper, self);
+        }
+        for (const auto& [_, lambda] : fn.lambdas) {
+            if (lambda) self(*lambda, self);
+        }
+    };
+    collect(root, collect);
+    return out;
+}
+
+static void propagateLambdaCaptureDependencies(FunctionAST& root) {
+    std::unordered_map<std::string, FunctionAST*> lambdas;
+    collectFunctionLambdas(root, lambdas);
+    auto visible_params = collectVisibleParams(root);
+    const int max_iterations = static_cast<int>(lambdas.size() * lambdas.size() + 1);
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+        bool changed = false;
+        for (auto& [caller_name, caller] : lambdas) {
+            if (!caller) continue;
+            auto local_decls = collectLocalDeclNames(*caller);
+            auto called = collectCalledLambdas(*caller);
+            for (const auto& callee_name : called) {
+                auto capture_it = lambda_captures_by_name.find(callee_name);
+                if (capture_it == lambda_captures_by_name.end()) continue;
+                for (const auto& capture : capture_it->second) {
+                    if (local_decls.count(capture.name)) continue;
+                    if (addTransitiveCaptureParam(*caller, caller_name, capture)) {
+                        changed = true;
+                    }
+                }
+            }
+            auto external_refs = collectLambdaCallArgVars(*caller);
+            auto all_refs = collectVarRefs(*caller);
+            external_refs.insert(all_refs.begin(), all_refs.end());
+            for (const auto& var_name : external_refs) {
+                if (hasParamNamed(*caller, var_name)) continue;
+                if (local_decls.count(var_name)) continue;
+                auto param_it = visible_params.find(var_name);
+                if (param_it == visible_params.end()) continue;
+                LambdaCaptureInfo capture;
+                capture.name = var_name;
+                capture.type = param_it->second.type;
+                capture.passing = param_it->second.passing;
+                capture.direction = param_it->second.direction;
+                capture.is_reference = param_it->second.is_reference;
+                capture.is_const = param_it->second.is_const;
+                if (addTransitiveCaptureParam(*caller, caller_name, capture)) {
+                    changed = true;
+                }
+            }
+        }
+        if (!changed) return;
+    }
+    failUnsupported(clang_getNullCursor(),
+                    "S0 lambda capture dependency propagation did not converge");
+}
+
+static void normalizeLambdaCallArgsExpr(const ExprPtr& expr);
+
+static void normalizeLambdaCallArgsStmt(const StmtPtr& stmt) {
+    if (!stmt) return;
+    normalizeLambdaCallArgsExpr(stmt->assign_target);
+    normalizeLambdaCallArgsExpr(stmt->assign_value);
+    if (stmt->decl_init) normalizeLambdaCallArgsExpr(*stmt->decl_init);
+    for (auto& arg : stmt->decl_init_args) normalizeLambdaCallArgsExpr(arg);
+    normalizeLambdaCallArgsExpr(stmt->if_cond);
+    if (stmt->for_init) normalizeLambdaCallArgsStmt(stmt->for_init);
+    normalizeLambdaCallArgsExpr(stmt->for_cond);
+    normalizeLambdaCallArgsExpr(stmt->for_step);
+    normalizeLambdaCallArgsExpr(stmt->while_cond);
+    normalizeLambdaCallArgsExpr(stmt->switch_expr);
+    for (auto& child : stmt->if_then) normalizeLambdaCallArgsStmt(child);
+    for (auto& child : stmt->if_else) normalizeLambdaCallArgsStmt(child);
+    for (auto& child : stmt->for_body) normalizeLambdaCallArgsStmt(child);
+    for (auto& child : stmt->while_body) normalizeLambdaCallArgsStmt(child);
+    for (auto& child : stmt->block_stmts) normalizeLambdaCallArgsStmt(child);
+    for (auto& clause : stmt->switch_cases) {
+        if (clause.value) normalizeLambdaCallArgsExpr(*clause.value);
+        for (auto& child : clause.body) normalizeLambdaCallArgsStmt(child);
+    }
+    if (stmt->return_value) normalizeLambdaCallArgsExpr(*stmt->return_value);
+    normalizeLambdaCallArgsExpr(stmt->expr_stmt);
+}
+
+static void normalizeOneLambdaCallArgs(Expr& expr) {
+    auto capture_it = lambda_captures_by_name.find(expr.callee);
+    if (capture_it == lambda_captures_by_name.end()) return;
+    const auto& captures = capture_it->second;
+    if (expr.args.empty() && !expr.literal_value.empty()) {
+        appendSingleIdentifierCallArgFromText(expr.args, expr.literal_value);
+        if (expr.args.empty()) appendIdentifierCallArgsFromText(expr.args, expr.literal_value);
+    }
+    if (!expr.literal_value.empty() && expr.args.size() <= captures.size()) {
+        std::vector<ExprPtr> parsed_args;
+        appendIdentifierCallArgsFromText(parsed_args, expr.literal_value);
+        if (!parsed_args.empty()) {
+            auto param_count_it = lambda_param_count_by_name.find(expr.callee);
+            std::size_t param_count = param_count_it == lambda_param_count_by_name.end()
+                ? std::numeric_limits<std::size_t>::max()
+                : param_count_it->second;
+            if (expr.args.size() >= param_count) parsed_args.clear();
+            if (expr.args.size() + parsed_args.size() > param_count) {
+                parsed_args.resize(param_count - expr.args.size());
+            }
+            bool already_has_tail = parsed_args.size() <= expr.args.size();
+            if (already_has_tail) {
+                std::size_t offset = expr.args.size() - parsed_args.size();
+                for (std::size_t i = 0; i < parsed_args.size(); ++i) {
+                    const auto& existing = expr.args[offset + i];
+                    const auto& parsed = parsed_args[i];
+                    if (!existing || !parsed ||
+                        existing->kind != ExprKind::VarRef ||
+                        parsed->kind != ExprKind::VarRef ||
+                        existing->var_name != parsed->var_name) {
+                        already_has_tail = false;
                         break;
                     }
                 }
             }
+            if (!already_has_tail) {
+                expr.args.insert(expr.args.end(), parsed_args.begin(), parsed_args.end());
+            }
         }
-        break;
+    }
+    std::size_t existing_capture_prefix = 0;
+    while (existing_capture_prefix < captures.size() &&
+           existing_capture_prefix < expr.args.size()) {
+        const auto& arg = expr.args[existing_capture_prefix];
+        if (!arg || arg->kind != ExprKind::VarRef ||
+            arg->var_name != captures[existing_capture_prefix].name) {
+            break;
+        }
+        ++existing_capture_prefix;
+    }
+
+    std::vector<ExprPtr> explicit_args;
+    explicit_args.reserve(expr.args.size() - existing_capture_prefix);
+    for (std::size_t i = existing_capture_prefix; i < expr.args.size(); ++i) {
+        explicit_args.push_back(expr.args[i]);
+    }
+
+    std::vector<ExprPtr> rebuilt;
+    rebuilt.reserve(captures.size() + explicit_args.size());
+    for (const auto& capture : captures) {
+        rebuilt.push_back(makeCaptureArg(capture, expr.debug_loc));
+    }
+    rebuilt.insert(rebuilt.end(), explicit_args.begin(), explicit_args.end());
+    auto param_count_it = lambda_param_count_by_name.find(expr.callee);
+    if (param_count_it != lambda_param_count_by_name.end() &&
+        rebuilt.size() > param_count_it->second) {
+        rebuilt.resize(param_count_it->second);
+    }
+    expr.args = std::move(rebuilt);
+}
+
+static void normalizeLambdaCallArgsExpr(const ExprPtr& expr) {
+    if (!expr) return;
+    for (const auto& child : {expr->left, expr->right, expr->operand, expr->array_base,
+                              expr->index, expr->struct_base, expr->cast_expr, expr->cond,
+                              expr->then_expr, expr->else_expr, expr->base, expr->value}) {
+        normalizeLambdaCallArgsExpr(child);
+    }
+    for (auto& arg : expr->args) normalizeLambdaCallArgsExpr(arg);
+    for (auto& part : expr->parts) normalizeLambdaCallArgsExpr(part);
+    if (expr->kind == ExprKind::Call && known_lambda_names.count(expr->callee)) {
+        normalizeOneLambdaCallArgs(*expr);
+    }
+}
+
+static void normalizeLambdaCallsInFunction(FunctionAST& fn) {
+    for (auto& stmt : fn.body) normalizeLambdaCallArgsStmt(stmt);
+    for (auto& [_, lambda] : fn.lambdas) {
+        if (lambda) normalizeLambdaCallsInFunction(*lambda);
+    }
+    for (auto& helper : fn.helpers) {
+        if (helper) normalizeLambdaCallsInFunction(*helper);
     }
 }
 
@@ -3287,6 +4265,13 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     lambda_operator_usr_to_name.clear();
     lambda_operator_location_to_name.clear();
     lambda_operator_signature_to_name.clear();
+    lambda_var_usr_to_name.clear();
+    lambda_var_location_to_name.clear();
+    lambda_source_name_to_unique_name.clear();
+    lambda_captures_by_name.clear();
+    lambda_param_count_by_name.clear();
+    known_lambda_names.clear();
+    lambda_unique_counter = 0;
     global_const_int_values.clear();
 
     CXIndex index = clang_createIndex(0, 0);
@@ -3473,8 +4458,12 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
         auto helper = std::make_shared<FunctionAST>(convertFunctionDecl(fn.cursor, fn.name));
         helper->struct_fields = struct_metadata.struct_fields;
         helper->struct_constructors = struct_metadata.struct_constructors;
+        collectLocalLambdas(fn.cursor, *helper);
         func.helpers.push_back(helper);
     }
+
+    propagateLambdaCaptureDependencies(func);
+    normalizeLambdaCallsInFunction(func);
 
     result.function = func;
     active_struct_fields = nullptr;

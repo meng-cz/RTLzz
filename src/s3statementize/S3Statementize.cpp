@@ -610,11 +610,15 @@ private:
             result.operand = literalOperand(expr->literal_value, expr->type, expr->debug_loc);
             return result;
         case ExprKind::VarRef:
-            result.operand = varOperand(expr->var_name,
-                                        resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
-                                        expr->type,
+        {
+            SymbolId symbol = resolveSymbol(ctx_, expr->var_name, expr->debug_loc);
+            result.operand = varOperand(expr->var_name, symbol,
+                                        ctx_.symbols[static_cast<std::size_t>(symbol)].type,
                                         expr->debug_loc);
+            result.operand.signed_view = isSignedViewType(expr->type) ||
+                                         result.operand.signed_view;
             return result;
+        }
         case ExprKind::ArrayAccess:
         case ExprKind::FieldAccess: {
             auto lv = lowerLValue(expr);
@@ -743,11 +747,15 @@ private:
             result.operand = literalOperand(expr->literal_value, expr->type, expr->debug_loc);
             return result;
         case s1apinorm::S1ExprKind::VarRef:
-            result.operand = varOperand(expr->var_name,
-                                        resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
-                                        expr->type,
+        {
+            SymbolId symbol = resolveSymbol(ctx_, expr->var_name, expr->debug_loc);
+            result.operand = varOperand(expr->var_name, symbol,
+                                        ctx_.symbols[static_cast<std::size_t>(symbol)].type,
                                         expr->debug_loc);
+            result.operand.signed_view = isSignedViewType(expr->type) ||
+                                         result.operand.signed_view;
             return result;
+        }
         case s1apinorm::S1ExprKind::ArrayAccess:
         case s1apinorm::S1ExprKind::FieldAccess: {
             auto lv = lowerLValue(expr);
@@ -862,9 +870,9 @@ private:
     LValueResult lowerLValue(const ExprPtr& expr) {
         if (!expr) fail(DebugLoc{}, "Expected lvalue expression");
         if (expr->kind == ExprKind::VarRef) {
-            return {varLValue(expr->var_name,
-                              resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
-                              expr->type,
+            SymbolId symbol = resolveSymbol(ctx_, expr->var_name, expr->debug_loc);
+            return {varLValue(expr->var_name, symbol,
+                              ctx_.symbols[static_cast<std::size_t>(symbol)].type,
                               expr->debug_loc), {}};
         }
         if (expr->kind == ExprKind::FieldAccess) {
@@ -893,9 +901,9 @@ private:
     LValueResult lowerLValue(const s1apinorm::S1ExprPtr& expr) {
         if (!expr) fail(DebugLoc{}, "Expected lvalue expression");
         if (expr->kind == s1apinorm::S1ExprKind::VarRef) {
-            return {varLValue(expr->var_name,
-                              resolveSymbol(ctx_, expr->var_name, expr->debug_loc),
-                              expr->type,
+            SymbolId symbol = resolveSymbol(ctx_, expr->var_name, expr->debug_loc);
+            return {varLValue(expr->var_name, symbol,
+                              ctx_.symbols[static_cast<std::size_t>(symbol)].type,
                               expr->debug_loc), {}};
         }
         if (expr->kind == s1apinorm::S1ExprKind::FieldAccess) {
@@ -2014,6 +2022,22 @@ StatementizedFunction lowerOneFunction(const s1apinorm::S1FunctionAST& fn) {
     return lowerer.lowerFunction(fn);
 }
 
+void lowerNestedLambdas(const FunctionAST& fn, StatementizedProgram& program) {
+    for (const auto& [name, lambda] : fn.lambdas) {
+        if (!lambda) continue;
+        program.lambdas[name] = lowerOneFunction(*lambda);
+        lowerNestedLambdas(*lambda, program);
+    }
+}
+
+void lowerNestedLambdas(const s1apinorm::S1FunctionAST& fn, StatementizedProgram& program) {
+    for (const auto& [name, lambda] : fn.lambdas) {
+        if (!lambda) continue;
+        program.lambdas[name] = lowerOneFunction(*lambda);
+        lowerNestedLambdas(*lambda, program);
+    }
+}
+
 std::string unaryName(UnaryOp op) {
     switch (op) {
     case UnaryOp::LogicalNot: return "LogicalNot";
@@ -2323,11 +2347,11 @@ StatementizedProgram runStatementize(const FunctionAST& function) {
     program.struct_fields = function.struct_fields;
     program.struct_constructors = function.struct_constructors;
     program.top = lowerOneFunction(function);
+    lowerNestedLambdas(function, program);
     for (const auto& helper : function.helpers) {
-        if (helper) program.helpers.push_back(lowerOneFunction(*helper));
-    }
-    for (const auto& [name, lambda] : function.lambdas) {
-        if (lambda) program.lambdas[name] = lowerOneFunction(*lambda);
+        if (!helper) continue;
+        program.helpers.push_back(lowerOneFunction(*helper));
+        lowerNestedLambdas(*helper, program);
     }
     verifyStmtList(program.top.body);
     for (const auto& helper : program.helpers) verifyStmtList(helper.body);
@@ -2340,11 +2364,11 @@ StatementizedProgram runStatementize(const s1apinorm::S1FunctionAST& function) {
     program.struct_fields = function.struct_fields;
     program.struct_constructors = function.struct_constructors;
     program.top = lowerOneFunction(function);
+    lowerNestedLambdas(function, program);
     for (const auto& helper : function.helpers) {
-        if (helper) program.helpers.push_back(lowerOneFunction(*helper));
-    }
-    for (const auto& [name, lambda] : function.lambdas) {
-        if (lambda) program.lambdas[name] = lowerOneFunction(*lambda);
+        if (!helper) continue;
+        program.helpers.push_back(lowerOneFunction(*helper));
+        lowerNestedLambdas(*helper, program);
     }
     verifyStmtList(program.top.body);
     for (const auto& helper : program.helpers) verifyStmtList(helper.body);

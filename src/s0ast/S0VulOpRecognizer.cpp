@@ -69,6 +69,26 @@ std::string cursorSpelling(CXCursor cursor) {
 
 std::string canonicalCallName(std::string name) {
     if (name.empty()) return name;
+    auto trim = [](std::string value) {
+        auto first = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
+            return std::isspace(c);
+        });
+        auto last = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+            return std::isspace(c);
+        }).base();
+        if (first >= last) return std::string{};
+        return std::string(first, last);
+    };
+    name = trim(std::move(name));
+    constexpr const char* dot_template = ".template";
+    constexpr const char* arrow_template = "->template";
+    if (auto pos = name.rfind(dot_template); pos != std::string::npos) {
+        name = trim(name.substr(pos + std::char_traits<char>::length(dot_template)));
+    } else if (auto pos = name.rfind(arrow_template); pos != std::string::npos) {
+        name = trim(name.substr(pos + std::char_traits<char>::length(arrow_template)));
+    } else if (name.rfind("template ", 0) == 0) {
+        name = trim(name.substr(std::char_traits<char>::length("template ")));
+    }
     name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) {
         return std::isspace(c);
     }), name.end());
