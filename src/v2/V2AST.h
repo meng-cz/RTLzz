@@ -54,6 +54,9 @@ struct Expr {
 
     std::string literal_value;
     std::string var_name;
+    // S0-only provenance used while file-scope RTL ports are lifted into
+    // implicit helper/lambda parameters.  Later stages never observe it.
+    std::string global_port_name;
 
     std::string op;
     ExprPtr left;

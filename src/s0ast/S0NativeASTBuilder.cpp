@@ -494,6 +494,8 @@ static std::unordered_map<std::string, std::string> lambda_var_usr_to_name;
 static std::unordered_map<std::string, std::string> lambda_var_location_to_name;
 static std::unordered_map<std::string, std::string> lambda_source_name_to_unique_name;
 static std::unordered_map<std::string, long long> global_const_int_values;
+static std::unordered_map<std::string, ParamDecl> global_ports_by_usr;
+static std::vector<ParamDecl> global_ports_in_source_order;
 static int lambda_unique_counter = 0;
 
 struct LambdaCaptureInfo {
@@ -2022,7 +2024,14 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             return make_field_access(base, field, field_type);
         }
         std::string name = cxToStr(clang_getCursorSpelling(cursor));
-        return make_var(name, convertType(type));
+        auto result = make_var(name, convertType(type));
+        if (referenced_kind == CXCursor_VarDecl) {
+            auto port = global_ports_by_usr.find(cursorUsr(referenced));
+            if (port != global_ports_by_usr.end()) {
+                result->global_port_name = port->second.name;
+            }
+        }
+        return result;
     }
 
     case CXCursor_ArraySubscriptExpr: {
@@ -4205,6 +4214,189 @@ static void normalizeLambdaCallsInFunction(FunctionAST& fn) {
     }
 }
 
+static std::string implicitPortParamName(const std::string& port_name) {
+    return "__rtlzz_port_" + port_name;
+}
+
+template <typename Fn>
+static void walkPortExpr(const ExprPtr& expr, Fn& fn) {
+    if (!expr) return;
+    fn(expr);
+    for (const auto& child : {expr->left, expr->right, expr->operand, expr->array_base,
+                              expr->index, expr->struct_base, expr->cast_expr, expr->cond,
+                              expr->then_expr, expr->else_expr, expr->base, expr->value}) {
+        walkPortExpr(child, fn);
+    }
+    for (const auto& arg : expr->args) walkPortExpr(arg, fn);
+    for (const auto& part : expr->parts) walkPortExpr(part, fn);
+}
+
+template <typename Fn>
+static void walkPortStmt(const StmtPtr& stmt, Fn& fn) {
+    if (!stmt) return;
+    for (const auto& expr : {stmt->assign_target, stmt->assign_value, stmt->if_cond,
+                             stmt->for_cond, stmt->for_step, stmt->while_cond,
+                             stmt->switch_expr, stmt->expr_stmt}) {
+        walkPortExpr(expr, fn);
+    }
+    if (stmt->decl_init) walkPortExpr(*stmt->decl_init, fn);
+    for (const auto& arg : stmt->decl_init_args) walkPortExpr(arg, fn);
+    if (stmt->for_init) walkPortStmt(stmt->for_init, fn);
+    for (const auto& child : stmt->if_then) walkPortStmt(child, fn);
+    for (const auto& child : stmt->if_else) walkPortStmt(child, fn);
+    for (const auto& child : stmt->for_body) walkPortStmt(child, fn);
+    for (const auto& child : stmt->while_body) walkPortStmt(child, fn);
+    for (const auto& child : stmt->block_stmts) walkPortStmt(child, fn);
+    for (const auto& clause : stmt->switch_cases) {
+        if (clause.value) walkPortExpr(*clause.value, fn);
+        for (const auto& child : clause.body) walkPortStmt(child, fn);
+    }
+    if (stmt->return_value) walkPortExpr(*stmt->return_value, fn);
+}
+
+template <typename Fn>
+static void walkPortFunctionBody(FunctionAST& function, Fn&& fn) {
+    for (const auto& stmt : function.body) walkPortStmt(stmt, fn);
+}
+
+static bool portLiftTypeMatches(const TypeInfo& lhs, const TypeInfo& rhs) {
+    return (lhs.width == 0 || rhs.width == 0 || lhs.width == rhs.width) &&
+           lhs.is_array == rhs.is_array &&
+           lhs.array_dims == rhs.array_dims;
+}
+
+static void collectAllSurfaceFunctions(
+    FunctionAST& top,
+    std::vector<FunctionAST*>& functions) {
+    functions.push_back(&top);
+    auto collect = [&](FunctionAST& fn, auto& self) -> void {
+        for (auto& [_, lambda] : fn.lambdas) {
+            if (!lambda) continue;
+            functions.push_back(lambda.get());
+            self(*lambda, self);
+        }
+        for (auto& helper : fn.helpers) {
+            if (!helper) continue;
+            functions.push_back(helper.get());
+            self(*helper, self);
+        }
+    };
+    collect(top, collect);
+}
+
+static void liftGlobalPortsIntoFunctions(FunctionAST& top) {
+    std::vector<FunctionAST*> functions;
+    collectAllSurfaceFunctions(top, functions);
+
+    std::unordered_map<std::string, std::vector<FunctionAST*>> functions_by_name;
+    for (auto* function : functions) {
+        functions_by_name[function->name].push_back(function);
+    }
+
+    using PortSet = std::unordered_set<std::string>;
+    std::unordered_map<FunctionAST*, PortSet> required_ports;
+    std::unordered_map<Expr*, FunctionAST*> resolved_calls;
+
+    for (auto* function : functions) {
+        auto collect_direct = [&](const ExprPtr& expr) {
+            if (!expr->global_port_name.empty()) {
+                required_ports[function].insert(expr->global_port_name);
+            }
+        };
+        walkPortFunctionBody(*function, collect_direct);
+    }
+
+    // Resolve calls while every function still has its source-visible signature.
+    for (auto* caller : functions) {
+        auto resolve_call = [&](const ExprPtr& expr) {
+            if (expr->kind != ExprKind::Call) return;
+            auto named = functions_by_name.find(expr->callee);
+            if (named == functions_by_name.end()) return;
+            if (named->second.size() == 1 &&
+                named->second.front()->params.size() == expr->args.size()) {
+                resolved_calls[expr.get()] = named->second.front();
+                return;
+            }
+            FunctionAST* match = nullptr;
+            for (auto* candidate : named->second) {
+                if (candidate->params.size() != expr->args.size()) continue;
+                bool types_match = true;
+                for (std::size_t i = 0; i < expr->args.size(); ++i) {
+                    if (!expr->args[i] ||
+                        !portLiftTypeMatches(candidate->params[i].type,
+                                             expr->args[i]->type)) {
+                        types_match = false;
+                        break;
+                    }
+                }
+                if (!types_match) continue;
+                if (match) {
+                    // Leave ambiguity to S2's existing diagnostic.
+                    return;
+                }
+                match = candidate;
+            }
+            if (match) resolved_calls[expr.get()] = match;
+        };
+        walkPortFunctionBody(*caller, resolve_call);
+    }
+
+    const std::size_t max_iterations = functions.size() * functions.size() + 1;
+    for (std::size_t iteration = 0; iteration < max_iterations; ++iteration) {
+        bool changed = false;
+        for (auto* caller : functions) {
+            auto propagate = [&](const ExprPtr& expr) {
+                auto callee = resolved_calls.find(expr.get());
+                if (callee == resolved_calls.end()) return;
+                for (const auto& port : required_ports[callee->second]) {
+                    changed |= required_ports[caller].insert(port).second;
+                }
+            };
+            walkPortFunctionBody(*caller, propagate);
+        }
+        if (!changed) break;
+        if (iteration + 1 == max_iterations) {
+            failUnsupported(clang_getNullCursor(),
+                            "S0 global port dependency propagation did not converge");
+        }
+    }
+
+    for (auto* function : functions) {
+        const bool is_top = function == &top;
+        if (!is_top) {
+            for (const auto& port : global_ports_in_source_order) {
+                if (!required_ports[function].count(port.name)) continue;
+                ParamDecl implicit = port;
+                implicit.name = implicitPortParamName(port.name);
+                function->params.push_back(std::move(implicit));
+            }
+        }
+        auto rewrite_refs = [&](const ExprPtr& expr) {
+            if (expr->global_port_name.empty()) return;
+            if (!is_top) expr->var_name = implicitPortParamName(expr->global_port_name);
+            expr->global_port_name.clear();
+        };
+        walkPortFunctionBody(*function, rewrite_refs);
+    }
+
+    for (auto* caller : functions) {
+        const bool caller_is_top = caller == &top;
+        auto append_port_args = [&](const ExprPtr& expr) {
+            auto callee = resolved_calls.find(expr.get());
+            if (callee == resolved_calls.end()) return;
+            for (const auto& port : global_ports_in_source_order) {
+                if (!required_ports[callee->second].count(port.name)) continue;
+                auto argument = make_var(
+                    caller_is_top ? port.name : implicitPortParamName(port.name),
+                    port.type);
+                argument->debug_loc = expr->debug_loc;
+                expr->args.push_back(std::move(argument));
+            }
+        };
+        walkPortFunctionBody(*caller, append_port_args);
+    }
+}
+
 static StmtPtr convertStaticArrayVarDecl(CXCursor c) {
     if (clang_getCursorKind(c) != CXCursor_VarDecl) return nullptr;
     TypeInfo type = convertType(clang_getCursorType(c));
@@ -4498,6 +4690,7 @@ static std::vector<ParamDecl> collectGlobalPortParams(
             : ParamPassingKind::Value;
         param.is_reference = param.is_output;
         state->params.push_back(std::move(param));
+        global_ports_by_usr[cursorUsr(cursor)] = state->params.back();
         state->seen.insert(name);
         return CXChildVisit_Continue;
     }, &state);
@@ -4513,6 +4706,7 @@ static std::vector<ParamDecl> collectGlobalPortParams(
             return {};
         }
     }
+    global_ports_in_source_order = state.params;
     return state.params;
 }
 
@@ -4532,6 +4726,8 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     known_lambda_names.clear();
     lambda_unique_counter = 0;
     global_const_int_values.clear();
+    global_ports_by_usr.clear();
+    global_ports_in_source_order.clear();
 
     CXIndex index = clang_createIndex(0, 0);
 
@@ -4690,6 +4886,18 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     active_struct_fields = &struct_metadata.struct_fields;
     active_struct_constructors = &struct_metadata.struct_constructors;
 
+    std::string port_error;
+    auto global_port_params = collectGlobalPortParams(
+        root, top_source_file, source_for_ports, port_error);
+    if (!port_error.empty()) {
+        result.error = std::move(port_error);
+        active_struct_fields = nullptr;
+        active_struct_constructors = nullptr;
+        clang_disposeTranslationUnit(tu);
+        clang_disposeIndex(index);
+        return result;
+    }
+
     FunctionAST func = convertFunctionDecl(found, resolved_top_function);
     func.struct_fields = struct_metadata.struct_fields;
     func.struct_constructors = struct_metadata.struct_constructors;
@@ -4711,17 +4919,7 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
         clang_disposeIndex(index);
         return result;
     }
-    std::string port_error;
-    func.params = collectGlobalPortParams(root, top_source_file,
-                                          source_for_ports, port_error);
-    if (!port_error.empty()) {
-        result.error = std::move(port_error);
-        active_struct_fields = nullptr;
-        active_struct_constructors = nullptr;
-        clang_disposeTranslationUnit(tu);
-        clang_disposeIndex(index);
-        return result;
-    }
+    func.params = std::move(global_port_params);
     collectLocalLambdas(found, func);
 
     for (const auto& fn : source_functions) {
@@ -4736,6 +4934,7 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
 
     propagateLambdaCaptureDependencies(func);
     normalizeLambdaCallsInFunction(func);
+    liftGlobalPortsIntoFunctions(func);
 
     result.function = func;
     active_struct_fields = nullptr;

@@ -92,6 +92,30 @@ Int<8> helper_lambda;
 Int<8> loop_inline;
 #pragma output_port return_mix
 Int<8> return_mix;
+#pragma output_port helper_global_read
+Int<8> helper_global_read;
+#pragma output_port helper_global_chain
+Int<8> helper_global_chain;
+#pragma output_port helper_global_write
+Int<8> helper_global_write;
+#pragma output_port helper_global_shadow
+Int<8> helper_global_shadow;
+
+Int<8> read_global_input() {
+    return a + Int<8>(11);
+}
+
+Int<8> transitive_global_input() {
+    return read_global_input() ^ b;
+}
+
+void write_global_output(Int<8> value) {
+    helper_global_write = value + a;
+}
+
+Int<8> shadow_global_name(Int<8> a) {
+    return a ^ ::a;
+}
 
 void hls_main() {
     Int<8> chain = mix_helper(a, b);
@@ -169,4 +193,9 @@ void hls_main() {
     Int<8> helper_side = helper_with_local_lambda(chain, alt);
     Int<8> loop_side = loop_calls_helper(a);
     return_mix = choose_path(sel, helper_side, loop_side);
+
+    helper_global_read = read_global_input();
+    helper_global_chain = transitive_global_input();
+    write_global_output(helper_global_chain);
+    helper_global_shadow = shadow_global_name(b);
 }

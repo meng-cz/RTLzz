@@ -84,6 +84,7 @@ python3 scripts/differential_rtl.py testv2/fixtures/inline_misc.logic.cpp --top 
 - 使用 libclang 解析 VUL-style C++。
 - 完成 top/helper/lambda 抽取、scope/name 解析、类型识别、struct metadata、表达式/语句 surface AST 构造。
 - 要求源级 top 为无参数 `void` 函数；收集文件级全局端口变量及 `#pragma input_port/output_port` 方向声明，并收敛为后续阶段使用的内部 `ParamDecl`。
+- helper/lambda 可直接访问全局端口；通过 Clang 声明身份区分同名遮蔽，沿调用图传播端口依赖，再提升为隐式参数并补全调用实参。
 - 拒绝未标注全局变量、无对应变量或重复冲突的端口 pragma、带初始化器或不受支持类型的全局端口。
 - 直接产出 V2 `FunctionAST`，不依赖其他 AST builder。
 
