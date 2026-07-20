@@ -141,6 +141,20 @@ def source_param_types(source: Path, top: str) -> dict[str, str]:
     return out
 
 
+def source_global_port_types(source: Path) -> dict[str, str]:
+    text = strip_cxx_comments(source.read_text())
+    out: dict[str, str] = {}
+    pattern = re.compile(
+        r"^\s*#\s*pragma\s+(?:input_port|output_port)\s+"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*$\s*"
+        r"^([^;\n]+?)\s+\1\s*;\s*$",
+        flags=re.M,
+    )
+    for match in pattern.finditer(text):
+        out[match.group(1)] = sanitize_cxx_value_type(match.group(2))
+    return out
+
+
 def cxx_scalar_type(t: dict[str, Any], source_type: str | None = None) -> str:
     if source_type:
         if not source_type.startswith("std::array<") and not source_type.startswith("array<"):
@@ -239,7 +253,7 @@ def random_inputs(program: dict[str, Any], rng: random.Random) -> dict[str, int]
 
 def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path) -> list[str]:
     input_order: list[str] = []
-    source_types = source_param_types(source, top)
+    source_types = source_global_port_types(source)
     lines = [
         "#include <array>",
         "#include <cstdint>",
@@ -313,12 +327,9 @@ def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path
 
     arg_index = 1
     argc_check_index = len(lines)
-    call_args: list[str] = []
     for port in program["ports"]:
-        var = "p_" + sanitize_identifier(port["name"])
+        var = port["name"]
         source_type = source_types.get(port["name"])
-        call_args.append(var)
-        lines.append(f"  {cxx_port_type(port['type'], source_type)} {var}{{}};")
         if port["direction"] != "Input":
             continue
         for flat, element in enumerate(port["element_symbols"]):
@@ -328,12 +339,12 @@ def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path
             arg_index += 1
 
     lines.insert(argc_check_index, f"  if (argc != {arg_index}) return 97;")
-    lines.append(f"  {top}({', '.join(call_args)});")
+    lines.append(f"  {top}();")
 
     for port in program["ports"]:
         if port["direction"] != "Output":
             continue
-        var = "p_" + sanitize_identifier(port["name"])
+        var = port["name"]
         for flat, element in enumerate(port["element_symbols"]):
             expr = access_indices(var, element_indices(port, flat))
             lines.append(

@@ -7,6 +7,11 @@ struct Bad {
 void consume(Bad value) {
 }
 
-void hls_main(Int<8> a, Int<8>& out) {
+#pragma input_port a
+Int<8> a;
+#pragma output_port out
+Int<8> out;
+
+void hls_main() {
     out = a;
 }

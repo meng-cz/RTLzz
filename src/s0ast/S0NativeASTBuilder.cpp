@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -4387,6 +4388,134 @@ static void collectGlobalConstInts(CXCursor root, const std::string& source_file
     }, &wanted);
 }
 
+struct SourcePortPragma {
+    ParamDirection direction = ParamDirection::Input;
+    int line = 0;
+};
+
+static std::unordered_map<std::string, SourcePortPragma>
+parseSourcePortPragmas(const std::string& source, std::string& error) {
+    std::unordered_map<std::string, SourcePortPragma> out;
+    std::regex pragma(
+        R"(^\s*#\s*pragma\s+(input_port|output_port)\s+([A-Za-z_][A-Za-z0-9_]*)\s*$)");
+    std::istringstream lines(source);
+    std::string line;
+    int line_number = 0;
+    while (std::getline(lines, line)) {
+        ++line_number;
+        std::smatch match;
+        if (!std::regex_match(line, match, pragma)) continue;
+        std::string name = match[2].str();
+        SourcePortPragma spec;
+        spec.direction = match[1].str() == "input_port"
+            ? ParamDirection::Input
+            : ParamDirection::Output;
+        spec.line = line_number;
+        if (!out.emplace(name, spec).second) {
+            error = "Duplicate or conflicting port pragma for global variable '" +
+                    name + "'";
+            return {};
+        }
+    }
+    return out;
+}
+
+static bool supportedGlobalPortType(const TypeInfo& type) {
+    if (type.is_pointer || type.is_reference || type.is_const ||
+        !type.struct_name.empty()) {
+        return false;
+    }
+    if (type.is_array) {
+        TypeInfo scalar = type;
+        scalar.is_array = false;
+        scalar.array_size = 0;
+        scalar.array_dims.clear();
+        return supportedGlobalPortType(scalar);
+    }
+    return type.name == "bool" || type.hw_kind == "bool" ||
+           type.hw_kind == "Int" || isBuiltinIntegerType(type);
+}
+
+static std::vector<ParamDecl> collectGlobalPortParams(
+    CXCursor root,
+    const std::string& source_file,
+    const std::string& source,
+    std::string& error) {
+    auto pragmas = parseSourcePortPragmas(source, error);
+    if (!error.empty()) return {};
+
+    struct CollectState {
+        std::string source_file;
+        const std::unordered_map<std::string, SourcePortPragma>* pragmas;
+        std::unordered_set<std::string> seen;
+        std::vector<ParamDecl> params;
+        std::string error;
+    } state{normalizedPath(source_file), &pragmas, {}, {}, {}};
+
+    clang_visitChildren(root, [](CXCursor cursor, CXCursor,
+                                 CXClientData data) -> CXChildVisitResult {
+        auto* state = static_cast<CollectState*>(data);
+        if (!state->error.empty() ||
+            clang_getCursorKind(cursor) != CXCursor_VarDecl ||
+            normalizedPath(cursorFileName(cursor)) != state->source_file) {
+            return CXChildVisit_Continue;
+        }
+        std::string name = cxToStr(clang_getCursorSpelling(cursor));
+        auto pragma = state->pragmas->find(name);
+        if (pragma == state->pragmas->end()) {
+            state->error = "File-scope global variable '" + name +
+                           "' is not declared by #pragma input_port or "
+                           "#pragma output_port";
+            return CXChildVisit_Break;
+        }
+        TypeInfo type = convertType(clang_getCursorType(cursor));
+        if (!supportedGlobalPortType(type)) {
+            state->error = "Unsupported global port type for '" + name +
+                           "': only bool, Int<N>, builtin integers, and "
+                           "std::array forms of those types are allowed";
+            return CXChildVisit_Break;
+        }
+        std::string declaration_text = cursorText(cursor);
+        std::size_t name_pos = declaration_text.rfind(name);
+        std::string declaration_tail = name_pos == std::string::npos
+            ? declaration_text
+            : declaration_text.substr(name_pos + name.size());
+        if (declaration_tail.find('=') != std::string::npos ||
+            declaration_tail.find('{') != std::string::npos ||
+            declaration_tail.find('(') != std::string::npos) {
+            state->error = "Global port '" + name +
+                           "' must not have an initializer";
+            return CXChildVisit_Break;
+        }
+        ParamDecl param;
+        param.name = name;
+        param.type = type;
+        param.debug_loc = debugLocFromCursor(cursor);
+        param.direction = pragma->second.direction;
+        param.is_output = param.direction == ParamDirection::Output;
+        param.passing = param.is_output
+            ? ParamPassingKind::MutableRef
+            : ParamPassingKind::Value;
+        param.is_reference = param.is_output;
+        state->params.push_back(std::move(param));
+        state->seen.insert(name);
+        return CXChildVisit_Continue;
+    }, &state);
+
+    if (!state.error.empty()) {
+        error = std::move(state.error);
+        return {};
+    }
+    for (const auto& [name, _] : pragmas) {
+        if (!state.seen.count(name)) {
+            error = "Port pragma names no file-scope global variable: '" +
+                    name + "'";
+            return {};
+        }
+    }
+    return state.params;
+}
+
 static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file,
                                           const std::string* source_text,
                                           const std::string& top_function,
@@ -4413,10 +4542,12 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
 
     std::string parse_file = source_file;
     std::string source_buffer;
+    std::string source_for_ports;
     std::string wrapper_source;
     std::vector<CXUnsavedFile> unsaved_storage;
     unsigned unsaved_count = 0;
     if (source_text) {
+        source_for_ports = *source_text;
         source_buffer = *source_text;
         if (!sourceTextContainsFixintInclude(source_buffer)) {
             source_buffer = "#include <fixint.hpp>\n#line 1 \"" +
@@ -4428,6 +4559,12 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
         source_unsaved.Contents = source_buffer.c_str();
         source_unsaved.Length = static_cast<unsigned long>(source_buffer.size());
         unsaved_storage.push_back(source_unsaved);
+    }
+    if (!source_text) {
+        std::ifstream source_in(source_file);
+        std::ostringstream source_stream;
+        source_stream << source_in.rdbuf();
+        source_for_ports = source_stream.str();
     }
     const bool has_fixint_include = source_text
         ? sourceTextContainsFixintInclude(*source_text)
@@ -4556,31 +4693,36 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     FunctionAST func = convertFunctionDecl(found, resolved_top_function);
     func.struct_fields = struct_metadata.struct_fields;
     func.struct_constructors = struct_metadata.struct_constructors;
-    for (const auto& param : func.params) {
-        std::string invalid = invalidTopParamReason(param);
-        if (!invalid.empty()) {
-            result.error = invalid;
-            active_struct_fields = nullptr;
-            active_struct_constructors = nullptr;
-            clang_disposeTranslationUnit(tu);
-            clang_disposeIndex(index);
-            return result;
-        }
+    if (!func.params.empty()) {
+        result.error = "Top function must not declare parameters; RTL ports are "
+                       "file-scope globals annotated with #pragma input_port or "
+                       "#pragma output_port";
+        active_struct_fields = nullptr;
+        active_struct_constructors = nullptr;
+        clang_disposeTranslationUnit(tu);
+        clang_disposeIndex(index);
+        return result;
+    }
+    if (func.return_type.name != "void") {
+        result.error = "Top function must return void";
+        active_struct_fields = nullptr;
+        active_struct_constructors = nullptr;
+        clang_disposeTranslationUnit(tu);
+        clang_disposeIndex(index);
+        return result;
+    }
+    std::string port_error;
+    func.params = collectGlobalPortParams(root, top_source_file,
+                                          source_for_ports, port_error);
+    if (!port_error.empty()) {
+        result.error = std::move(port_error);
+        active_struct_fields = nullptr;
+        active_struct_constructors = nullptr;
+        clang_disposeTranslationUnit(tu);
+        clang_disposeIndex(index);
+        return result;
     }
     collectLocalLambdas(found, func);
-
-    std::vector<StmtPtr> global_static_decls;
-    clang_visitChildren(root, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
-        auto* decls = static_cast<std::vector<StmtPtr>*>(data);
-        auto stmt = convertStaticArrayVarDecl(c);
-        if (!stmt) stmt = convertGlobalConstScalarDecl(c);
-        if (stmt) decls->push_back(stmt);
-        return CXChildVisit_Continue;
-    }, &global_static_decls);
-    if (!global_static_decls.empty()) {
-        global_static_decls.insert(global_static_decls.end(), func.body.begin(), func.body.end());
-        func.body = std::move(global_static_decls);
-    }
 
     for (const auto& fn : source_functions) {
         if (fn.name == func.name && clang_equalCursors(fn.cursor, found)) continue;

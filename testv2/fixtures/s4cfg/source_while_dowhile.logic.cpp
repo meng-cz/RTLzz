@@ -8,7 +8,14 @@ bool again(Int<8> x) {
     return x != Int<8>(3);
 }
 
-void hls_main(Int<8> seed, bool skip, Int<8>& out) {
+#pragma input_port seed
+Int<8> seed;
+#pragma input_port skip
+bool skip;
+#pragma output_port out
+Int<8> out;
+
+void hls_main() {
     Int<8> acc = seed;
 
     while (keep(acc)) {

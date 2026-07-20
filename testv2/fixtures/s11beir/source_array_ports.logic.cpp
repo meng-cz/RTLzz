@@ -1,7 +1,11 @@
 #include <array>
 #include <fixint.hpp>
 
-void hls_main(const std::array<Int<8>, 2>& in,
-              Int<8>& selected) {
+#pragma input_port in
+std::array<Int<8>, 2> in;
+#pragma output_port selected
+Int<8> selected;
+
+void hls_main() {
     selected = in[1];
 }

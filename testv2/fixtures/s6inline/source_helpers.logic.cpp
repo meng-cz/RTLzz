@@ -22,7 +22,18 @@ Int<8> lam(Int<8> x) {
     return x + Int<8>(6);
 }
 
-void hls_main(bool sel, Int<8> a, Int<8> b, Int<8>& out, Int<8>& tail) {
+#pragma input_port sel
+bool sel;
+#pragma input_port a
+Int<8> a;
+#pragma input_port b
+Int<8> b;
+#pragma output_port out
+Int<8> out;
+#pragma output_port tail
+Int<8> tail;
+
+void hls_main() {
     Int<8> t = choose(sel, a, b);
     touch(t);
     out = adjust(sel, t);

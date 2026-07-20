@@ -50,27 +50,50 @@ Int<8> loop_calls_helper(Int<8> seed) {
     return acc;
 }
 
-void hls_main(Int<8> a,
-              Int<8> b,
-              Int<12> wide,
-              bool sel,
-              bool alt,
-              Int<8>& helper_chain,
-              Int<8>& ref_update,
-              Int<8>& overload8,
-              Int<12>& overload12,
-              Int<8>& lambda_value,
-              Int<8>& lambda_ref,
-              Int<8>& lambda_nested_value,
-              Int<8>& lambda_nested_ref,
-              Int<8>& lambda_ref_mutation,
-              Int<8>& lambda_calls_lambda_value,
-              Int<8>& lambda_calls_lambda_ref,
-              Int<8>& lambda_template_0,
-              Int<8>& lambda_template_1,
-              Int<8>& helper_lambda,
-              Int<8>& loop_inline,
-              Int<8>& return_mix) {
+#pragma input_port a
+Int<8> a;
+#pragma input_port b
+Int<8> b;
+#pragma input_port wide
+Int<12> wide;
+#pragma input_port sel
+bool sel;
+#pragma input_port alt
+bool alt;
+#pragma output_port helper_chain
+Int<8> helper_chain;
+#pragma output_port ref_update
+Int<8> ref_update;
+#pragma output_port overload8
+Int<8> overload8;
+#pragma output_port overload12
+Int<12> overload12;
+#pragma output_port lambda_value
+Int<8> lambda_value;
+#pragma output_port lambda_ref
+Int<8> lambda_ref;
+#pragma output_port lambda_nested_value
+Int<8> lambda_nested_value;
+#pragma output_port lambda_nested_ref
+Int<8> lambda_nested_ref;
+#pragma output_port lambda_ref_mutation
+Int<8> lambda_ref_mutation;
+#pragma output_port lambda_calls_lambda_value
+Int<8> lambda_calls_lambda_value;
+#pragma output_port lambda_calls_lambda_ref
+Int<8> lambda_calls_lambda_ref;
+#pragma output_port lambda_template_0
+Int<8> lambda_template_0;
+#pragma output_port lambda_template_1
+Int<8> lambda_template_1;
+#pragma output_port helper_lambda
+Int<8> helper_lambda;
+#pragma output_port loop_inline
+Int<8> loop_inline;
+#pragma output_port return_mix
+Int<8> return_mix;
+
+void hls_main() {
     Int<8> chain = mix_helper(a, b);
     helper_chain = chain;
 
@@ -81,7 +104,7 @@ void hls_main(Int<8> a,
     overload8 = overloaded_pick(a);
     overload12 = overloaded_pick(wide);
 
-    auto value_lambda = [sel](Int<8> x, Int<8> y) -> Int<8> {
+    auto value_lambda = [=](Int<8> x, Int<8> y) -> Int<8> {
         Int<8> mixed = mix_helper(x, y);
         return choose_path(sel, mixed, y);
     };

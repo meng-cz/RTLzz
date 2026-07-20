@@ -89,22 +89,40 @@ Matrix make_matrix(Packet a, Packet b, Pair p0, Pair p1) {
     return mat;
 }
 
-void hls_main(Int<8> seed,
-              Int<8> bias,
-              bool choose_hi,
-              bool choose_tail,
-              Int<8>& aggregate_pos,
-              Int<8>& aggregate_copy,
-              Int<8>& aggregate_designated,
-              Int<8>& helper_struct_return,
-              Int<8>& helper_array_return,
-              Int<8>& lambda_struct_value,
-              Int<8>& lambda_array_value,
-              Int<8>& nested_dynamic_read,
-              Int<8>& nested_dynamic_write,
-              Int<8>& internal_struct_array,
-              Int<8>& const_lookup,
-              Int<8>& final_mix) {
+#pragma input_port seed
+Int<8> seed;
+#pragma input_port bias
+Int<8> bias;
+#pragma input_port choose_hi
+bool choose_hi;
+#pragma input_port choose_tail
+bool choose_tail;
+#pragma output_port aggregate_pos
+Int<8> aggregate_pos;
+#pragma output_port aggregate_copy
+Int<8> aggregate_copy;
+#pragma output_port aggregate_designated
+Int<8> aggregate_designated;
+#pragma output_port helper_struct_return
+Int<8> helper_struct_return;
+#pragma output_port helper_array_return
+Int<8> helper_array_return;
+#pragma output_port lambda_struct_value
+Int<8> lambda_struct_value;
+#pragma output_port lambda_array_value
+Int<8> lambda_array_value;
+#pragma output_port nested_dynamic_read
+Int<8> nested_dynamic_read;
+#pragma output_port nested_dynamic_write
+Int<8> nested_dynamic_write;
+#pragma output_port internal_struct_array
+Int<8> internal_struct_array;
+#pragma output_port const_lookup
+Int<8> const_lookup;
+#pragma output_port final_mix
+Int<8> final_mix;
+
+void hls_main() {
     int lane_idx = 0;
     int tap_idx = 0;
     if (choose_hi) {
@@ -128,7 +146,7 @@ void hls_main(Int<8> seed,
     Arr2 array_value = make_array(selected.lo, selected.hi);
     helper_array_return = array_value[tap_idx] + pkt.tail[lane_idx];
 
-    auto pair_lambda = [choose_tail](Pair in, Int<8> delta) -> Pair {
+    auto pair_lambda = [=](Pair in, Int<8> delta) -> Pair {
         Pair out = in;
         if (choose_tail) {
             out.lo = out.lo + delta;

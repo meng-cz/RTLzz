@@ -41,7 +41,14 @@ Pair select(Packet pkt_arg, int idx_arg) {
     return local;
 }
 
-void hls_main(Int<8> seed, int idx, Int<8>& out) {
+#pragma input_port seed
+Int<8> seed;
+#pragma input_port idx
+int idx;
+#pragma output_port out
+Int<8> out;
+
+void hls_main() {
     Packet pkt;
     pkt = make_packet(seed);
     Pair chosen;

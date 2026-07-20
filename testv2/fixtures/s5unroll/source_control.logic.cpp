@@ -1,7 +1,14 @@
 #include <cstdint>
 #include <fixint.hpp>
 
-void hls_main(Int<8> step, bool stop, Int<8>& out) {
+#pragma input_port step
+Int<8> step;
+#pragma input_port stop
+bool stop;
+#pragma output_port out
+Int<8> out;
+
+void hls_main() {
     Int<8> acc = Int<8>(0);
 
     for (uint32_t i = 0; i < 3; ++i) {

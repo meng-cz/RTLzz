@@ -8,7 +8,12 @@ void bump(Int<8>& x) {
     x = inc(x);
 }
 
-void hls_main(Int<8> seed, Int<8>& out) {
+#pragma input_port seed
+Int<8> seed;
+#pragma output_port out
+Int<8> out;
+
+void hls_main() {
     Int<8> acc = seed;
     for (int i = 0; i < 3; i = i + 1) {
         acc = inc(acc);

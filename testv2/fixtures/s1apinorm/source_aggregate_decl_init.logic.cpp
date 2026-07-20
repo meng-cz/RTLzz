@@ -9,7 +9,12 @@ struct Box {
     Pair member;
 };
 
-void hls_main(int idx, Int<8>& out) {
+#pragma input_port idx
+int idx;
+#pragma output_port out
+Int<8> out;
+
+void hls_main() {
     Box box;
     Pair arr[2];
     Pair from_member = box.member;

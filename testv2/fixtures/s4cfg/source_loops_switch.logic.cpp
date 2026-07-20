@@ -1,7 +1,18 @@
 #include <cstdint>
 #include <fixint.hpp>
 
-void hls_main(Int<8> a, uint8_t mode, bool skip, bool stop, Int<8>& out) {
+#pragma input_port a
+Int<8> a;
+#pragma input_port mode
+uint8_t mode;
+#pragma input_port skip
+bool skip;
+#pragma input_port stop
+bool stop;
+#pragma output_port out
+Int<8> out;
+
+void hls_main() {
     Int<8> acc = Int<8>(0);
     for (uint32_t i = 0; i < 4; ++i) {
         if (skip && i == 2) {

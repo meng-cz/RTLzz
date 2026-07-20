@@ -1,9 +1,15 @@
 #include <cstdint>
 #include <fixint.hpp>
 
-constexpr int64_t LANES = 2;
+#pragma input_port in
+Int<32> in;
+#pragma output_port out0
+Int<32> out0;
+#pragma output_port out1
+Int<32> out1;
 
-void hls_main(Int<32> in, Int<32>& out0, Int<32>& out1) {
+void hls_main() {
+    constexpr int64_t LANES = 2;
     out0 = 0;
     out1 = 0;
 

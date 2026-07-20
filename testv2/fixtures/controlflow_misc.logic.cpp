@@ -96,17 +96,30 @@ Int<8> loop_control_helper(Int<8> seed,
     return acc;
 }
 
-void hls_main(Int<8> seed,
-              uint8_t mode,
-              bool a,
-              bool b,
-              bool c,
-              bool early_top,
-              Int<8>& if_value,
-              Int<8>& switch_value,
-              Int<8>& loop_value,
-              Int<8>& early_value,
-              Int<8>& final_value) {
+#pragma input_port seed
+Int<8> seed;
+#pragma input_port mode
+uint8_t mode;
+#pragma input_port a
+bool a;
+#pragma input_port b
+bool b;
+#pragma input_port c
+bool c;
+#pragma input_port early_top
+bool early_top;
+#pragma output_port if_value
+Int<8> if_value;
+#pragma output_port switch_value
+Int<8> switch_value;
+#pragma output_port loop_value
+Int<8> loop_value;
+#pragma output_port early_value
+Int<8> early_value;
+#pragma output_port final_value
+Int<8> final_value;
+
+void hls_main() {
     if_value = Int<8>(0);
     switch_value = Int<8>(0);
     loop_value = Int<8>(0);
