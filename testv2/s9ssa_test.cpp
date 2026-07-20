@@ -217,6 +217,54 @@ static std::string runSourceToS9(const std::string& file) {
     return s9.debug_text;
 }
 
+static s9ssa::SSAResult sourceToS9Result(const std::string& file) {
+    auto ast = parseFixture(file);
+    auto s1 = s1apinorm::normalizeAPIs(ast);
+    if (!s1.ok()) std::cerr << s1.error->formatted << "\n";
+    CHECK(s1.ok());
+    CHECK(s1.function.has_value());
+    auto s2 = s2validate::validateFunctionAST(s1.function.value());
+    if (!s2.ok()) std::cerr << s2.error->formatted << "\n";
+    CHECK(s2.ok());
+    auto s3 = s3statementize::statementizeFunctionAST(s1.function.value());
+    if (!s3.ok()) std::cerr << s3.error->formatted << "\n";
+    CHECK(s3.ok());
+    CHECK(s3.program.has_value());
+    auto s4 = s4cfg::buildCFGProgram(s3.program.value());
+    if (!s4.ok()) std::cerr << s4.error->formatted << "\n";
+    CHECK(s4.ok());
+    CHECK(s4.program.has_value());
+    auto s5 = s5unroll::unrollCFGProgram(s4.program.value());
+    if (!s5.ok()) std::cerr << s5.error->formatted << "\n";
+    CHECK(s5.ok());
+    CHECK(s5.program.has_value());
+    auto s6 = s6inline::inlineCFGProgram(s5.program.value());
+    if (!s6.ok()) std::cerr << s6.error->formatted << "\n";
+    CHECK(s6.ok());
+    CHECK(s6.program.has_value());
+    auto s7 = s7flatten::flattenProgram(s6.program.value());
+    if (!s7.ok()) std::cerr << s7.error->formatted << "\n";
+    CHECK(s7.ok());
+    CHECK(s7.program.has_value());
+    auto s8 = s8opnorm::normalizeOperations(s7.program.value());
+    if (!s8.ok()) std::cerr << s8.error->formatted << "\n";
+    CHECK(s8.ok());
+    CHECK(s8.program.has_value());
+    return s9ssa::buildSSA(s8.program.value());
+}
+
+static void expectSourceToS9Error(const std::string& file,
+                                  const std::string& message,
+                                  const std::string& note = {}) {
+    auto result = sourceToS9Result(file);
+    CHECK(!result.ok());
+    CHECK(result.error.has_value());
+    CHECK(result.error->message.find(message) != std::string::npos);
+    if (!note.empty()) {
+        CHECK(result.error->context.note.find(note) != std::string::npos);
+    }
+}
+
 static void straightLineVersionsIncrement() {
     auto program = baseProgram();
     auto& fn = program.top;
@@ -272,6 +320,20 @@ static void localMissingIncomingIsRejected() {
     CHECK(result.error->message.find("Missing incoming SSA value") != std::string::npos);
 }
 
+static void explicitReadBeforeDefinitionIsRejected() {
+    auto program = baseProgram();
+    auto& fn = program.top;
+    fn.blocks[0].stmts.push_back(assign(2, var(3, intType(8))));
+
+    auto result = s9ssa::buildSSA(program);
+    CHECK(!result.ok());
+    CHECK(result.error.has_value());
+    CHECK(result.error->message.find("Read before definition for symbol 'x'") !=
+          std::string::npos);
+    CHECK(result.error->message.find("Hardware values are not implicitly initialized") !=
+          std::string::npos);
+}
+
 static void lookupWriteLowersToElementMuxes() {
     s8opnorm::S8NormProgram program;
     auto& fn = program.top;
@@ -307,6 +369,54 @@ static void lookupWriteLowersToElementMuxes() {
     CHECK(debug.find("Trunc<4>(0x7<u8>)") != std::string::npos);
 }
 
+static void lookupWriteImplicitOldElementReadBeforeDefinitionIsRejected() {
+    s8opnorm::S8NormProgram program;
+    auto& fn = program.top;
+    fn.name = "hls_main";
+    fn.entry = 0;
+    fn.exit = 0;
+    fn.symbols.push_back(symbol(0, "idx", intType(2), s8opnorm::S8SymbolRole::Port));
+    fn.symbols.push_back(symbol(1, "arr0", intType(4), s8opnorm::S8SymbolRole::Local));
+    fn.symbols.push_back(symbol(2, "arr1", intType(4), s8opnorm::S8SymbolRole::Local));
+    fn.symbols.push_back(symbol(3, "out", intType(4), s8opnorm::S8SymbolRole::Port));
+    fn.ports.push_back(s8opnorm::S8Port{0, ParamDirection::Input, ParamPassingKind::Value});
+    fn.ports.push_back(s8opnorm::S8Port{3, ParamDirection::Output, ParamPassingKind::MutableRef});
+
+    s8opnorm::S8Stmt lookupwrite;
+    lookupwrite.kind = s8opnorm::S8StmtKind::LookupWrite;
+    lookupwrite.lookup_index = var(0, intType(2));
+    lookupwrite.lookup_value = lit(7, intType(8));
+    lookupwrite.lookup_elements = {var(1, intType(4)), var(2, intType(4))};
+    lookupwrite.lookup_write_targets = {1, 2};
+
+    s8opnorm::S8BasicBlock block;
+    block.id = 0;
+    block.stmts.push_back(std::move(lookupwrite));
+    block.stmts.push_back(assign(3, var(1, intType(4))));
+    block.terminator = exitTerm();
+    fn.blocks.push_back(std::move(block));
+
+    auto result = s9ssa::buildSSA(program);
+    CHECK(!result.ok());
+    CHECK(result.error.has_value());
+    CHECK(result.error->message.find("Read before definition for symbol 'arr0'") !=
+          std::string::npos);
+    CHECK(result.error->context.note.find("lookupwrite old element") != std::string::npos);
+}
+
+static void sourceExplicitReadBeforeDefinitionIsRejectedAtS9() {
+    expectSourceToS9Error(
+        "testv2/fixtures/s9ssa/uninitialized_explicit_read.logic.cpp",
+        "Read before definition for symbol 'value'");
+}
+
+static void sourceDynamicWriteImplicitReadBeforeDefinitionIsRejectedAtS9() {
+    expectSourceToS9Error(
+        "testv2/fixtures/s9ssa/uninitialized_dynamic_write.logic.cpp",
+        "Read before definition for symbol 'arr__idx_0'",
+        "lookupwrite old element");
+}
+
 static void sourcePipelineRunsThroughS9() {
     auto debug = runSourceToS9("testv2/fixtures/s9ssa/source_ssa.logic.cpp");
     CHECK(debug.find("s9ssa") != std::string::npos);
@@ -320,7 +430,11 @@ int main() {
     ifElseCreatesPhi();
     oneBranchOutputWriteMergesWithInitialValue();
     localMissingIncomingIsRejected();
+    explicitReadBeforeDefinitionIsRejected();
     lookupWriteLowersToElementMuxes();
+    lookupWriteImplicitOldElementReadBeforeDefinitionIsRejected();
+    sourceExplicitReadBeforeDefinitionIsRejectedAtS9();
+    sourceDynamicWriteImplicitReadBeforeDefinitionIsRejectedAtS9();
     sourcePipelineRunsThroughS9();
     return 0;
 }

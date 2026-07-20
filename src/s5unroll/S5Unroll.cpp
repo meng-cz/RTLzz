@@ -380,17 +380,6 @@ void compactReachable(FunctionCFG& fn) {
     rebuildEdges(fn);
 }
 
-struct LoopAnalysis {
-    s3statementize::SymbolId var = -1;
-    TypeInfo type;
-    std::uint64_t init = 0;
-    BinaryOp compare = BinaryOp::Lt;
-    std::uint64_t bound = 0;
-    std::int64_t step_delta = 0;
-    std::unordered_map<BlockId, std::int64_t> body_entry_deltas;
-    std::vector<std::uint64_t> values;
-};
-
 std::optional<s3statementize::SymbolId> assignedRoot(const CFGStmt& stmt) {
     if (!stmt.stmt) return std::nullopt;
     const auto& s = *stmt.stmt;
@@ -421,11 +410,24 @@ struct DeltaValue {
     std::int64_t constant = 0;
     std::int64_t delta = 0;
     TypeInfo type;
+    bool loop_derived = false;
 };
 
 struct DeltaState {
     std::int64_t induction_delta = 0;
     std::unordered_map<s3statementize::SymbolId, DeltaValue> values;
+};
+
+struct LoopAnalysis {
+    s3statementize::SymbolId var = -1;
+    TypeInfo type;
+    std::uint64_t init = 0;
+    BinaryOp compare = BinaryOp::Lt;
+    std::uint64_t bound = 0;
+    std::int64_t step_delta = 0;
+    std::unordered_map<BlockId, std::int64_t> body_entry_deltas;
+    std::unordered_map<BlockId, DeltaState> body_entry_states;
+    std::vector<std::uint64_t> values;
 };
 
 std::optional<DeltaValue> literalDeltaValue(const Operand& operand) {
@@ -436,6 +438,7 @@ std::optional<DeltaValue> literalDeltaValue(const Operand& operand) {
     out.kind = DeltaValue::Kind::Constant;
     out.constant = *parsed;
     out.type = operand.type;
+    out.loop_derived = false;
     return out;
 }
 
@@ -449,6 +452,7 @@ std::optional<DeltaValue> operandDeltaValue(const Operand& operand,
         out.kind = DeltaValue::Kind::Affine;
         out.delta = state.induction_delta;
         out.type = operand.type;
+        out.loop_derived = true;
         return out;
     }
     if (symbol >= 0) {
@@ -479,22 +483,30 @@ std::optional<DeltaValue> evalDeltaOp(const OpExpr& op,
         out.kind = DeltaValue::Kind::Affine;
         out.delta = delta;
         out.type = op.type;
+        out.loop_derived = true;
         return out;
     };
-    auto make_const = [&](std::int64_t value) {
+    auto make_const = [&](std::int64_t value, bool loop_derived) {
         DeltaValue out;
         out.kind = DeltaValue::Kind::Constant;
         out.constant = value;
         out.type = op.type;
+        out.loop_derived = loop_derived;
         return out;
     };
 
     if (lhs->kind == DeltaValue::Kind::Constant &&
         rhs->kind == DeltaValue::Kind::Constant) {
         switch (op.binary_op) {
-        case BinaryOp::Add: return make_const(lhs->constant + rhs->constant);
-        case BinaryOp::Sub: return make_const(lhs->constant - rhs->constant);
-        case BinaryOp::Mul: return make_const(lhs->constant * rhs->constant);
+        case BinaryOp::Add:
+            return make_const(lhs->constant + rhs->constant,
+                              lhs->loop_derived || rhs->loop_derived);
+        case BinaryOp::Sub:
+            return make_const(lhs->constant - rhs->constant,
+                              lhs->loop_derived || rhs->loop_derived);
+        case BinaryOp::Mul:
+            return make_const(lhs->constant * rhs->constant,
+                              lhs->loop_derived || rhs->loop_derived);
         default: return std::nullopt;
         }
     }
@@ -522,7 +534,8 @@ std::optional<DeltaValue> evalDeltaOp(const OpExpr& op,
 bool sameDeltaValue(const DeltaValue& lhs, const DeltaValue& rhs) {
     return lhs.kind == rhs.kind &&
            lhs.constant == rhs.constant &&
-           lhs.delta == rhs.delta;
+           lhs.delta == rhs.delta &&
+           lhs.loop_derived == rhs.loop_derived;
 }
 
 bool mergeDeltaState(DeltaState& into, const DeltaState& incoming) {
@@ -612,6 +625,7 @@ struct BodyDeltaAnalysis {
     bool has_backedge = false;
     std::int64_t backedge_delta = 0;
     std::unordered_map<BlockId, std::int64_t> entry_deltas;
+    std::unordered_map<BlockId, DeltaState> entry_states;
 };
 
 BodyDeltaAnalysis analyzeLoopBodyDelta(const FunctionCFG& fn,
@@ -675,6 +689,7 @@ BodyDeltaAnalysis analyzeLoopBodyDelta(const FunctionCFG& fn,
         if (in_states[i]) {
             analysis.entry_deltas[static_cast<BlockId>(i)] =
                 in_states[i]->induction_delta;
+            analysis.entry_states[static_cast<BlockId>(i)] = in_states[i].value();
         }
     }
     return analysis;
@@ -839,6 +854,7 @@ std::optional<LoopAnalysis> analyzeLoop(const FunctionCFG& fn,
     analysis.bound = bound.value;
     analysis.step_delta = body_delta.backedge_delta;
     analysis.body_entry_deltas = std::move(body_delta.entry_deltas);
+    analysis.body_entry_states = std::move(body_delta.entry_states);
 
     auto cond = [&](std::uint64_t value) {
         return evalLoopCondition(analysis.compare, value, analysis.bound, analysis.type);
@@ -880,8 +896,6 @@ std::optional<LoopAnalysis> analyzeLoop(const FunctionCFG& fn,
     return analysis;
 }
 
-void replaceOperand(Operand& operand, s3statementize::SymbolId var, const Operand& value);
-
 Operand deepCopyOperand(const Operand& operand);
 
 LValue deepCopyLValue(const LValue& lvalue) {
@@ -903,58 +917,6 @@ Operand deepCopyOperand(const Operand& operand) {
     if (operand.kind == OperandKind::LValueRead) {
         out.lvalue = deepCopyLValue(operand.lvalue);
     }
-    return out;
-}
-
-void replaceLValue(LValue& lvalue, s3statementize::SymbolId var, const Operand& value) {
-    (void)var;
-    (void)value;
-    for (auto& access : lvalue.accesses) {
-        if (access.index) replaceOperand(*access.index, var, value);
-    }
-}
-
-void replaceOperand(Operand& operand, s3statementize::SymbolId var, const Operand& value) {
-    if (operand.kind == OperandKind::Var && operand.var_symbol == var) {
-        operand = value;
-        return;
-    }
-    if (operand.kind == OperandKind::LValueRead &&
-        operand.lvalue.root_symbol == var && operand.lvalue.accesses.empty()) {
-        operand = value;
-        return;
-    }
-    if (operand.kind == OperandKind::LValueRead) {
-        replaceLValue(operand.lvalue, var, value);
-    }
-}
-
-S3StmtPtr cloneAndRewriteStmt(const S3StmtPtr& stmt,
-                              s3statementize::SymbolId var,
-                              const Operand& value,
-                              bool replace_targets) {
-    if (!stmt) return nullptr;
-    auto out = std::make_shared<S3Stmt>(*stmt);
-    out->target = deepCopyLValue(out->target);
-    out->value = deepCopyOperand(out->value);
-    for (auto& operand : out->op.operands) operand = deepCopyOperand(operand);
-    if (out->call_result) out->call_result = deepCopyLValue(out->call_result.value());
-    for (auto& arg : out->args) arg = deepCopyOperand(arg);
-    out->condition = deepCopyOperand(out->condition);
-    if (out->for_cond) out->for_cond = deepCopyOperand(out->for_cond.value());
-    out->switch_value = deepCopyOperand(out->switch_value);
-    if (out->return_value) out->return_value = deepCopyOperand(out->return_value.value());
-    if (replace_targets) replaceLValue(out->target, var, value);
-    replaceOperand(out->value, var, value);
-    for (auto& operand : out->op.operands) replaceOperand(operand, var, value);
-    if (out->call_result && replace_targets) {
-        replaceLValue(out->call_result.value(), var, value);
-    }
-    for (auto& arg : out->args) replaceOperand(arg, var, value);
-    replaceOperand(out->condition, var, value);
-    if (out->for_cond) replaceOperand(out->for_cond.value(), var, value);
-    replaceOperand(out->switch_value, var, value);
-    if (out->return_value) replaceOperand(out->return_value.value(), var, value);
     return out;
 }
 
@@ -1098,19 +1060,6 @@ void remapTerminatorSymbols(const FunctionCFG& fn,
         if (target.value) remapOperandSymbols(fn, target.value.value(), remap);
     }
     if (term.return_value) remapOperandSymbols(fn, term.return_value.value(), remap);
-}
-
-Terminator cloneAndRewriteTerminator(const Terminator& term,
-                                     s3statementize::SymbolId var,
-                                     const Operand& value) {
-    auto out = term;
-    replaceOperand(out.condition, var, value);
-    replaceOperand(out.switch_value, var, value);
-    for (auto& target : out.switch_targets) {
-        if (target.value) replaceOperand(target.value.value(), var, value);
-    }
-    if (out.return_value) replaceOperand(out.return_value.value(), var, value);
-    return out;
 }
 
 void removeLoopId(std::vector<LoopRegionId>& stack, LoopRegionId id) {
@@ -1286,35 +1235,126 @@ Operand inductionLiteralAt(std::uint64_t iteration_value,
     return literalOperand(wrapValue(signedValue(iteration_value, type) + delta, type), type);
 }
 
+Operand literalForDeltaValue(std::uint64_t iteration_value,
+                             const LoopAnalysis& analysis,
+                             const DeltaValue& value) {
+    if (value.kind == DeltaValue::Kind::Constant) {
+        return literalOperand(wrapValue(value.constant, value.type), value.type);
+    }
+    return literalOperand(
+        wrapValue(signedValue(iteration_value, analysis.type) + value.delta,
+                  value.type),
+        value.type);
+}
+
+void replaceOperandDerived(Operand& operand,
+                           const DeltaState& state,
+                           const LoopAnalysis& analysis,
+                           std::uint64_t iteration_value);
+
+void replaceLValueDerived(LValue& lvalue,
+                          const DeltaState& state,
+                          const LoopAnalysis& analysis,
+                          std::uint64_t iteration_value) {
+    for (auto& access : lvalue.accesses) {
+        if (access.index) {
+            replaceOperandDerived(*access.index, state, analysis, iteration_value);
+        }
+    }
+}
+
+void replaceOperandDerived(Operand& operand,
+                           const DeltaState& state,
+                           const LoopAnalysis& analysis,
+                           std::uint64_t iteration_value) {
+    auto value = operandDeltaValue(operand, state, analysis.var);
+    if (value && value->loop_derived) {
+        operand = literalForDeltaValue(iteration_value, analysis, *value);
+        return;
+    }
+    if (operand.kind == OperandKind::LValueRead) {
+        replaceLValueDerived(operand.lvalue, state, analysis, iteration_value);
+    }
+}
+
+S3StmtPtr cloneAndRewriteStmt(const S3StmtPtr& stmt,
+                              const DeltaState& state,
+                              const LoopAnalysis& analysis,
+                              std::uint64_t iteration_value,
+                              bool replace_targets) {
+    if (!stmt) return nullptr;
+    auto out = std::make_shared<S3Stmt>(*stmt);
+    out->target = deepCopyLValue(out->target);
+    out->value = deepCopyOperand(out->value);
+    for (auto& operand : out->op.operands) operand = deepCopyOperand(operand);
+    if (out->call_result) out->call_result = deepCopyLValue(out->call_result.value());
+    for (auto& arg : out->args) arg = deepCopyOperand(arg);
+    out->condition = deepCopyOperand(out->condition);
+    if (out->for_cond) out->for_cond = deepCopyOperand(out->for_cond.value());
+    out->switch_value = deepCopyOperand(out->switch_value);
+    if (out->return_value) out->return_value = deepCopyOperand(out->return_value.value());
+    if (replace_targets) replaceLValueDerived(out->target, state, analysis, iteration_value);
+    replaceOperandDerived(out->value, state, analysis, iteration_value);
+    for (auto& operand : out->op.operands) {
+        replaceOperandDerived(operand, state, analysis, iteration_value);
+    }
+    if (out->call_result && replace_targets) {
+        replaceLValueDerived(out->call_result.value(), state, analysis, iteration_value);
+    }
+    for (auto& arg : out->args) replaceOperandDerived(arg, state, analysis, iteration_value);
+    replaceOperandDerived(out->condition, state, analysis, iteration_value);
+    if (out->for_cond) {
+        replaceOperandDerived(out->for_cond.value(), state, analysis, iteration_value);
+    }
+    replaceOperandDerived(out->switch_value, state, analysis, iteration_value);
+    if (out->return_value) {
+        replaceOperandDerived(out->return_value.value(), state, analysis, iteration_value);
+    }
+    return out;
+}
+
+Terminator cloneAndRewriteTerminator(const Terminator& term,
+                                     const DeltaState& state,
+                                     const LoopAnalysis& analysis,
+                                     std::uint64_t iteration_value) {
+    auto out = term;
+    replaceOperandDerived(out.condition, state, analysis, iteration_value);
+    replaceOperandDerived(out.switch_value, state, analysis, iteration_value);
+    for (auto& target : out.switch_targets) {
+        if (target.value) {
+            replaceOperandDerived(target.value.value(), state, analysis, iteration_value);
+        }
+    }
+    if (out.return_value) {
+        replaceOperandDerived(out.return_value.value(), state, analysis, iteration_value);
+    }
+    return out;
+}
+
 void rewriteBlockForIteration(BasicBlock& clone,
                               const BasicBlock& original,
                               const LoopAnalysis& analysis,
                               std::uint64_t iteration_value) {
-    auto it = analysis.body_entry_deltas.find(original.id);
-    if (it == analysis.body_entry_deltas.end()) {
+    auto it = analysis.body_entry_states.find(original.id);
+    if (it == analysis.body_entry_states.end()) {
         fail("Cannot unroll loop: missing loop body delta for block bb" +
              std::to_string(original.id));
     }
 
-    DeltaState state;
-    state.induction_delta = it->second;
+    DeltaState state = it->second;
     for (std::size_t i = 0; i < clone.stmts.size(); ++i) {
-        Operand literal = inductionLiteralAt(iteration_value,
-                                             state.induction_delta,
-                                             analysis.type);
         clone.stmts[i].stmt = cloneAndRewriteStmt(clone.stmts[i].stmt,
-                                                  analysis.var,
-                                                  literal,
+                                                  state,
+                                                  analysis,
+                                                  iteration_value,
                                                   true);
         processDeltaStmt(original.stmts[i], state, analysis.var);
     }
 
-    Operand literal = inductionLiteralAt(iteration_value,
-                                         state.induction_delta,
-                                         analysis.type);
     clone.terminator = cloneAndRewriteTerminator(clone.terminator,
-                                                 analysis.var,
-                                                 literal);
+                                                 state,
+                                                 analysis,
+                                                 iteration_value);
 }
 
 int unrollForLoop(FunctionCFG& fn,

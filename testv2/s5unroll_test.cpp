@@ -271,6 +271,26 @@ static void nestedLoopsAreUnrolledInsideOut() {
     expectContains(run.debug, "Add(1, 2)");
 }
 
+static void loopDerivedVariableChainPropagatesAcrossBlocks() {
+    auto top = baseTop();
+    top.params.insert(top.params.begin(), inputParam("take", boolType()));
+    top.body.push_back(forStmt("i", 0, 3, {
+        decl("idx", uint32Type(), make_var("i", uint32Type())),
+        ifStmt(make_var("take", boolType()), {
+            assign(make_var("out", uint32Type()),
+                   make_var("idx", uint32Type())),
+        }),
+    }));
+
+    auto run = runS5(top);
+    CHECK(run.result.summaries.size() == 1);
+    CHECK(run.result.summaries[0].iterations == 3);
+    verifyNoLoopMetadata(run.result.program.value());
+    expectContains(run.debug, "assign out = 0");
+    expectContains(run.debug, "assign out = 1");
+    expectContains(run.debug, "assign out = 2");
+}
+
 static void nestedDynamicContinueAndBreakAreMasked() {
     auto top = baseTop();
     top.params.insert(top.params.begin(), inputParam("stop_inner", boolType()));
@@ -389,6 +409,7 @@ static void breakAndContinueInBranchesAreBothHandled() {
 int main() {
     simpleLoopUnrollsToLiteralIterations();
     nestedLoopsAreUnrolledInsideOut();
+    loopDerivedVariableChainPropagatesAcrossBlocks();
     nestedDynamicContinueAndBreakAreMasked();
     breakInLoopBodyKeepsExitPathAndRemovesBackedge();
     dynamicBreakInBranchMasksLaterIterations();

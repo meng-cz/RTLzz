@@ -119,6 +119,8 @@ Int<8> nested_dynamic_write;
 Int<8> internal_struct_array;
 #pragma output_port const_lookup
 Int<8> const_lookup;
+#pragma output_port loop_chain_array_clear
+Int<8> loop_chain_array_clear;
 #pragma output_port final_mix
 Int<8> final_mix;
 
@@ -196,6 +198,14 @@ void hls_main() {
         Int<8>(0x57),
     };
     const_lookup = const_table[tap_idx] ^ locals[lane_idx].hi;
+
+    std::array<uint8_t, 4> cleared;
+    for (int i = 0; i < 4; i++) {
+        int idx = i;
+        cleared[idx] = 0;
+    }
+    loop_chain_array_clear =
+        Int<8>(cleared[0] | cleared[1] | cleared[2] | cleared[3]);
 
     final_mix =
         aggregate_pos ^

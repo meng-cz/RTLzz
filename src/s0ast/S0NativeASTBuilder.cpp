@@ -3563,6 +3563,35 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                             stmt->decl_init = std::nullopt;
                         }
                     }
+                    if (stmt->decl_type.is_array) {
+                        const std::string declaration_text = cursorText(child);
+                        const std::size_t name_pos =
+                            declaration_text.rfind(stmt->decl_name);
+                        const std::string tail = name_pos == std::string::npos
+                            ? declaration_text
+                            : declaration_text.substr(
+                                  name_pos + stmt->decl_name.size());
+                        std::string compact_tail = tail;
+                        compact_tail.erase(std::remove_if(
+                            compact_tail.begin(), compact_tail.end(),
+                            [](unsigned char ch) { return std::isspace(ch); }),
+                            compact_tail.end());
+                        if (compact_tail.find("{}") != std::string::npos) {
+                            std::size_t leaf_count = 1;
+                            for (int dim : stmt->decl_type.array_dims) {
+                                leaf_count *= static_cast<std::size_t>(dim);
+                            }
+                            TypeInfo scalar = stmt->decl_type;
+                            scalar.is_array = false;
+                            scalar.array_size = 0;
+                            scalar.array_dims.clear();
+                            while (stmt->decl_init_args.size() < leaf_count) {
+                                stmt->decl_init_args.push_back(
+                                    defaultValueForAggregateField(scalar));
+                            }
+                            stmt->decl_init = std::nullopt;
+                        }
+                    }
                 }
                 std::vector<std::pair<std::string, ExprPtr>> designated_args;
                 if (!clang_Cursor_isNull(init_expr)) {
