@@ -423,7 +423,11 @@ S10Operand emitOp(Context& ctx,
     return valueOperand(ctx.output, value, false, loc);
 }
 
-S10Operand makeNot(Context& ctx, S10Operand value, DebugLoc loc, BlockId block);
+S10Operand makeNot(Context& ctx,
+                   S10Operand value,
+                   DebugLoc loc,
+                   BlockId block,
+                   S10Operand guard = trueGuard());
 
 S10Operand makeAnd(Context& ctx,
                    S10Operand lhs,
@@ -455,12 +459,16 @@ S10Operand makeOr(Context& ctx,
                   "guard_or", "guard");
 }
 
-S10Operand makeNot(Context& ctx, S10Operand value, DebugLoc loc, BlockId block) {
+S10Operand makeNot(Context& ctx,
+                   S10Operand value,
+                   DebugLoc loc,
+                   BlockId block,
+                   S10Operand guard) {
     if (isTrue(value)) return falseGuard(loc);
     if (isFalse(value)) return trueGuard(loc);
     ++ctx.summary.generated_guards;
     return emitOp(ctx, S10OpKind::LogicalNot, S10Type{s8opnorm::S8TypeKind::Bool, 1},
-                  {std::move(value)}, trueGuard(loc), loc, block, "guard_not", "guard");
+                  {std::move(value)}, std::move(guard), loc, block, "guard_not", "guard");
 }
 
 S10Operand makeEq(Context& ctx,
@@ -537,7 +545,8 @@ GuardInfo computeGuards(Context& ctx, const CFGInfo& cfg) {
                       block.terminator.condition.debug_loc);
             propagate(block.terminator.false_target,
                       makeAnd(ctx, block_guard,
-                              makeNot(ctx, cond, block.terminator.condition.debug_loc, block_id),
+                              makeNot(ctx, cond, block.terminator.condition.debug_loc,
+                                      block_id, block_guard),
                               block.terminator.condition.debug_loc, block_id),
                       block.terminator.condition.debug_loc);
             break;
@@ -574,7 +583,8 @@ GuardInfo computeGuards(Context& ctx, const CFGInfo& cfg) {
                           block.terminator.switch_value.debug_loc);
             }
             S10Operand default_local = any_case
-                ? makeNot(ctx, any_case.value(), block.terminator.switch_value.debug_loc, block_id)
+                ? makeNot(ctx, any_case.value(), block.terminator.switch_value.debug_loc,
+                          block_id, block_guard)
                 : trueGuard(block.terminator.switch_value.debug_loc);
             propagate(block.terminator.default_target,
                       makeAnd(ctx, block_guard, std::move(default_local),
@@ -1118,6 +1128,8 @@ void checkOperandAvailable(const ReadonlyContext& ctx,
 
 void readonlyCheckDefinition(const ReadonlyContext& ctx, const S10Definition& def) {
     BoolExprPtr def_guard = guardExpr(ctx, def.guard);
+    const std::string target_note =
+        " target=" + valueName(ctx.program, def.target);
     checkOperandAvailable(ctx, def.guard, boolConst(true), "definition guard");
     switch (def.kind) {
     case S10DefKind::Assign:
@@ -1140,8 +1152,21 @@ void readonlyCheckDefinition(const ReadonlyContext& ctx, const S10Definition& de
             checkOperandAvailable(ctx, else_value, boolAnd(def_guard, boolNot(cond_expr)), "mux else arm");
             break;
         }
+        if ((def.op.kind == S10OpKind::BoolAnd ||
+             def.op.kind == S10OpKind::BoolOr) &&
+            def.op.operands.size() == 2 && def.debug_note == "guard") {
+            const auto& lhs = def.op.operands[0];
+            const auto& rhs = def.op.operands[1];
+            checkOperandAvailable(ctx, lhs, def_guard, "guard lhs");
+            BoolExprPtr lhs_expr = guardExpr(ctx, lhs);
+            BoolExprPtr rhs_guard = def.op.kind == S10OpKind::BoolAnd
+                ? boolAnd(def_guard, lhs_expr)
+                : boolAnd(def_guard, boolNot(lhs_expr));
+            checkOperandAvailable(ctx, rhs, rhs_guard, "guard rhs");
+            break;
+        }
         for (const auto& operand : def.op.operands) {
-            checkOperandAvailable(ctx, operand, def_guard, "op operand");
+            checkOperandAvailable(ctx, operand, def_guard, "op operand" + target_note);
         }
         break;
     }

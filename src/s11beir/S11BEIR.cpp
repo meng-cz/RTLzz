@@ -747,58 +747,18 @@ struct Builder {
         ++summary.definitions;
     }
 
-    void collectDeps(S10ValueId value,
-                     const std::vector<const S10Definition*>& defs,
-                     std::unordered_set<S10ValueId>& seen) const {
-        if (seen.count(value)) return;
-        seen.insert(value);
-        if (value < 0 || value >= static_cast<S10ValueId>(defs.size())) return;
-        const S10Definition* def = defs[static_cast<std::size_t>(value)];
-        if (!def) return;
-        auto add_operand = [&](const S10Operand& operand) {
-            if (operand.kind == S10OperandKind::Value) collectDeps(operand.value, defs, seen);
-        };
-        switch (def->kind) {
-        case S10DefKind::Assign:
-            add_operand(def->value);
-            break;
-        case S10DefKind::Op:
-            for (const auto& operand : def->op.operands) add_operand(operand);
-            break;
-        case S10DefKind::Lookup:
-            add_operand(def->lookup_index);
-            for (const auto& elem : def->lookup_elements) add_operand(elem);
-            break;
-        }
-    }
-
-    void rejectOutputInitialReads() const {
-        std::vector<const S10Definition*> defs(input.values.size(), nullptr);
-        for (const auto& def : input.definitions) {
-            if (def.target >= 0 && def.target < static_cast<S10ValueId>(defs.size())) {
-                defs[static_cast<std::size_t>(def.target)] = &def;
-            }
-        }
-
-        std::unordered_set<S10ValueId> output_initials;
+    void driveOutputInitials() {
         for (const auto& port : input.ports) {
-            if (isOutputPort(port) && port.initial_value) {
-                output_initials.insert(*port.initial_value);
-            }
-        }
-        if (output_initials.empty()) return;
-
-        for (const auto& port : input.ports) {
-            if (!isOutputPort(port) || !port.final_value) continue;
-            std::unordered_set<S10ValueId> deps;
-            collectDeps(*port.final_value, defs, deps);
-            for (S10ValueId initial : output_initials) {
-                if (deps.count(initial)) {
-                    fail("S11 BEIR does not support reading output/mutable-ref initial values",
-                         {},
-                         "port=" + symbolName(input, port.symbol));
-                }
-            }
+            if (!isOutputPort(port) || !port.initial_value) continue;
+            beir::NodeId node =
+                value_nodes[static_cast<std::size_t>(*port.initial_value)];
+            auto& sig = signal(node);
+            beir::Operation op = baseOperation(
+                beir::OperationKind::Assign, sig.type, {},
+                "totalize output/mutable-ref initial value to zero");
+            op.operands.push_back(literalOperand(
+                0, valueAt(input, *port.initial_value).type));
+            setDriver(node, std::move(op));
         }
     }
 
@@ -830,9 +790,9 @@ struct Builder {
 
     beir::Program build() {
         verifyPredicateProgram(input);
-        rejectOutputInitialReads();
         allocateValueSignals();
         createPortsAndInputDrivers();
+        driveOutputInitials();
         for (const auto& def : input.definitions) emitDefinition(def);
         bindOutputs();
 

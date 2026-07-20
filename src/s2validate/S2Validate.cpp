@@ -406,9 +406,21 @@ std::vector<std::size_t> resolveCall(const Context& ctx,
         if (exact) exact_matches.push_back(id);
     }
     if (arity_matches.empty()) {
+        std::string expected;
+        for (auto id : it->second) {
+            if (!expected.empty()) expected += ", ";
+            const auto& params = ctx.functions[id].fn->params;
+            expected += std::to_string(params.size()) + " (";
+            for (std::size_t i = 0; i < params.size(); ++i) {
+                if (i) expected += ", ";
+                expected += params[i].name;
+            }
+            expected += ")";
+        }
         failAt("s2validate", std::move(loc),
                "Argument count mismatch for call '" + expr->callee +
-                   "': got " + std::to_string(expr->args.size()));
+                   "': got " + std::to_string(expr->args.size()) +
+                   ", expected one of [" + expected + "]");
     }
     if (arity_matches.size() == 1) return arity_matches;
     if (exact_matches.size() == 1) return exact_matches;

@@ -214,6 +214,8 @@ static void expectErrorContains(const FunctionAST& fn, const std::string& needle
 
 int main() {
     expectOk(parseFixture("testv2/fixtures/s2validate/legal_basic.logic.cpp"));
+    expectOk(parseFixture(
+        "testv2/fixtures/s2validate/legal_generic_lambda.logic.cpp"));
     expectOk(makeLambdaProgram());
 
     (void)parseFixture("testv2/fixtures/s2validate/illegal_struct_ref_field.logic.cpp");

@@ -1206,20 +1206,26 @@ S8Stmt normalizeLookup(Context& ctx, const S7Stmt& stmt, std::vector<S8Stmt>& ou
 
 S8Stmt normalizeLookupWrite(Context& ctx, const S7Stmt& stmt, std::vector<S8Stmt>& out) {
     if (stmt.lookup_write_targets.empty()) fail("LookupWrite has no targets", stmt.debug_loc);
-    int width = 0;
+    S8Type wide = symbolType(ctx.output, stmt.lookup_write_targets.front());
     for (SymbolId target : stmt.lookup_write_targets) {
-        width = std::max(width, symbolType(ctx.output, target).width);
+        S8Type target_type = symbolType(ctx.output, target);
+        if (!typeEq(wide, target_type)) {
+            wide.kind = S8TypeKind::Int;
+            wide.width = std::max(wide.width, target_type.width);
+        }
     }
-    S8Type wide{S8TypeKind::Int, width};
     S8Stmt normalized;
     normalized.kind = S8StmtKind::LookupWrite;
     normalized.debug_loc = stmt.debug_loc;
     normalized.lookup_index = normalizeOperand(ctx, stmt.lookup_index);
     rejectSignedView("LookupWrite index", normalized.lookup_index, stmt.debug_loc);
     auto lookup_value = normalizeOperand(ctx, stmt.lookup_value);
-    rejectSignedView("LookupWrite value", lookup_value, stmt.debug_loc);
     normalized.lookup_value = castTo(ctx, std::move(lookup_value),
                                      wide, out, stmt.debug_loc).operand;
+    // signed_view controls how a narrower source is extended. Once the value
+    // has the lookup element storage width, the write itself is bitwise and
+    // must not carry an interpretation-only signed view downstream.
+    normalized.lookup_value.signed_view = false;
     for (const auto& elem : stmt.lookup_elements) {
         auto operand = normalizeOperand(ctx, elem);
         rejectSignedView("LookupWrite element", operand, stmt.debug_loc);

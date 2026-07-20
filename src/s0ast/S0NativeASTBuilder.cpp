@@ -2131,6 +2131,49 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 if (spelling.empty()) spelling = first_child_spelling;
             }
         }
+        const std::string call_text = cursorText(cursor);
+        if (call_text.find(". template operator ( ) <") != std::string::npos ||
+            call_text.find(".template operator()<") != std::string::npos) {
+            std::string callee;
+            std::size_t receiver_index = children.size();
+            for (std::size_t i = 0; i < children.size(); ++i) {
+                callee = lambdaNameForReceiverCursor(children[i]);
+                if (!callee.empty()) {
+                    receiver_index = i;
+                    break;
+                }
+            }
+            if (callee.empty()) {
+                failUnsupported(cursor,
+                                "S0 cannot resolve explicit generic lambda operator() receiver");
+            }
+            auto result = std::make_shared<Expr>();
+            result->kind = ExprKind::Call;
+            result->callee = callee;
+            result->type = convertType(type);
+            result->literal_value = call_text;
+            for (std::size_t i = 0; i < children.size(); ++i) {
+                if (i == receiver_index ||
+                    !clang_isExpression(clang_getCursorKind(children[i]))) {
+                    continue;
+                }
+                auto arg = convertExpr(children[i]);
+                if (arg && !isOperatorOnlyExpr(arg)) {
+                    result->args.push_back(std::move(arg));
+                }
+            }
+            auto template_args = templateIntArgsFromTokens(cursor, ")");
+            TypeInfo template_arg_type{"uint32_t", 32, false, true, "builtin"};
+            for (auto it = template_args.rbegin(); it != template_args.rend(); ++it) {
+                result->args.insert(result->args.begin(),
+                                    make_literal(std::to_string(*it), template_arg_type));
+            }
+            if (result->args.empty()) {
+                appendIdentifierCallArgsFromText(result->args, call_text);
+            }
+            prependLambdaCaptureArgs(callee, result->args, debugLocFromCursor(cursor));
+            return result;
+        }
         VulCallInfo vul_call = recognizeVulCall(cursor, children, spelling, first_child_spelling);
         ExprPtr first_call_child;
         auto get_first_call_child = [&]() -> ExprPtr {
@@ -2426,6 +2469,10 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             } else {
                 base = convertExpr(children[children.size() - 2]);
                 idx = convertExpr(children[children.size() - 1]);
+            }
+            while (idx && idx->kind == ExprKind::Cast && idx->cast_expr &&
+                   idx->cast_expr->kind == ExprKind::Literal) {
+                idx = idx->cast_expr;
             }
             if (base && base->kind == ExprKind::ArrayAccess && !base->type.is_array) {
                 if (sameLiteralExpr(base->index, idx)) return base;
@@ -3597,6 +3644,90 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         appendCaptureParam(*fn, capture);
     }
 
+    auto find_template_param_type = [&](const std::string& param_name) {
+        TypeInfo found;
+        auto visit = [&](CXCursor cursor, auto& self) -> void {
+            if (!found.name.empty()) return;
+            if (clang_getCursorKind(cursor) == CXCursor_DeclRefExpr &&
+                cxToStr(clang_getCursorSpelling(cursor)) == param_name) {
+                found = convertType(clang_getCursorType(cursor));
+                return;
+            }
+            for (auto& child : getChildren(cursor)) self(child, self);
+        };
+        visit(lambda_cursor, visit);
+        if (found.name.empty()) {
+            found = TypeInfo{"uint32_t", 32, false, true, "builtin"};
+        }
+        return found;
+    };
+
+    const std::string lambda_text = cursorText(lambda_cursor);
+    std::size_t capture_end = lambda_text.find(']');
+    std::size_t template_begin = capture_end == std::string::npos
+        ? std::string::npos
+        : capture_end + 1;
+    while (template_begin != std::string::npos &&
+           template_begin < lambda_text.size() &&
+           std::isspace(static_cast<unsigned char>(lambda_text[template_begin]))) {
+        ++template_begin;
+    }
+    if (template_begin == std::string::npos ||
+        template_begin >= lambda_text.size() ||
+        lambda_text[template_begin] != '<') {
+        template_begin = std::string::npos;
+    }
+    if (template_begin != std::string::npos) {
+        int depth = 0;
+        std::size_t template_end = std::string::npos;
+        for (std::size_t i = template_begin; i < lambda_text.size(); ++i) {
+            if (lambda_text[i] == '<') ++depth;
+            if (lambda_text[i] == '>' && --depth == 0) {
+                template_end = i;
+                break;
+            }
+        }
+        if (template_end != std::string::npos) {
+            std::string params_text =
+                lambda_text.substr(template_begin + 1,
+                                   template_end - template_begin - 1);
+            std::size_t begin = 0;
+            int nested = 0;
+            for (std::size_t i = 0; i <= params_text.size(); ++i) {
+                char ch = i < params_text.size() ? params_text[i] : ',';
+                if (ch == '<') ++nested;
+                if (ch == '>') --nested;
+                if (ch != ',' || nested != 0) continue;
+                std::string part = params_text.substr(begin, i - begin);
+                auto equal = part.find('=');
+                if (equal != std::string::npos) part.resize(equal);
+                while (!part.empty() &&
+                       std::isspace(static_cast<unsigned char>(part.back()))) {
+                    part.pop_back();
+                }
+                std::size_t name_end = part.size();
+                std::size_t name_begin = name_end;
+                while (name_begin > 0 &&
+                       (std::isalnum(static_cast<unsigned char>(part[name_begin - 1])) ||
+                        part[name_begin - 1] == '_')) {
+                    --name_begin;
+                }
+                std::string param_name =
+                    part.substr(name_begin, name_end - name_begin);
+                if (!param_name.empty() && !hasParamNamed(*fn, param_name)) {
+                    ParamDecl param;
+                    param.name = param_name;
+                    param.type = find_template_param_type(param_name);
+                    param.passing = ParamPassingKind::Value;
+                    param.direction = ParamDirection::Input;
+                    param.is_const = true;
+                    fn->params.push_back(std::move(param));
+                }
+                begin = i + 1;
+            }
+        }
+    }
+
     auto add_explicit_param = [&](CXCursor param_cursor) {
         ParamDecl param = makeParamDeclFromCursor(param_cursor);
         fn->params.push_back(std::move(param));
@@ -4113,7 +4244,6 @@ static StmtPtr convertGlobalConstScalarDecl(CXCursor c) {
     stmt->kind = StmtKind::Decl;
     stmt->decl_name = cxToStr(clang_getCursorSpelling(c));
     stmt->decl_type = type;
-    stmt->decl_type.is_static = true;
     stmt->decl_init = make_literal(value, type);
     return stmt;
 }

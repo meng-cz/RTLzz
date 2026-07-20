@@ -66,6 +66,8 @@ void hls_main(Int<8> a,
               Int<8>& lambda_ref_mutation,
               Int<8>& lambda_calls_lambda_value,
               Int<8>& lambda_calls_lambda_ref,
+              Int<8>& lambda_template_0,
+              Int<8>& lambda_template_1,
               Int<8>& helper_lambda,
               Int<8>& loop_inline,
               Int<8>& return_mix) {
@@ -127,6 +129,16 @@ void hls_main(Int<8> a,
         return value_lambda(mutable_main, b) ^ lambda_ref_mutation;
     };
     lambda_calls_lambda_ref = call_local_by_ref(chain);
+
+    auto template_lambda = [&]<uint32_t IDX = 0>(Int<8> x) -> void {
+        if constexpr (IDX == 0) {
+            lambda_template_0 = x + b;
+        } else if constexpr (IDX == 1) {
+            lambda_template_1 = x ^ b;
+        }
+    };
+    template_lambda.template operator()<0>(a);
+    template_lambda.template operator()<1>(chain);
 
     helper_lambda = helper_with_local_lambda(a, alt);
     loop_inline = loop_calls_helper(b);

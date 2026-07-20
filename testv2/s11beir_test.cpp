@@ -431,7 +431,7 @@ static s10predicate::S10Value predS10Value(s10predicate::S10ValueId id,
     return value;
 }
 
-static void outputInitialReadIsRejected() {
+static void outputInitialReadIsZeroTotalized() {
     s10predicate::S10PredicateProgram program;
     program.name = "bad";
     program.base_symbols.push_back(s10predicate::S10Symbol{0, intType(8), "out", s10predicate::S10SymbolRole::Port});
@@ -447,9 +447,16 @@ static void outputInitialReadIsRejected() {
     program.ports.push_back(s10predicate::S10Port{0, ParamDirection::Output, ParamPassingKind::MutableRef, 0, 1, predLiteral(1, boolType())});
 
     auto result = s11beir::buildBEIR(program);
-    CHECK(!result.ok());
-    CHECK(result.error.has_value());
-    CHECK(result.error->message.find("output/mutable-ref initial") != std::string::npos);
+    CHECK(result.ok());
+    CHECK(result.program.has_value());
+    const auto* initial = findSignal(*result.program, "out_v0");
+    CHECK(initial != nullptr);
+    CHECK(initial->driver.has_value());
+    CHECK(initial->driver->kind == beir::OperationKind::Assign);
+    CHECK(initial->driver->operands.size() == 1);
+    CHECK(initial->driver->operands[0].kind == beir::OperandKind::Literal);
+    CHECK(!initial->driver->operands[0].constant.limbs.empty());
+    CHECK(initial->driver->operands[0].constant.limbs[0] == 0);
 }
 
 static void groupedOutputArrayBuildsBEIRArrayPort() {
@@ -534,7 +541,7 @@ int main() {
     straightLineBuildsPortsAndOutputAssign();
     lookupLowersToBEIRArrayAccess();
     signedArithmeticShiftMapsToShrSignedView();
-    outputInitialReadIsRejected();
+    outputInitialReadIsZeroTotalized();
     groupedOutputArrayBuildsBEIRArrayPort();
     sourcePipelineRunsThroughBEIR();
     sourcePipelinePreservesArrayPortGroupsInBEIR();
