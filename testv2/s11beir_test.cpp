@@ -1,5 +1,6 @@
 #include "s0ast/S0AST.h"
 #include "backend/beir.hpp"
+#include "backend/rtlgen.hpp"
 #include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
@@ -251,6 +252,83 @@ static const beir::Port* findPort(const beir::Program& program,
     return nullptr;
 }
 
+static beir::ValueType beirType(int width, std::vector<int> array_dims = {}) {
+    beir::ValueType type;
+    type.width = width;
+    type.array_dims = std::move(array_dims);
+    return type;
+}
+
+static beir::Operand beirPortOperand(std::string name, beir::ValueType type) {
+    beir::Operand operand;
+    operand.kind = beir::OperandKind::Port;
+    operand.text = std::move(name);
+    operand.type = std::move(type);
+    return operand;
+}
+
+static beir::Signal beirSignal(beir::NodeId id,
+                               std::string name,
+                               beir::ValueType type,
+                               std::string port_name = {},
+                               int port_element_index = -1) {
+    beir::Signal signal;
+    signal.id = id;
+    signal.name = std::move(name);
+    signal.type = std::move(type);
+    signal.port_name = std::move(port_name);
+    signal.port_element_index = port_element_index;
+    return signal;
+}
+
+static void rtlgenConnectsScalarPortElementsWithoutArraySelect() {
+    beir::Program program;
+    program.function_name = "scalar_port_bindings";
+    beir::ValueType scalar = beirType(8);
+
+    auto in_signal = beirSignal(0, "in_internal", scalar, "in", 0);
+    beir::Operation in_read;
+    in_read.kind = beir::OperationKind::PortRead;
+    in_read.type = scalar;
+    in_read.operands.push_back(beirPortOperand("in", scalar));
+    in_signal.driver = std::move(in_read);
+    program.signals.push_back(std::move(in_signal));
+
+    program.signals.push_back(beirSignal(1, "out_internal", scalar, "out", 0));
+    program.signals.push_back(beirSignal(2, "arr_0", scalar, "arr", 0));
+    program.signals.push_back(beirSignal(3, "arr_1", scalar, "arr", 1));
+
+    beir::Port in;
+    in.name = "in";
+    in.direction = beir::PortDirection::Input;
+    in.type = scalar;
+    in.element_nodes.push_back(0);
+    program.ports.push_back(std::move(in));
+
+    beir::Port out;
+    out.name = "out";
+    out.direction = beir::PortDirection::Output;
+    out.type = scalar;
+    out.element_nodes.push_back(1);
+    program.ports.push_back(std::move(out));
+
+    beir::Port arr;
+    arr.name = "arr";
+    arr.direction = beir::PortDirection::Output;
+    arr.type = beirType(8, {2});
+    arr.element_nodes.push_back(2);
+    arr.element_nodes.push_back(3);
+    program.ports.push_back(std::move(arr));
+
+    std::string rtl = rtlgen::emitSystemVerilog(program);
+    CHECK(rtl.find("assign in_internal = in;") != std::string::npos);
+    CHECK(rtl.find("assign in_internal = in[0];") == std::string::npos);
+    CHECK(rtl.find("assign out = out_internal;") != std::string::npos);
+    CHECK(rtl.find("assign out[0] = out_internal;") == std::string::npos);
+    CHECK(rtl.find("assign arr[0] = arr_0;") != std::string::npos);
+    CHECK(rtl.find("assign arr[1] = arr_1;") != std::string::npos);
+}
+
 static void straightLineBuildsPortsAndOutputAssign() {
     auto program = baseProgram();
     auto& block = program.top.blocks[0];
@@ -452,6 +530,7 @@ static void sourcePipelinePreservesArrayPortGroupsInBEIR() {
 }
 
 int main() {
+    rtlgenConnectsScalarPortElementsWithoutArraySelect();
     straightLineBuildsPortsAndOutputAssign();
     lookupLowersToBEIRArrayAccess();
     signedArithmeticShiftMapsToShrSignedView();

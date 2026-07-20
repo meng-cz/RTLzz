@@ -316,6 +316,19 @@ private:
     void emitPortElementConnections(std::ostream& os) const {
         for (const auto& port : program_.ports) {
             if (port.direction == beir::PortDirection::Output) {
+                if (!port.type.isArray()) {
+                    if (port.element_nodes.size() > 1) {
+                        throw std::runtime_error("rtlgen scalar output port has multiple element nodes");
+                    }
+                    if (!port.element_nodes.empty()) {
+                        const auto& signal = program_.signal(port.element_nodes.front());
+                        if (!isDirectPortSignal(signal)) {
+                            os << "    assign " << sanitizeIdentifier(port.name) << " = "
+                               << sig(signal.id) << ";" << debugComment(signalDebug(signal)) << "\n";
+                        }
+                    }
+                    continue;
+                }
                 for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
                     const auto& signal = program_.signal(port.element_nodes[i]);
                     if (isDirectPortSignal(signal)) continue;
@@ -324,13 +337,26 @@ private:
                 }
                 continue;
             }
-            if (port.type.isArray()) {
-                for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
-                    const auto& signal = program_.signal(port.element_nodes[i]);
-                    os << "    assign " << sig(port.element_nodes[i]) << " = "
-                       << sanitizeIdentifier(port.name) << "[" << i << "];"
-                       << debugComment(signalDebug(signal)) << "\n";
+            if (!port.type.isArray()) {
+                if (port.element_nodes.size() > 1) {
+                    throw std::runtime_error("rtlgen scalar input port has multiple element nodes");
                 }
+                if (!port.element_nodes.empty()) {
+                    const auto& signal = program_.signal(port.element_nodes.front());
+                    if (!isDirectPortSignal(signal)) {
+                        os << "    assign " << sig(signal.id) << " = "
+                           << sanitizeIdentifier(port.name) << ";"
+                           << debugComment(signalDebug(signal)) << "\n";
+                    }
+                }
+                continue;
+            }
+            for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
+                const auto& signal = program_.signal(port.element_nodes[i]);
+                if (isDirectPortSignal(signal)) continue;
+                os << "    assign " << sig(port.element_nodes[i]) << " = "
+                   << sanitizeIdentifier(port.name) << "[" << i << "];"
+                   << debugComment(signalDebug(signal)) << "\n";
             }
         }
         os << "\n";
