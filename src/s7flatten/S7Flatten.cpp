@@ -270,6 +270,11 @@ void buildLeafTemplates(const std::unordered_map<std::string, std::vector<Struct
 }
 
 std::vector<LeafInfo> createLeaves(Context& ctx, const SymbolInfo& source) {
+    if (!isScalarType(source.type) && !source.type.is_array &&
+        source.type.struct_name.empty()) {
+        fail("Unsupported non-scalar type reached S7 flatten for symbol '" +
+             source.name + "': '" + typeLabel(source.type) + "'");
+    }
     std::vector<LeafTemplate> templates;
     std::vector<std::string> path;
     buildLeafTemplates(ctx.struct_fields, source.type, path, templates, source.type.name.empty() ? DebugLoc{} : DebugLoc{});
@@ -903,7 +908,12 @@ void lowerOp(Context& ctx,
         return;
     }
     if (target.dynamic) fail("Operation target may not be a dynamic array element", stmt.debug_loc);
-    if (target.leaves.size() != 1) fail("Non-ternary operation target is aggregate", stmt.debug_loc);
+    if (target.leaves.size() != 1) {
+        fail("Non-ternary operation target is aggregate: target='" +
+             stmt.target.root + "' op_kind=" +
+             std::to_string(static_cast<int>(stmt.op.kind)) + " type='" +
+             typeLabel(stmt.target.type) + "'", stmt.debug_loc);
+    }
     S7Operation op;
     op.kind = convertOpKind(stmt.op.kind);
     op.debug_loc = stmt.op.debug_loc;

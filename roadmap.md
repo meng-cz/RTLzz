@@ -1,4 +1,4 @@
-输入端口 ABI：top 必须是无参数、返回 `void` 的函数。RTL 端口由同一源文件中的文件级全局变量声明，变量只能使用 `bool`、`Int<N>`、内置整数或这些标量的 `std::array` 形式，且不得带初始化器。每个全局变量必须由 `#pragma input_port name` 或 `#pragma output_port name` 唯一指定方向；未标注变量、无对应变量的 pragma、重复/冲突 pragma 均在 S0 报错。top、helper 和 lambda 均可直接访问全局端口；S0 将 top 访问收敛为内部 `ParamDecl`，并将 helper/lambda 的直接和传递端口依赖提升为隐式参数，后续阶段继续消费统一端口模型。
+输入端口 ABI：top 必须是无参数、返回 `void` 的函数。RTL 端口由同一源文件中的文件级全局变量声明，变量只能使用 `bool`、`Int<N>`、内置整数或这些标量的 `std::array` 形式，且不得带初始化器。每个全局变量必须由 `#pragma input_port name` 或 `#pragma output_port name` 唯一指定方向；未标注变量、无对应变量的 pragma、重复/冲突 pragma 均在 S0 报错。top、helper、函数模板特化和 lambda 均可直接访问全局端口；S0 将 top 访问收敛为内部 `ParamDecl`，并将 helper/lambda 的直接和传递端口依赖提升为隐式参数，后续阶段继续消费统一端口模型。局部硬件值没有隐式初值；若控制流或动态写需要读取旧值，必须由源码显式初始化，否则在 SSA 阶段报错。
 
 Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM proxy 识别和字段引用绑定主要应从 normalize/AliasGraph 路径移除；AST 阶段拒绝 struct/array 内含 reference 或 pointer 字段，并删除或停用为 proxy constructor 收集字段到参数别名映射的特殊用途，让后续阶段不再接收 proxy carrier 或引用字段 struct。
 

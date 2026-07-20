@@ -554,6 +554,21 @@ private:
     Operand materializeOp(OpExpr op, const std::string& hint, DebugLoc loc,
                           std::vector<S3StmtPtr>& out) {
         TypeInfo type = op.type;
+        const bool unknown =
+            (type.name.empty() || type.name == "unknown") &&
+            type.hw_kind.empty() && type.width <= 0 &&
+            !type.is_array && type.struct_name.empty();
+        if (unknown) {
+            for (const auto& operand : op.operands) {
+                const auto& candidate = operand.type;
+                if (!candidate.is_array && candidate.struct_name.empty() &&
+                    (candidate.width > 0 || !candidate.hw_kind.empty())) {
+                    type = candidate;
+                    op.type = candidate;
+                    break;
+                }
+            }
+        }
         auto target = tempLValue(type, hint, loc, out);
         Operand result = varOperand(target.root, target.root_symbol, target.type, loc);
         out.push_back(makeOp(std::move(target), std::move(op), loc));

@@ -471,7 +471,9 @@ S9Operand rewriteOperand(Context& ctx,
     if (operand.symbol < 0 || operand.symbol >= static_cast<SymbolId>(env.size()) ||
         !env[static_cast<std::size_t>(operand.symbol)]) {
         std::string message = "Read before definition for symbol '" +
-            s8SymbolAt(*ctx.input, operand.symbol).debug_name + "'";
+            s8SymbolAt(*ctx.input, operand.symbol).debug_name +
+            "'. Hardware values are not implicitly initialized; provide an "
+            "explicit initializer before the value is read";
         fail(message, operand.debug_loc,
              note.empty() ? ("bb" + std::to_string(block)) : note);
     }

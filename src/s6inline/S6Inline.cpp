@@ -542,7 +542,29 @@ private:
         if (lambda_matches.size() + helper_matches.size() > 1) {
             fail("Ambiguous helper/lambda call '" + call.callee + "'", call.debug_loc);
         }
-        fail("Unknown helper/lambda call '" + call.callee + "'", call.debug_loc);
+        std::string detail;
+        if (lambda_it != input_.lambdas.end()) {
+            detail += "; lambda params=" +
+                std::to_string(lambda_it->second.params.size()) +
+                " args=" + std::to_string(call.args.size());
+            const auto& params = lambda_it->second.params;
+            const std::size_t count = std::min(params.size(), call.args.size());
+            for (std::size_t i = 0; i < count; ++i) {
+                if (!sameTypeRelaxed(params[i].type, call.args[i].type)) {
+                    detail += "; mismatch[" + std::to_string(i) + "] param=" +
+                        params[i].type.name + "/" +
+                        std::to_string(params[i].type.width) + "/" +
+                        params[i].type.hw_kind + "/array=" +
+                        std::to_string(params[i].type.is_array) + " arg=" +
+                        call.args[i].type.name + "/" +
+                        std::to_string(call.args[i].type.width) + "/" +
+                        call.args[i].type.hw_kind + "/array=" +
+                        std::to_string(call.args[i].type.is_array);
+                }
+            }
+        }
+        fail("Unknown helper/lambda call '" + call.callee + "'" + detail,
+             call.debug_loc);
     }
 
     bool paramsMatch(const std::vector<ParamDecl>& params,

@@ -496,6 +496,9 @@ static std::unordered_map<std::string, std::string> lambda_source_name_to_unique
 static std::unordered_map<std::string, long long> global_const_int_values;
 static std::unordered_map<std::string, ParamDecl> global_ports_by_usr;
 static std::vector<ParamDecl> global_ports_in_source_order;
+static std::unordered_map<std::string, std::string> helper_function_usr_to_name;
+static std::unordered_map<std::string, std::string> helper_template_call_to_name;
+static std::unordered_map<std::string, TypeInfo> recovered_symbol_types;
 static int lambda_unique_counter = 0;
 
 struct LambdaCaptureInfo {
@@ -1241,17 +1244,95 @@ static ExprPtr parseSimpleRecoveredArgText(std::string text) {
     text.erase(0, text.find_first_not_of(" \t\r\n"));
     auto end = text.find_last_not_of(" \t\r\n");
     if (end != std::string::npos) text.erase(end + 1);
-    if (isSimpleIdentifierText(text)) return make_var(text, make_unknown_type());
+    while (text.size() >= 2 && text.front() == '(' && text.back() == ')') {
+        int depth = 0;
+        bool wraps_all = true;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '(') ++depth;
+            if (text[i] == ')') --depth;
+            if (depth == 0 && i + 1 < text.size()) {
+                wraps_all = false;
+                break;
+            }
+        }
+        if (!wraps_all) break;
+        text = text.substr(1, text.size() - 2);
+    }
+    if (isSimpleIdentifierText(text)) {
+        auto known = recovered_symbol_types.find(text);
+        return make_var(text, known == recovered_symbol_types.end()
+                                  ? make_unknown_type()
+                                  : known->second);
+    }
+    if (!text.empty() &&
+        std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+            return std::isdigit(ch);
+        })) {
+        return make_literal(text, TypeInfo{"uint32_t", 32, false, true, "builtin"});
+    }
     if (auto int_construct = parseSimpleIntConstructText(text)) return int_construct;
-    for (const std::string& op : {"+", "-", "^"}) {
-        auto pos = text.find(op);
+    for (const std::string& op : {"^", "+", "-"}) {
+        int paren_depth = 0;
+        int bracket_depth = 0;
+        int angle_depth = 0;
+        std::size_t pos = std::string::npos;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            char ch = text[i];
+            if (ch == '(') ++paren_depth;
+            else if (ch == ')') --paren_depth;
+            else if (ch == '[') ++bracket_depth;
+            else if (ch == ']') --bracket_depth;
+            else if (ch == '<') ++angle_depth;
+            else if (ch == '>') --angle_depth;
+            else if (paren_depth == 0 && bracket_depth == 0 &&
+                     angle_depth == 0 && text.compare(i, op.size(), op) == 0) {
+                pos = i;
+                break;
+            }
+        }
         if (pos == std::string::npos) continue;
         auto lhs = parseSimpleRecoveredArgText(text.substr(0, pos));
         auto rhs = parseSimpleRecoveredArgText(text.substr(pos + op.size()));
         if (lhs && rhs) {
-            TypeInfo type = rhs->type.name == "unknown" ? lhs->type : rhs->type;
-            if (type.name == "unknown") type = make_unknown_type();
+            auto known_type = [](const TypeInfo& type) {
+                return type.width > 0 || type.is_array ||
+                       !type.struct_name.empty() ||
+                       (!type.name.empty() && type.name != "unknown");
+            };
+            TypeInfo type = known_type(lhs->type)
+                ? lhs->type
+                : (known_type(rhs->type) ? rhs->type : make_unknown_type());
             return make_binary(op, lhs, rhs, type);
+        }
+    }
+    if (!text.empty() && text.back() == ']') {
+        int depth = 0;
+        std::size_t lbracket = std::string::npos;
+        for (std::size_t i = text.size(); i-- > 0;) {
+            if (text[i] == ']') ++depth;
+            if (text[i] == '[') {
+                --depth;
+                if (depth == 0) {
+                    lbracket = i;
+                    break;
+                }
+            }
+        }
+        if (lbracket != std::string::npos) {
+            auto base = parseSimpleRecoveredArgText(text.substr(0, lbracket));
+            auto index = parseSimpleRecoveredArgText(
+                text.substr(lbracket + 1, text.size() - lbracket - 2));
+            if (base && index) {
+                TypeInfo element_type = base->type;
+                if (element_type.is_array && !element_type.array_dims.empty()) {
+                    element_type.array_dims.erase(element_type.array_dims.begin());
+                    element_type.is_array = !element_type.array_dims.empty();
+                    element_type.array_size = element_type.is_array
+                        ? element_type.array_dims.front()
+                        : 0;
+                }
+                return make_array_access(base, index, element_type);
+            }
         }
     }
     return nullptr;
@@ -1293,7 +1374,9 @@ static ExprPtr wrapRecoveredCallWithTrailingBinary(ExprPtr call, const std::stri
     if (op != "+" && op != "-" && op != "^") return call;
     auto rhs = parseSimpleRecoveredArgText(text.substr(op_pos + 1));
     if (!rhs) return call;
-    TypeInfo type = call->type.name == "unknown" ? rhs->type : call->type;
+    TypeInfo type = (call->type.name.empty() || call->type.name == "unknown")
+        ? rhs->type
+        : call->type;
     return make_binary(op, std::move(call), std::move(rhs), type);
 }
 
@@ -1700,9 +1783,91 @@ static std::vector<FunctionCursorInfo> collectSourceFunctionDefinitions(CXCursor
             if (cursorFileName(c) == ctx->source_file) {
                 ctx->functions.push_back({cxToStr(clang_getCursorSpelling(c)), c});
             }
+        } else if (clang_getCursorKind(c) == CXCursor_FunctionTemplate &&
+                   cursorFileName(c) == ctx->source_file) {
+            struct TemplateCtx {
+                Ctx* outer;
+                int specialization_index = 0;
+            } template_ctx{ctx, 0};
+            clang_visitChildren(c, [](CXCursor child, CXCursor,
+                                      CXClientData child_data) -> CXChildVisitResult {
+                auto* template_ctx = static_cast<TemplateCtx*>(child_data);
+                if (clang_getCursorKind(child) != CXCursor_FunctionDecl ||
+                    !clang_isCursorDefinition(child)) {
+                    return CXChildVisit_Continue;
+                }
+                CXCursor primary = clang_getSpecializedCursorTemplate(child);
+                if (clang_Cursor_isNull(primary)) {
+                    return CXChildVisit_Continue;
+                }
+                std::string source_name = cxToStr(clang_getCursorSpelling(child));
+                std::string internal_name = source_name + "__rtlzz_template_" +
+                    std::to_string(template_ctx->specialization_index++);
+                helper_function_usr_to_name[cursorUsr(child)] = internal_name;
+                int template_arg_count = clang_Cursor_getNumTemplateArguments(child);
+                if (template_arg_count > 0) {
+                    std::string call_key = source_name + "<";
+                    for (int i = 0; i < template_arg_count; ++i) {
+                        if (i) call_key += ",";
+                        call_key += std::to_string(
+                            clang_Cursor_getTemplateArgumentValue(child, i));
+                    }
+                    call_key += ">";
+                    helper_template_call_to_name[call_key] = internal_name;
+                }
+                template_ctx->outer->functions.push_back({internal_name, child});
+                return CXChildVisit_Continue;
+            }, &template_ctx);
         }
         return CXChildVisit_Continue;
     }, &ctx);
+
+    // libclang does not consistently enumerate instantiated FunctionDecl
+    // cursors as direct children of FunctionTemplate.  Calls do, however,
+    // reference the concrete specialization, so collect those definitions
+    // from call sites as well.
+    struct ReferencedTemplateCtx {
+        Ctx* outer;
+        std::unordered_set<std::string> seen_usrs;
+        int specialization_index = 0;
+    } referenced_ctx{&ctx, {}, 0};
+    for (const auto& function : ctx.functions) {
+        referenced_ctx.seen_usrs.insert(cursorUsr(function.cursor));
+    }
+    clang_visitChildren(root, [](CXCursor c, CXCursor,
+                                 CXClientData data) -> CXChildVisitResult {
+        auto* ctx = static_cast<ReferencedTemplateCtx*>(data);
+        if (clang_getCursorKind(c) != CXCursor_CallExpr) {
+            return CXChildVisit_Recurse;
+        }
+        CXCursor referenced = clang_getCursorReferenced(c);
+        if (clang_Cursor_isNull(referenced) ||
+            clang_getCursorKind(referenced) != CXCursor_FunctionDecl ||
+            !clang_isCursorDefinition(referenced) ||
+            cursorFileName(referenced) != ctx->outer->source_file ||
+            clang_Cursor_isNull(clang_getSpecializedCursorTemplate(referenced))) {
+            return CXChildVisit_Recurse;
+        }
+        std::string usr = cursorUsr(referenced);
+        if (!ctx->seen_usrs.insert(usr).second) return CXChildVisit_Recurse;
+        std::string source_name = cxToStr(clang_getCursorSpelling(referenced));
+        std::string internal_name = source_name + "__rtlzz_template_call_" +
+            std::to_string(ctx->specialization_index++);
+        helper_function_usr_to_name[usr] = internal_name;
+        int template_arg_count = clang_Cursor_getNumTemplateArguments(referenced);
+        if (template_arg_count > 0) {
+            std::string call_key = source_name + "<";
+            for (int i = 0; i < template_arg_count; ++i) {
+                if (i) call_key += ",";
+                call_key += std::to_string(
+                    clang_Cursor_getTemplateArgumentValue(referenced, i));
+            }
+            call_key += ">";
+            helper_template_call_to_name[call_key] = internal_name;
+        }
+        ctx->outer->functions.push_back({internal_name, referenced});
+        return CXChildVisit_Recurse;
+    }, &referenced_ctx);
     return ctx.functions;
 }
 
@@ -2024,6 +2189,21 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             return make_field_access(base, field, field_type);
         }
         std::string name = cxToStr(clang_getCursorSpelling(cursor));
+        if (name.empty()) {
+            CXEvalResult evaluated = clang_Cursor_Evaluate(cursor);
+            if (evaluated) {
+                CXEvalResultKind eval_kind = clang_EvalResult_getKind(evaluated);
+                if (eval_kind == CXEval_Int) {
+                    TypeInfo evaluated_type = convertType(type);
+                    std::string value = evaluated_type.is_signed
+                        ? std::to_string(clang_EvalResult_getAsLongLong(evaluated))
+                        : std::to_string(clang_EvalResult_getAsUnsigned(evaluated));
+                    clang_EvalResult_dispose(evaluated);
+                    return make_literal(value, evaluated_type);
+                }
+                clang_EvalResult_dispose(evaluated);
+            }
+        }
         auto result = make_var(name, convertType(type));
         if (referenced_kind == CXCursor_VarDecl) {
             auto port = global_ports_by_usr.find(cursorUsr(referenced));
@@ -2127,6 +2307,29 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
 
     case CXCursor_CallExpr: {
         std::string spelling = cxToStr(clang_getCursorSpelling(cursor));
+        CXCursor referenced_function = clang_getCursorReferenced(cursor);
+        if (!clang_Cursor_isNull(referenced_function)) {
+            auto specialized =
+                helper_function_usr_to_name.find(cursorUsr(referenced_function));
+            if (specialized != helper_function_usr_to_name.end()) {
+                spelling = specialized->second;
+            }
+        }
+        if (!spelling.empty()) {
+            auto template_values = templateIntArgsFromTokens(cursor, ")");
+            if (!template_values.empty()) {
+                std::string call_key = spelling + "<";
+                for (std::size_t i = 0; i < template_values.size(); ++i) {
+                    if (i) call_key += ",";
+                    call_key += std::to_string(template_values[i]);
+                }
+                call_key += ">";
+                auto specialized = helper_template_call_to_name.find(call_key);
+                if (specialized != helper_template_call_to_name.end()) {
+                    spelling = specialized->second;
+                }
+            }
+        }
         bool spelling_was_empty = spelling.empty();
         if (spelling.empty()) {
             CXCursor referenced = clang_getCursorReferenced(cursor);
@@ -2199,7 +2402,10 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 converted->field_name == spelling && converted->struct_base) {
                 converted = converted->struct_base;
             }
-            if (converted && target_type.width > 0) {
+            if (converted && target_type.width > 0 &&
+                !target_type.is_array && target_type.struct_name.empty() &&
+                !converted->type.is_array &&
+                converted->type.struct_name.empty()) {
                 if (converted->type.width <= 0) {
                     converted->type = target_type;
                 } else if (converted->type.width != target_type.width ||
@@ -2864,7 +3070,10 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                     converted->struct_base) {
                     converted = converted->struct_base;
                 }
-                if (converted && target_type.width > 0) {
+                if (converted && target_type.width > 0 &&
+                    !target_type.is_array && target_type.struct_name.empty() &&
+                    !converted->type.is_array &&
+                    converted->type.struct_name.empty()) {
                     if (converted->type.width <= 0) {
                         converted->type = target_type;
                     } else if (converted->type.width != target_type.width ||
@@ -3308,17 +3517,51 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                         init_expr = vc;
                     }
                 }
+                // libclang exposes an implicit CXXConstructExpr for declarations
+                // such as `std::array<T, N> value;`.  It is not a source
+                // initializer and must not become a surface `array()` call.
+                if (!clang_Cursor_isNull(init_expr) && stmt->decl_type.is_array) {
+                    std::string declaration_text = cursorText(child);
+                    std::size_t name_pos = declaration_text.rfind(stmt->decl_name);
+                    std::string tail = name_pos == std::string::npos
+                        ? declaration_text
+                        : declaration_text.substr(name_pos + stmt->decl_name.size());
+                    const bool explicit_initializer =
+                        tail.find('=') != std::string::npos ||
+                        tail.find('{') != std::string::npos ||
+                        tail.find('(') != std::string::npos;
+                    if (!explicit_initializer) init_expr = clang_getNullCursor();
+                }
                 if (stmt->decl_type.is_static && stmt->decl_type.is_array &&
                     !clang_Cursor_isNull(init_expr)) {
                     collectIntegerInitValues(init_expr, stmt->decl_type.init_values);
                 }
                 stmt->decl_default_constructed =
-                    clang_Cursor_isNull(init_expr) && isVulFixedIntType(stmt->decl_type);
+                    clang_Cursor_isNull(init_expr) &&
+                    isVulFixedIntType(stmt->decl_type);
                 if (!clang_Cursor_isNull(init_expr)) {
                     stmt->decl_init = convertExpr(init_expr);
                     if (isAggregateInitTargetType(stmt->decl_type) &&
                         isAggregateInitCursor(init_expr)) {
                         collectInitArgExprs(init_expr, stmt->decl_init_args);
+                        if (stmt->decl_type.is_array) {
+                            std::size_t leaf_count = 1;
+                            for (int dim : stmt->decl_type.array_dims) {
+                                leaf_count *= static_cast<std::size_t>(dim);
+                            }
+                            TypeInfo scalar = stmt->decl_type;
+                            scalar.is_array = false;
+                            scalar.array_size = 0;
+                            scalar.array_dims.clear();
+                            while (stmt->decl_init_args.size() < leaf_count) {
+                                stmt->decl_init_args.push_back(
+                                    defaultValueForAggregateField(scalar));
+                            }
+                            // S1 represents explicit array aggregate
+                            // initialization (including `= {}`) as a
+                            // Construct with one value per flattened leaf.
+                            stmt->decl_init = std::nullopt;
+                        }
                     }
                 }
                 std::vector<std::pair<std::string, ExprPtr>> designated_args;
@@ -3613,7 +3856,28 @@ static StmtPtr convertStmt(CXCursor cursor) {
     return withDebugLoc(convertStmtImpl(cursor), cursor);
 }
 
+static std::unordered_map<std::string, TypeInfo>
+collectRecoveredSymbolTypes(CXCursor cursor) {
+    std::unordered_map<std::string, TypeInfo> result;
+    clang_visitChildren(cursor, [](CXCursor child, CXCursor,
+                                   CXClientData data) -> CXChildVisitResult {
+        auto* result =
+            static_cast<std::unordered_map<std::string, TypeInfo>*>(data);
+        CXCursorKind kind = clang_getCursorKind(child);
+        if (kind == CXCursor_VarDecl || kind == CXCursor_ParmDecl) {
+            std::string name = cxToStr(clang_getCursorSpelling(child));
+            if (!name.empty()) {
+                result->emplace(name, convertType(clang_getCursorType(child)));
+            }
+        }
+        return CXChildVisit_Recurse;
+    }, &result);
+    return result;
+}
+
 static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name) {
+    auto saved_recovered_types = recovered_symbol_types;
+    recovered_symbol_types = collectRecoveredSymbolTypes(cursor);
     FunctionAST func;
     func.name = name;
     func.return_type = convertType(clang_getCursorResultType(cursor));
@@ -3638,11 +3902,14 @@ static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name)
         p.is_output = p.direction != ParamDirection::Input;
     }
 
+    recovered_symbol_types = std::move(saved_recovered_types);
     return func;
 }
 
 static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
                                                       const std::string& name) {
+    auto saved_recovered_types = recovered_symbol_types;
+    recovered_symbol_types = collectRecoveredSymbolTypes(lambda_cursor);
     auto fn = std::make_shared<FunctionAST>();
     fn->name = name;
     registerLambdaOperatorName(lambda_cursor, name);
@@ -3800,6 +4067,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         fn->return_type = TypeInfo{"void", 0, false};
     }
     lambda_param_count_by_name[name] = fn->params.size();
+    recovered_symbol_types = std::move(saved_recovered_types);
     return fn;
 }
 
@@ -4018,7 +4286,7 @@ static std::unordered_map<std::string, ParamDecl> collectVisibleParams(const Fun
                 param.direction = ParamDirection::Output;
                 param.is_output = true;
                 param.is_reference = true;
-                out.emplace(param.name, std::move(param));
+                out.insert_or_assign(param.name, std::move(param));
             }
             if (stmt->for_init) self(std::vector<StmtPtr>{stmt->for_init}, self);
             self(stmt->if_then, self);
@@ -4031,7 +4299,7 @@ static std::unordered_map<std::string, ParamDecl> collectVisibleParams(const Fun
     };
     auto collect = [&](const FunctionAST& fn, auto& self) -> void {
         for (const auto& param : fn.params) {
-            if (!param.name.empty()) out.emplace(param.name, param);
+            if (!param.name.empty()) out.insert_or_assign(param.name, param);
         }
         collect_stmts(fn.body, collect_stmts);
         for (const auto& helper : fn.helpers) {
@@ -4265,6 +4533,36 @@ static bool portLiftTypeMatches(const TypeInfo& lhs, const TypeInfo& rhs) {
            lhs.array_dims == rhs.array_dims;
 }
 
+static void repairRecoveredExprTypes(const ExprPtr& expr,
+                                     const TypeInfo& expected) {
+    if (!expr) return;
+    const bool aggregate_mismatch =
+        (expr->kind == ExprKind::BinaryOp || expr->kind == ExprKind::UnaryOp) &&
+        (expr->type.is_array || !expr->type.struct_name.empty()) &&
+        !expected.is_array && expected.struct_name.empty();
+    if (aggregate_mismatch ||
+        expr->type.name.empty() || expr->type.name == "unknown" ||
+        (expr->type.width == 0 && !expr->type.is_array &&
+         expr->type.struct_name.empty())) {
+        expr->type = expected;
+    }
+    if (expr->kind == ExprKind::BinaryOp) {
+        repairRecoveredExprTypes(expr->left, expected);
+        repairRecoveredExprTypes(expr->right, expected);
+    } else if (expr->kind == ExprKind::UnaryOp) {
+        repairRecoveredExprTypes(expr->operand, expected);
+    } else if (expr->kind == ExprKind::ArrayAccess) {
+        // The recovered base normally receives its aggregate type from the
+        // function-local symbol table; the selected element has the expected
+        // call-parameter type.
+        if (expr->array_base &&
+            (expr->array_base->type.name.empty() ||
+             expr->array_base->type.name == "unknown")) {
+            expr->array_base->type = expected;
+        }
+    }
+}
+
 static void collectAllSurfaceFunctions(
     FunctionAST& top,
     std::vector<FunctionAST*>& functions) {
@@ -4315,6 +4613,11 @@ static void liftGlobalPortsIntoFunctions(FunctionAST& top) {
             if (named->second.size() == 1 &&
                 named->second.front()->params.size() == expr->args.size()) {
                 resolved_calls[expr.get()] = named->second.front();
+                expr->type = named->second.front()->return_type;
+                for (std::size_t i = 0; i < expr->args.size(); ++i) {
+                    repairRecoveredExprTypes(
+                        expr->args[i], named->second.front()->params[i].type);
+                }
                 return;
             }
             FunctionAST* match = nullptr;
@@ -4336,9 +4639,43 @@ static void liftGlobalPortsIntoFunctions(FunctionAST& top) {
                 }
                 match = candidate;
             }
-            if (match) resolved_calls[expr.get()] = match;
+            if (match) {
+                resolved_calls[expr.get()] = match;
+                expr->type = match->return_type;
+                for (std::size_t i = 0; i < expr->args.size(); ++i) {
+                    repairRecoveredExprTypes(expr->args[i], match->params[i].type);
+                }
+            }
         };
         walkPortFunctionBody(*caller, resolve_call);
+    }
+
+    // Some libclang recovery cursors cover both a lambda call and its
+    // trailing binary expression and report the receiver aggregate type.
+    // Once callees are resolved, repair such impossible aggregate arithmetic
+    // from the now-known scalar operand/return types.
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        for (auto* function : functions) {
+            auto repair_ops = [&](const ExprPtr& expr) {
+                if (expr->kind != ExprKind::BinaryOp &&
+                    expr->kind != ExprKind::UnaryOp) {
+                    return;
+                }
+                if (!expr->type.is_array && expr->type.struct_name.empty()) return;
+                const ExprPtr candidate = expr->kind == ExprKind::BinaryOp
+                    ? (expr->left && !expr->left->type.is_array &&
+                       expr->left->type.struct_name.empty()
+                           ? expr->left
+                           : expr->right)
+                    : expr->operand;
+                if (candidate && !candidate->type.is_array &&
+                    candidate->type.struct_name.empty() &&
+                    candidate->type.width > 0) {
+                    expr->type = candidate->type;
+                }
+            };
+            walkPortFunctionBody(*function, repair_ops);
+        }
     }
 
     const std::size_t max_iterations = functions.size() * functions.size() + 1;
@@ -4728,6 +5065,9 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     global_const_int_values.clear();
     global_ports_by_usr.clear();
     global_ports_in_source_order.clear();
+    helper_function_usr_to_name.clear();
+    helper_template_call_to_name.clear();
+    recovered_symbol_types.clear();
 
     CXIndex index = clang_createIndex(0, 0);
 

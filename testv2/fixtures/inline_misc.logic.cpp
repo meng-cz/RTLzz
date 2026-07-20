@@ -100,6 +100,14 @@ Int<8> helper_global_chain;
 Int<8> helper_global_write;
 #pragma output_port helper_global_shadow
 Int<8> helper_global_shadow;
+#pragma output_port helper_template_global_0
+Int<8> helper_template_global_0;
+#pragma output_port helper_template_global_1
+Int<8> helper_template_global_1;
+#pragma output_port helper_default_array
+Int<8> helper_default_array;
+#pragma output_port helper_complex_lambda_arg
+Int<8> helper_complex_lambda_arg;
 
 Int<8> read_global_input() {
     return a + Int<8>(11);
@@ -115,6 +123,22 @@ void write_global_output(Int<8> value) {
 
 Int<8> shadow_global_name(Int<8> a) {
     return a ^ ::a;
+}
+
+template <uint32_t P = 0>
+void template_write_global(Int<8> value) {
+    if constexpr (P == 0) {
+        helper_template_global_0 = value;
+    } else {
+        helper_template_global_1 = value;
+    }
+}
+
+Int<8> explicitly_initialized_array(Int<8> value) {
+    std::array<Int<8>, 2> local = {};
+    local[0] = value;
+    local[1] = value + Int<8>(1);
+    return local[0] ^ local[1];
 }
 
 void hls_main() {
@@ -198,4 +222,10 @@ void hls_main() {
     helper_global_chain = transitive_global_input();
     write_global_output(helper_global_chain);
     helper_global_shadow = shadow_global_name(b);
+    template_write_global<0>(a);
+    template_write_global<1>(b);
+    helper_default_array = explicitly_initialized_array(a);
+    std::array<Int<8>, 2> complex_values = {a, b};
+    helper_complex_lambda_arg =
+        value_lambda(complex_values[0] ^ complex_values[1], a);
 }
