@@ -13,6 +13,10 @@ namespace rtlzz {
 struct CompileOptions {
     // Target C++ source code, split into caller-owned lines or chunks.
     std::vector<std::string> source_codelines;
+    // Debug/source filename used when source_codelines are parsed from memory.
+    // This name is propagated into clang diagnostics and RTL/BEIR debug locs.
+    // Empty preserves the historical default: rtlzz_input.logic.cpp.
+    std::string source_name;
     // Directory containing required VUL headers such as fixint.hpp. When set,
     // this is translated into a clang include argument: -I<vullib_dir>.
     std::string vullib_dir;
@@ -101,7 +105,9 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     }
 
     pred::pipelinev2::PipelineConfig config;
-    config.source_name = "rtlzz_input.logic.cpp";
+    config.source_name = options.source_name.empty()
+        ? "rtlzz_input.logic.cpp"
+        : options.source_name;
     config.source_text = joinCodeLines(options.source_codelines);
     config.top_function = options.top_function;
     config.clang_args = buildClangArgs(options);

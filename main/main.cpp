@@ -167,6 +167,7 @@ static int runMain(int argc, char* argv[]) {
         std::cerr << read_error << "\n";
         return 1;
     }
+    options.source_name = source_file;
     options.top_function = top_function;
     options.unroll_limit = unroll_limit;
     options.clang_args = std::move(clang_args);
