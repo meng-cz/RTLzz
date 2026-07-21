@@ -420,6 +420,9 @@ static StmtPtr convertStmtImpl(CXCursor cursor);
 static std::vector<StmtPtr> convertChildren(CXCursor cursor);
 static std::string cursorLocation(CXCursor cursor);
 static void collectLocalLambdas(CXCursor cursor, FunctionAST& func);
+static void collectScopedConstInts(CXCursor root, const std::string& source_file);
+static CXCursor referencedOperatorMethodInCursor(CXCursor cursor);
+static std::vector<std::string> constIntExprTokens(const std::string& expr);
 
 [[noreturn]] static void failUnsupported(CXCursor cursor, const std::string& message) {
     throw std::runtime_error(message + " at " + cursorLocation(cursor));
@@ -494,12 +497,31 @@ static std::unordered_map<std::string, std::string> lambda_var_usr_to_name;
 static std::unordered_map<std::string, std::string> lambda_var_location_to_name;
 static std::unordered_map<std::string, std::string> lambda_source_name_to_unique_name;
 static std::unordered_map<std::string, long long> global_const_int_values;
+static std::unordered_map<std::string, long long> current_template_int_values;
 static std::unordered_map<std::string, ParamDecl> global_ports_by_usr;
 static std::vector<ParamDecl> global_ports_in_source_order;
 static std::unordered_map<std::string, std::string> helper_function_usr_to_name;
 static std::unordered_map<std::string, std::string> helper_template_call_to_name;
+static std::unordered_map<std::string, TypeInfo> function_return_types_by_name;
 static std::unordered_map<std::string, TypeInfo> recovered_symbol_types;
 static int lambda_unique_counter = 0;
+
+struct FunctionTemplateInfo {
+    CXCursor function_decl = clang_getNullCursor();
+    std::vector<std::string> template_params;
+};
+
+struct PendingFunctionTemplateSpecialization {
+    std::string source_name;
+    std::string internal_name;
+    std::vector<int> args;
+};
+
+static std::unordered_map<std::string, FunctionTemplateInfo> source_function_templates_by_name;
+static std::unordered_map<std::string, std::string> function_template_specialization_name_by_key;
+static std::vector<PendingFunctionTemplateSpecialization>
+    pending_function_template_specializations;
+static std::unordered_set<std::string> processed_function_template_specializations;
 
 struct LambdaCaptureInfo {
     std::string name;
@@ -513,6 +535,10 @@ struct LambdaCaptureInfo {
 static std::unordered_map<std::string, std::vector<LambdaCaptureInfo>> lambda_captures_by_name;
 static std::unordered_map<std::string, std::size_t> lambda_param_count_by_name;
 static std::unordered_set<std::string> known_lambda_names;
+static std::unordered_map<std::string, std::vector<std::vector<int>>>
+    lambda_template_specialization_args_by_name;
+static std::unordered_map<std::string, std::string> lambda_template_specialization_name_by_key;
+static std::unordered_map<std::string, CXCursor> lambda_template_specialization_method_by_key;
 
 static std::string cursorText(CXCursor cursor, bool allow_large = false) {
     CXSourceRange range = clang_getCursorExtent(cursor);
@@ -794,6 +820,10 @@ static std::optional<int> evalTemplateIntTokens(const std::vector<std::string>& 
         if (tok == "U" || tok == "u" || tok == "L" || tok == "l") continue;
         std::optional<long long> value = parseIntegerToken(tok);
         if (!value) {
+            auto template_it = current_template_int_values.find(tok);
+            if (template_it != current_template_int_values.end()) value = template_it->second;
+        }
+        if (!value) {
             auto it = global_const_int_values.find(tok);
             if (it != global_const_int_values.end()) value = it->second;
         }
@@ -808,6 +838,210 @@ static std::optional<int> evalTemplateIntTokens(const std::vector<std::string>& 
         return std::nullopt;
     }
     return static_cast<int>(result);
+}
+
+static std::string templateIntArgsKey(const std::vector<int>& args) {
+    std::string key;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i) key += ",";
+        key += std::to_string(args[i]);
+    }
+    return key;
+}
+
+static std::string lambdaTemplateSpecializationKey(const std::string& base_name,
+                                                   const std::vector<int>& args) {
+    return base_name + "<" + templateIntArgsKey(args) + ">";
+}
+
+static std::string ensureLambdaTemplateSpecializationName(const std::string& base_name,
+                                                          const std::vector<int>& args) {
+    std::string key = lambdaTemplateSpecializationKey(base_name, args);
+    auto existing = lambda_template_specialization_name_by_key.find(key);
+    if (existing != lambda_template_specialization_name_by_key.end()) {
+        return existing->second;
+    }
+
+    std::string generated = base_name + "__rtlzz_template_" +
+                            std::to_string(lambda_template_specialization_name_by_key.size());
+    lambda_template_specialization_name_by_key.emplace(key, generated);
+    lambda_template_specialization_args_by_name[base_name].push_back(args);
+    known_lambda_names.insert(generated);
+    return generated;
+}
+
+static std::string templateCalleeNameFromText(const std::string& text) {
+    std::size_t lt = text.find('<');
+    if (lt == std::string::npos) return "";
+    std::size_t end = lt;
+    while (end > 0 &&
+           std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+    }
+    std::size_t begin = end;
+    while (begin > 0 &&
+           (std::isalnum(static_cast<unsigned char>(text[begin - 1])) ||
+            text[begin - 1] == '_' || text[begin - 1] == ':')) {
+        --begin;
+    }
+    std::string name = text.substr(begin, end - begin);
+    while (name.rfind("::", 0) == 0) name.erase(0, 2);
+    auto scope = name.rfind("::");
+    if (scope != std::string::npos) name = name.substr(scope + 2);
+    return name;
+}
+
+static std::vector<std::string> templateParamNamesFromTemplateText(
+    const std::string& text) {
+    std::vector<std::string> params;
+    std::size_t keyword = text.find("template");
+    if (keyword == std::string::npos) return params;
+    std::size_t template_begin = text.find('<', keyword);
+    if (template_begin == std::string::npos) return params;
+
+    int depth = 0;
+    std::size_t template_end = std::string::npos;
+    for (std::size_t i = template_begin; i < text.size(); ++i) {
+        if (text[i] == '<') ++depth;
+        if (text[i] == '>' && --depth == 0) {
+            template_end = i;
+            break;
+        }
+    }
+    if (template_end == std::string::npos) return params;
+
+    std::string params_text =
+        text.substr(template_begin + 1, template_end - template_begin - 1);
+    std::size_t begin = 0;
+    int nested = 0;
+    for (std::size_t i = 0; i <= params_text.size(); ++i) {
+        char ch = i < params_text.size() ? params_text[i] : ',';
+        if (ch == '<') ++nested;
+        if (ch == '>') --nested;
+        if (ch != ',' || nested != 0) continue;
+        std::string part = params_text.substr(begin, i - begin);
+        auto equal = part.find('=');
+        if (equal != std::string::npos) part.resize(equal);
+        while (!part.empty() &&
+               std::isspace(static_cast<unsigned char>(part.back()))) {
+            part.pop_back();
+        }
+        std::size_t name_end = part.size();
+        std::size_t name_begin = name_end;
+        while (name_begin > 0 &&
+               (std::isalnum(static_cast<unsigned char>(part[name_begin - 1])) ||
+                part[name_begin - 1] == '_')) {
+            --name_begin;
+        }
+        std::string param_name = part.substr(name_begin, name_end - name_begin);
+        if (!param_name.empty()) params.push_back(std::move(param_name));
+        begin = i + 1;
+    }
+    return params;
+}
+
+static TypeInfo typeFromSimpleSourceText(std::string text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isspace(ch);
+    }), text.end());
+    std::smatch match;
+    if (std::regex_search(text, match, std::regex(R"(Int<([0-9]+)>|vulfixint::Int<([0-9]+)>)"))) {
+        std::string width_text = match[1].matched ? match[1].str() : match[2].str();
+        return make_hw_type("Int", std::stoi(width_text), false);
+    }
+    if (text == "bool") return TypeInfo{"bool", 1, false};
+    if (text == "uint8_t") return TypeInfo{"uint8_t", 8, false, true, "builtin"};
+    if (text == "int8_t") return TypeInfo{"int8_t", 8, true, true, "builtin"};
+    if (text == "uint16_t") return TypeInfo{"uint16_t", 16, false, true, "builtin"};
+    if (text == "int16_t") return TypeInfo{"int16_t", 16, true, true, "builtin"};
+    if (text == "uint32_t" || text == "unsignedint") {
+        return TypeInfo{"uint32_t", 32, false, true, "builtin"};
+    }
+    if (text == "int") return TypeInfo{"int", 32, true, true, "builtin"};
+    if (text == "uint64_t") return TypeInfo{"uint64_t", 64, false, true, "builtin"};
+    if (text == "int64_t") return TypeInfo{"int64_t", 64, true, true, "builtin"};
+    return TypeInfo{};
+}
+
+static std::vector<ParamDecl> parseFunctionParamsFromTemplateText(
+    const std::string& text,
+    const std::string& function_name) {
+    std::vector<ParamDecl> params;
+    std::size_t name_pos = text.find(function_name);
+    if (name_pos == std::string::npos) return params;
+    std::size_t lparen = text.find('(', name_pos + function_name.size());
+    if (lparen == std::string::npos) return params;
+    int depth = 0;
+    std::size_t rparen = std::string::npos;
+    for (std::size_t i = lparen; i < text.size(); ++i) {
+        if (text[i] == '(') ++depth;
+        if (text[i] == ')' && --depth == 0) {
+            rparen = i;
+            break;
+        }
+    }
+    if (rparen == std::string::npos) return params;
+
+    std::string params_text = text.substr(lparen + 1, rparen - lparen - 1);
+    std::size_t begin = 0;
+    int nested_angle = 0;
+    for (std::size_t i = 0; i <= params_text.size(); ++i) {
+        char ch = i < params_text.size() ? params_text[i] : ',';
+        if (ch == '<') ++nested_angle;
+        if (ch == '>') --nested_angle;
+        if (ch != ',' || nested_angle != 0) continue;
+        std::string part = params_text.substr(begin, i - begin);
+        begin = i + 1;
+        while (!part.empty() &&
+               std::isspace(static_cast<unsigned char>(part.back()))) {
+            part.pop_back();
+        }
+        std::size_t name_end = part.size();
+        std::size_t name_begin = name_end;
+        while (name_begin > 0 &&
+               (std::isalnum(static_cast<unsigned char>(part[name_begin - 1])) ||
+                part[name_begin - 1] == '_')) {
+            --name_begin;
+        }
+        if (name_begin == name_end) continue;
+        std::string param_name = part.substr(name_begin, name_end - name_begin);
+        std::string type_text = part.substr(0, name_begin);
+        TypeInfo type = typeFromSimpleSourceText(type_text);
+        if (param_name.empty() || type.name.empty()) continue;
+        ParamDecl param;
+        param.name = std::move(param_name);
+        param.type = std::move(type);
+        param.passing = ParamPassingKind::Value;
+        param.direction = ParamDirection::Input;
+        params.push_back(std::move(param));
+    }
+    return params;
+}
+
+static std::string ensureFunctionTemplateSpecializationName(
+    const std::string& source_name,
+    const std::vector<int>& args) {
+    if (source_name.empty() || args.empty()) return "";
+    std::string key = lambdaTemplateSpecializationKey(source_name, args);
+    auto existing = function_template_specialization_name_by_key.find(key);
+    if (existing != function_template_specialization_name_by_key.end()) {
+        return existing->second;
+    }
+    auto template_it = source_function_templates_by_name.find(source_name);
+    if (template_it == source_function_templates_by_name.end()) return "";
+    if (args.size() != template_it->second.template_params.size()) {
+        return "";
+    }
+
+    std::string internal_name = source_name + "__rtlzz_template_late_" +
+                                std::to_string(function_template_specialization_name_by_key.size());
+    function_template_specialization_name_by_key.emplace(key, internal_name);
+    helper_template_call_to_name[key] = internal_name;
+    function_return_types_by_name[internal_name] =
+        convertType(clang_getCursorResultType(template_it->second.function_decl));
+    pending_function_template_specializations.push_back(
+        PendingFunctionTemplateSpecialization{source_name, internal_name, args});
+    return internal_name;
 }
 
 static std::string operatorSignature(CXCursor method) {
@@ -1097,6 +1331,54 @@ static std::vector<int> templateIntArgsFromTokens(CXCursor cursor, const std::st
     clang_disposeTokens(tu, tokens, numTokens);
     if (!values.empty()) return values;
     return {};
+}
+
+static std::vector<int> templateIntArgsFromText(const std::string& text,
+                                                const std::string& callee) {
+    std::size_t name_pos = callee.empty() ? std::string::npos : text.find(callee);
+    std::size_t lt = name_pos == std::string::npos
+        ? text.find('<')
+        : text.find('<', name_pos + callee.size());
+    if (lt == std::string::npos) return {};
+
+    int depth = 0;
+    std::size_t gt = std::string::npos;
+    for (std::size_t i = lt; i < text.size(); ++i) {
+        if (text[i] == '<') ++depth;
+        if (text[i] == '>' && --depth == 0) {
+            gt = i;
+            break;
+        }
+    }
+    if (gt == std::string::npos || gt <= lt + 1) return {};
+
+    std::vector<int> values;
+    std::string args_text = text.substr(lt + 1, gt - lt - 1);
+    std::size_t begin = 0;
+    int nested = 0;
+    for (std::size_t i = 0; i <= args_text.size(); ++i) {
+        char ch = i < args_text.size() ? args_text[i] : ',';
+        if (ch == '<') ++nested;
+        if (ch == '>') --nested;
+        if (ch != ',' || nested != 0) continue;
+        auto value = evalTemplateIntTokens(
+            constIntExprTokens(args_text.substr(begin, i - begin)));
+        if (!value) return {};
+        values.push_back(*value);
+        begin = i + 1;
+    }
+    return values;
+}
+
+static TypeInfo typeForCallResult(CXType cursor_type, const std::string& callee) {
+    TypeInfo result = convertType(cursor_type);
+    if ((result.name.empty() || result.width <= 0) && !callee.empty()) {
+        auto it = function_return_types_by_name.find(callee);
+        if (it != function_return_types_by_name.end()) {
+            result = it->second;
+        }
+    }
+    return result;
 }
 
 static ExprPtr makeSurfaceCall(std::string callee,
@@ -1886,6 +2168,53 @@ static std::string cursorFileName(CXCursor cursor) {
     return file ? cxToStr(clang_getFileName(file)) : "";
 }
 
+static void collectSourceFunctionTemplateDefinitions(CXCursor root,
+                                                     const std::string& source_file) {
+    struct Ctx {
+        std::string source_file;
+    } ctx{normalizedPath(source_file)};
+
+    clang_visitChildren(root, [](CXCursor c, CXCursor,
+                                 CXClientData data) -> CXChildVisitResult {
+        auto* ctx = static_cast<Ctx*>(data);
+        if (clang_getCursorKind(c) != CXCursor_FunctionTemplate) {
+            return CXChildVisit_Recurse;
+        }
+        if (normalizedPath(cursorFileName(c)) == ctx->source_file) {
+            std::string source_name = cxToStr(clang_getCursorSpelling(c));
+            auto template_params = templateParamNamesFromTemplateText(cursorText(c, true));
+            if (!source_name.empty()) {
+                source_function_templates_by_name[source_name] =
+                    FunctionTemplateInfo{c, template_params};
+            }
+        }
+
+        struct PrimaryCtx {
+            std::string source_file;
+            std::vector<std::string> template_params;
+        } primary_ctx{ctx->source_file,
+                      templateParamNamesFromTemplateText(cursorText(c, true))};
+
+        clang_visitChildren(c, [](CXCursor child, CXCursor,
+                                  CXClientData child_data) -> CXChildVisitResult {
+            auto* primary_ctx = static_cast<PrimaryCtx*>(child_data);
+            if (clang_getCursorKind(child) != CXCursor_FunctionDecl ||
+                !clang_isCursorDefinition(child) ||
+                normalizedPath(cursorFileName(child)) != primary_ctx->source_file ||
+                !clang_Cursor_isNull(clang_getSpecializedCursorTemplate(child))) {
+                return CXChildVisit_Continue;
+            }
+            std::string source_name = cxToStr(clang_getCursorSpelling(child));
+            if (!source_name.empty()) {
+                source_function_templates_by_name[source_name] =
+                    FunctionTemplateInfo{child, primary_ctx->template_params};
+            }
+            return CXChildVisit_Break;
+        }, &primary_ctx);
+        return CXChildVisit_Recurse;
+    }, &ctx);
+}
+
 struct FunctionCursorInfo {
     std::string name;
     CXCursor cursor;
@@ -1902,10 +2231,34 @@ static std::vector<FunctionCursorInfo> collectSourceFunctionDefinitions(CXCursor
         auto* ctx = static_cast<Ctx*>(data);
         if (clang_getCursorKind(c) == CXCursor_FunctionDecl && clang_isCursorDefinition(c)) {
             if (cursorFileName(c) == ctx->source_file) {
-                ctx->functions.push_back({cxToStr(clang_getCursorSpelling(c)), c});
+                std::string name = cxToStr(clang_getCursorSpelling(c));
+                function_return_types_by_name[name] =
+                    convertType(clang_getCursorResultType(c));
+                ctx->functions.push_back({name, c});
             }
-        } else if (clang_getCursorKind(c) == CXCursor_FunctionTemplate &&
-                   cursorFileName(c) == ctx->source_file) {
+        } else if (clang_getCursorKind(c) == CXCursor_FunctionTemplate) {
+            struct PrimaryTemplateCtx {
+                std::vector<std::string> template_params;
+                std::string source_file;
+            } primary_ctx{templateParamNamesFromTemplateText(cursorText(c, true)),
+                          ctx->source_file};
+            clang_visitChildren(c, [](CXCursor child, CXCursor,
+                                      CXClientData data) -> CXChildVisitResult {
+                auto* primary_ctx = static_cast<PrimaryTemplateCtx*>(data);
+                if (clang_getCursorKind(child) != CXCursor_FunctionDecl ||
+                    !clang_isCursorDefinition(child) ||
+                    cursorFileName(child) != primary_ctx->source_file ||
+                    !clang_Cursor_isNull(clang_getSpecializedCursorTemplate(child))) {
+                    return CXChildVisit_Continue;
+                }
+                std::string source_name = cxToStr(clang_getCursorSpelling(child));
+                if (!source_name.empty()) {
+                    source_function_templates_by_name[source_name] =
+                        FunctionTemplateInfo{child, primary_ctx->template_params};
+                }
+                return CXChildVisit_Break;
+            }, &primary_ctx);
+
             struct TemplateCtx {
                 Ctx* outer;
                 int specialization_index = 0;
@@ -1917,14 +2270,23 @@ static std::vector<FunctionCursorInfo> collectSourceFunctionDefinitions(CXCursor
                     !clang_isCursorDefinition(child)) {
                     return CXChildVisit_Continue;
                 }
+                std::string source_name = cxToStr(clang_getCursorSpelling(child));
                 CXCursor primary = clang_getSpecializedCursorTemplate(child);
                 if (clang_Cursor_isNull(primary)) {
+                if (!source_name.empty()) {
+                    source_function_templates_by_name[source_name] =
+                        FunctionTemplateInfo{
+                            child,
+                            templateParamNamesFromTemplateText(cursorText(
+                                clang_getCursorSemanticParent(child), true))};
+                }
                     return CXChildVisit_Continue;
                 }
-                std::string source_name = cxToStr(clang_getCursorSpelling(child));
                 std::string internal_name = source_name + "__rtlzz_template_" +
                     std::to_string(template_ctx->specialization_index++);
                 helper_function_usr_to_name[cursorUsr(child)] = internal_name;
+                function_return_types_by_name[internal_name] =
+                    convertType(clang_getCursorResultType(child));
                 int template_arg_count = clang_Cursor_getNumTemplateArguments(child);
                 if (template_arg_count > 0) {
                     std::string call_key = source_name + "<";
@@ -1975,6 +2337,8 @@ static std::vector<FunctionCursorInfo> collectSourceFunctionDefinitions(CXCursor
         std::string internal_name = source_name + "__rtlzz_template_call_" +
             std::to_string(ctx->specialization_index++);
         helper_function_usr_to_name[usr] = internal_name;
+        function_return_types_by_name[internal_name] =
+            convertType(clang_getCursorResultType(referenced));
         int template_arg_count = clang_Cursor_getNumTemplateArguments(referenced);
         if (template_arg_count > 0) {
             std::string call_key = source_name + "<";
@@ -2310,6 +2674,14 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             return make_field_access(base, field, field_type);
         }
         std::string name = cxToStr(clang_getCursorSpelling(cursor));
+        auto template_value = current_template_int_values.find(name);
+        if (template_value != current_template_int_values.end()) {
+            TypeInfo template_type = convertType(type);
+            if (template_type.name.empty() || template_type.width <= 0) {
+                template_type = TypeInfo{"uint32_t", 32, false, true, "builtin"};
+            }
+            return make_literal(std::to_string(template_value->second), template_type);
+        }
         if (name.empty()) {
             CXEvalResult evaluated = clang_Cursor_Evaluate(cursor);
             if (evaluated) {
@@ -2400,6 +2772,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
     }
 
     case CXCursor_CallExpr: {
+        const std::string call_text = cursorText(cursor);
         std::string spelling = cxToStr(clang_getCursorSpelling(cursor));
         CXCursor referenced_function = clang_getCursorReferenced(cursor);
         if (!clang_Cursor_isNull(referenced_function)) {
@@ -2409,8 +2782,17 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 spelling = specialized->second;
             }
         }
+        if (spelling.empty()) {
+            spelling = templateCalleeNameFromText(call_text);
+        }
         if (!spelling.empty()) {
             auto template_values = templateIntArgsFromTokens(cursor, ")");
+            if (template_values.empty()) {
+                template_values = templateIntArgsFromTokens(cursor, spelling);
+            }
+            if (template_values.empty()) {
+                template_values = templateIntArgsFromText(call_text, spelling);
+            }
             if (!template_values.empty()) {
                 std::string call_key = spelling + "<";
                 for (std::size_t i = 0; i < template_values.size(); ++i) {
@@ -2421,6 +2803,11 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 auto specialized = helper_template_call_to_name.find(call_key);
                 if (specialized != helper_template_call_to_name.end()) {
                     spelling = specialized->second;
+                } else if (auto late =
+                               ensureFunctionTemplateSpecializationName(spelling,
+                                                                        template_values);
+                           !late.empty()) {
+                    spelling = late;
                 }
             }
         }
@@ -2438,7 +2825,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 if (spelling.empty()) spelling = first_child_spelling;
             }
         }
-        const std::string call_text = cursorText(cursor);
         if (call_text.find(". template operator ( ) <") != std::string::npos ||
             call_text.find(".template operator()<") != std::string::npos) {
             std::string callee;
@@ -2454,10 +2840,21 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 failUnsupported(cursor,
                                 "S0 cannot resolve explicit generic lambda operator() receiver");
             }
+            auto template_args = templateIntArgsFromTokens(cursor, ")");
+            if (!template_args.empty()) {
+                std::string base_callee = callee;
+                std::string spec_key =
+                    lambdaTemplateSpecializationKey(base_callee, template_args);
+                CXCursor referenced = referencedOperatorMethodInCursor(cursor);
+                if (!clang_Cursor_isNull(referenced)) {
+                    lambda_template_specialization_method_by_key[spec_key] = referenced;
+                }
+                callee = ensureLambdaTemplateSpecializationName(base_callee, template_args);
+            }
             auto result = std::make_shared<Expr>();
             result->kind = ExprKind::Call;
             result->callee = callee;
-            result->type = convertType(type);
+            result->type = typeForCallResult(type, callee);
             result->literal_value = call_text;
             for (std::size_t i = 0; i < children.size(); ++i) {
                 if (i == receiver_index ||
@@ -2468,12 +2865,6 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 if (arg && !isOperatorOnlyExpr(arg)) {
                     result->args.push_back(std::move(arg));
                 }
-            }
-            auto template_args = templateIntArgsFromTokens(cursor, ")");
-            TypeInfo template_arg_type{"uint32_t", 32, false, true, "builtin"};
-            for (auto it = template_args.rbegin(); it != template_args.rend(); ++it) {
-                result->args.insert(result->args.begin(),
-                                    make_literal(std::to_string(*it), template_arg_type));
             }
             if (result->args.empty()) {
                 appendIdentifierCallArgsFromText(result->args, call_text);
@@ -2704,7 +3095,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
         if (vul_call.kind == VulCallKind::At) {
             auto result = makeSurfaceCall("at", convertType(type), {}, debugLocFromCursor(cursor));
             std::vector<int> range_args = vul_call.template_values;
-            if (range_args.empty()) {
+            if (range_args.size() != 2) {
                 range_args = templateIntArgsFromTokens(cursor, "at");
             }
             if (range_args.size() == 1) {
@@ -3026,7 +3417,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
         auto result = std::make_shared<Expr>();
         result->kind = ExprKind::Call;
         result->callee = spelling;
-        result->type = convertType(type);
+        result->type = typeForCallResult(type, spelling);
         size_t arg_start = 1;
         int receiver_arg_index = -1;
         if (spelling == "operator()") {
@@ -3972,9 +4363,134 @@ collectRecoveredSymbolTypes(CXCursor cursor) {
     return result;
 }
 
+static std::vector<std::string> lambdaTemplateParamNamesFromText(const std::string& lambda_text) {
+    std::vector<std::string> params;
+    std::size_t capture_end = lambda_text.find(']');
+    std::size_t template_begin = capture_end == std::string::npos
+        ? std::string::npos
+        : capture_end + 1;
+    while (template_begin != std::string::npos &&
+           template_begin < lambda_text.size() &&
+           std::isspace(static_cast<unsigned char>(lambda_text[template_begin]))) {
+        ++template_begin;
+    }
+    if (template_begin == std::string::npos ||
+        template_begin >= lambda_text.size() ||
+        lambda_text[template_begin] != '<') {
+        return params;
+    }
+
+    int depth = 0;
+    std::size_t template_end = std::string::npos;
+    for (std::size_t i = template_begin; i < lambda_text.size(); ++i) {
+        if (lambda_text[i] == '<') ++depth;
+        if (lambda_text[i] == '>' && --depth == 0) {
+            template_end = i;
+            break;
+        }
+    }
+    if (template_end == std::string::npos) return params;
+
+    std::string params_text =
+        lambda_text.substr(template_begin + 1, template_end - template_begin - 1);
+    std::size_t begin = 0;
+    int nested = 0;
+    for (std::size_t i = 0; i <= params_text.size(); ++i) {
+        char ch = i < params_text.size() ? params_text[i] : ',';
+        if (ch == '<') ++nested;
+        if (ch == '>') --nested;
+        if (ch != ',' || nested != 0) continue;
+        std::string part = params_text.substr(begin, i - begin);
+        auto equal = part.find('=');
+        if (equal != std::string::npos) part.resize(equal);
+        while (!part.empty() &&
+               std::isspace(static_cast<unsigned char>(part.back()))) {
+            part.pop_back();
+        }
+        std::size_t name_end = part.size();
+        std::size_t name_begin = name_end;
+        while (name_begin > 0 &&
+               (std::isalnum(static_cast<unsigned char>(part[name_begin - 1])) ||
+                part[name_begin - 1] == '_')) {
+            --name_begin;
+        }
+        std::string param_name = part.substr(name_begin, name_end - name_begin);
+        if (!param_name.empty()) params.push_back(std::move(param_name));
+        begin = i + 1;
+    }
+    return params;
+}
+
+static bool cursorTemplateArgsMatch(CXCursor cursor, const std::vector<int>& values) {
+    int count = clang_Cursor_getNumTemplateArguments(cursor);
+    if (count != static_cast<int>(values.size())) return false;
+    for (int i = 0; i < count; ++i) {
+        if (clang_Cursor_getTemplateArgumentKind(cursor, i) !=
+            CXTemplateArgumentKind_Integral) {
+            return false;
+        }
+        if (clang_Cursor_getTemplateArgumentValue(cursor, i) != values[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static CXCursor findSpecializedLambdaOperatorMethod(CXCursor lambda_cursor,
+                                                    const std::vector<int>& values) {
+    struct Ctx {
+        const std::vector<int>* values;
+        CXCursor found = clang_getNullCursor();
+    } ctx{&values, clang_getNullCursor()};
+
+    clang_visitChildren(lambda_cursor, [](CXCursor c, CXCursor,
+                                          CXClientData data) -> CXChildVisitResult {
+        auto* ctx = static_cast<Ctx*>(data);
+        if (clang_getCursorKind(c) == CXCursor_CXXMethod &&
+            cxToStr(clang_getCursorSpelling(c)) == "operator()" &&
+            cursorTemplateArgsMatch(c, *ctx->values)) {
+            ctx->found = c;
+            return CXChildVisit_Break;
+        }
+        return CXChildVisit_Recurse;
+    }, &ctx);
+    return ctx.found;
+}
+
+static CXCursor referencedOperatorMethodInCursor(CXCursor cursor) {
+    CXCursor referenced = clang_getCursorReferenced(cursor);
+    if (!clang_Cursor_isNull(referenced) &&
+        clang_getCursorKind(referenced) == CXCursor_CXXMethod &&
+        cxToStr(clang_getCursorSpelling(referenced)) == "operator()") {
+        return referenced;
+    }
+    for (auto& child : getChildren(cursor)) {
+        CXCursor found = referencedOperatorMethodInCursor(child);
+        if (!clang_Cursor_isNull(found)) return found;
+    }
+    return clang_getNullCursor();
+}
+
+static CXCursor primaryFunctionDeclForTemplate(CXCursor cursor) {
+    if (clang_getCursorKind(cursor) != CXCursor_FunctionTemplate) return cursor;
+    CXCursor found = clang_getNullCursor();
+    clang_visitChildren(cursor, [](CXCursor child, CXCursor,
+                                  CXClientData data) -> CXChildVisitResult {
+        auto* found = static_cast<CXCursor*>(data);
+        if (clang_getCursorKind(child) == CXCursor_FunctionDecl) {
+            *found = child;
+            return CXChildVisit_Break;
+        }
+        return CXChildVisit_Recurse;
+    }, &found);
+    return clang_Cursor_isNull(found) ? cursor : found;
+}
+
 static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name) {
     auto saved_recovered_types = recovered_symbol_types;
+    auto saved_const_int_values = global_const_int_values;
     recovered_symbol_types = collectRecoveredSymbolTypes(cursor);
+    collectScopedConstInts(cursor, cursorFileName(cursor));
     FunctionAST func;
     func.name = name;
     func.return_type = convertType(clang_getCursorResultType(cursor));
@@ -4000,16 +4516,37 @@ static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name)
     }
 
     recovered_symbol_types = std::move(saved_recovered_types);
+    global_const_int_values = std::move(saved_const_int_values);
     return func;
 }
 
-static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
-                                                      const std::string& name) {
+static std::shared_ptr<FunctionAST> convertLambdaExpr(
+    CXCursor lambda_cursor,
+    const std::string& name,
+    const std::vector<int>& template_values = {},
+    bool include_template_params = true,
+    bool register_operator_name = true,
+    CXCursor preferred_operator_method = clang_getNullCursor()) {
     auto saved_recovered_types = recovered_symbol_types;
+    auto saved_const_int_values = global_const_int_values;
+    auto saved_template_int_values = current_template_int_values;
     recovered_symbol_types = collectRecoveredSymbolTypes(lambda_cursor);
+    collectScopedConstInts(lambda_cursor, cursorFileName(lambda_cursor));
+    const std::string lambda_text = cursorText(lambda_cursor);
+    auto template_param_names = lambdaTemplateParamNamesFromText(lambda_text);
+    if (!template_values.empty()) {
+        if (template_values.size() != template_param_names.size()) {
+            failUnsupported(lambda_cursor,
+                            "S0 cannot specialize generic lambda with mismatched template argument count");
+        }
+        for (std::size_t i = 0; i < template_values.size(); ++i) {
+            current_template_int_values[template_param_names[i]] = template_values[i];
+        }
+    }
     auto fn = std::make_shared<FunctionAST>();
     fn->name = name;
-    registerLambdaOperatorName(lambda_cursor, name);
+    known_lambda_names.insert(name);
+    if (register_operator_name) registerLambdaOperatorName(lambda_cursor, name);
     fn->return_type = TypeInfo{"auto", 0, false};
 
     auto captures = collectLambdaCaptures(lambda_cursor);
@@ -4036,68 +4573,16 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         return found;
     };
 
-    const std::string lambda_text = cursorText(lambda_cursor);
-    std::size_t capture_end = lambda_text.find(']');
-    std::size_t template_begin = capture_end == std::string::npos
-        ? std::string::npos
-        : capture_end + 1;
-    while (template_begin != std::string::npos &&
-           template_begin < lambda_text.size() &&
-           std::isspace(static_cast<unsigned char>(lambda_text[template_begin]))) {
-        ++template_begin;
-    }
-    if (template_begin == std::string::npos ||
-        template_begin >= lambda_text.size() ||
-        lambda_text[template_begin] != '<') {
-        template_begin = std::string::npos;
-    }
-    if (template_begin != std::string::npos) {
-        int depth = 0;
-        std::size_t template_end = std::string::npos;
-        for (std::size_t i = template_begin; i < lambda_text.size(); ++i) {
-            if (lambda_text[i] == '<') ++depth;
-            if (lambda_text[i] == '>' && --depth == 0) {
-                template_end = i;
-                break;
-            }
-        }
-        if (template_end != std::string::npos) {
-            std::string params_text =
-                lambda_text.substr(template_begin + 1,
-                                   template_end - template_begin - 1);
-            std::size_t begin = 0;
-            int nested = 0;
-            for (std::size_t i = 0; i <= params_text.size(); ++i) {
-                char ch = i < params_text.size() ? params_text[i] : ',';
-                if (ch == '<') ++nested;
-                if (ch == '>') --nested;
-                if (ch != ',' || nested != 0) continue;
-                std::string part = params_text.substr(begin, i - begin);
-                auto equal = part.find('=');
-                if (equal != std::string::npos) part.resize(equal);
-                while (!part.empty() &&
-                       std::isspace(static_cast<unsigned char>(part.back()))) {
-                    part.pop_back();
-                }
-                std::size_t name_end = part.size();
-                std::size_t name_begin = name_end;
-                while (name_begin > 0 &&
-                       (std::isalnum(static_cast<unsigned char>(part[name_begin - 1])) ||
-                        part[name_begin - 1] == '_')) {
-                    --name_begin;
-                }
-                std::string param_name =
-                    part.substr(name_begin, name_end - name_begin);
-                if (!param_name.empty() && !hasParamNamed(*fn, param_name)) {
-                    ParamDecl param;
-                    param.name = param_name;
-                    param.type = find_template_param_type(param_name);
-                    param.passing = ParamPassingKind::Value;
-                    param.direction = ParamDirection::Input;
-                    param.is_const = true;
-                    fn->params.push_back(std::move(param));
-                }
-                begin = i + 1;
+    if (include_template_params) {
+        for (const auto& param_name : template_param_names) {
+            if (!param_name.empty() && !hasParamNamed(*fn, param_name)) {
+                ParamDecl param;
+                param.name = param_name;
+                param.type = find_template_param_type(param_name);
+                param.passing = ParamPassingKind::Value;
+                param.direction = ParamDirection::Input;
+                param.is_const = true;
+                fn->params.push_back(std::move(param));
             }
         }
     }
@@ -4122,16 +4607,25 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         }
     };
 
-    auto lambda_children = getChildren(lambda_cursor);
-    for (auto& c : lambda_children) {
-        auto kind = clang_getCursorKind(c);
-        if (kind == CXCursor_CXXMethod &&
-            cxToStr(clang_getCursorSpelling(c)) == "operator()") {
-            collect_lambda_method(c);
-        } else if (kind == CXCursor_ParmDecl) {
-            add_explicit_param(c);
-        } else if (kind == CXCursor_CompoundStmt && fn->body.empty()) {
-            fn->body = convertBlock(c);
+    CXCursor selected_specialization = preferred_operator_method;
+    if (clang_Cursor_isNull(selected_specialization) && !template_values.empty()) {
+        selected_specialization =
+            findSpecializedLambdaOperatorMethod(lambda_cursor, template_values);
+    }
+    if (!clang_Cursor_isNull(selected_specialization)) {
+        collect_lambda_method(selected_specialization);
+    } else {
+        auto lambda_children = getChildren(lambda_cursor);
+        for (auto& c : lambda_children) {
+            auto kind = clang_getCursorKind(c);
+            if (kind == CXCursor_CXXMethod &&
+                cxToStr(clang_getCursorSpelling(c)) == "operator()") {
+                collect_lambda_method(c);
+            } else if (kind == CXCursor_ParmDecl) {
+                add_explicit_param(c);
+            } else if (kind == CXCursor_CompoundStmt && fn->body.empty()) {
+                fn->body = convertBlock(c);
+            }
         }
     }
 
@@ -4156,7 +4650,10 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
 
     for (auto& s : fn->body) {
         if (s && s->kind == StmtKind::Return && s->return_value.has_value()) {
-            fn->return_type = s->return_value.value()->type;
+            const TypeInfo& return_type = s->return_value.value()->type;
+            if (!return_type.name.empty() && return_type.width > 0) {
+                fn->return_type = return_type;
+            }
             break;
         }
     }
@@ -4164,7 +4661,10 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(CXCursor lambda_cursor,
         fn->return_type = TypeInfo{"void", 0, false};
     }
     lambda_param_count_by_name[name] = fn->params.size();
+    function_return_types_by_name[name] = fn->return_type;
     recovered_symbol_types = std::move(saved_recovered_types);
+    global_const_int_values = std::move(saved_const_int_values);
+    current_template_int_values = std::move(saved_template_int_values);
     return fn;
 }
 
@@ -4175,13 +4675,103 @@ static void collectLocalLambdas(CXCursor cursor, FunctionAST& func) {
             CXCursor lambda_cursor = findLambdaExpr(child);
             if (!clang_equalCursors(lambda_cursor, clang_getNullCursor())) {
                 std::string lambda_name = ensureLambdaNameForVar(child, source_name);
-                auto lambda = convertLambdaExpr(lambda_cursor, lambda_name);
-                if (lambda) func.lambdas[lambda_name] = lambda;
+                auto template_params =
+                    lambdaTemplateParamNamesFromText(cursorText(lambda_cursor));
+                if (!template_params.empty()) {
+                    auto specs =
+                        lambda_template_specialization_args_by_name.find(lambda_name);
+                    if (specs == lambda_template_specialization_args_by_name.end() ||
+                        specs->second.empty()) {
+                        continue;
+                    }
+                    for (const auto& args : specs->second) {
+                        std::string specialized_name =
+                            ensureLambdaTemplateSpecializationName(lambda_name, args);
+                        CXCursor preferred_method = clang_getNullCursor();
+                        auto method_it = lambda_template_specialization_method_by_key.find(
+                            lambdaTemplateSpecializationKey(lambda_name, args));
+                        if (method_it != lambda_template_specialization_method_by_key.end()) {
+                            preferred_method = method_it->second;
+                        }
+                        auto lambda = convertLambdaExpr(lambda_cursor,
+                                                        specialized_name,
+                                                        args,
+                                                        false,
+                                                        false,
+                                                        preferred_method);
+                        if (lambda) func.lambdas[specialized_name] = lambda;
+                    }
+                } else {
+                    auto lambda = convertLambdaExpr(lambda_cursor, lambda_name);
+                    if (lambda) func.lambdas[lambda_name] = lambda;
+                }
                 continue;
             }
         }
         collectLocalLambdas(child, func);
     }
+}
+
+static void appendPendingFunctionTemplateSpecializations(FunctionAST& root) {
+    for (std::size_t i = 0; i < pending_function_template_specializations.size(); ++i) {
+        const auto spec = pending_function_template_specializations[i];
+        if (!processed_function_template_specializations.insert(spec.internal_name).second) {
+            continue;
+        }
+        auto template_it = source_function_templates_by_name.find(spec.source_name);
+        if (template_it == source_function_templates_by_name.end()) continue;
+        const auto& info = template_it->second;
+        if (spec.args.size() != info.template_params.size()) continue;
+
+        auto saved_template_int_values = current_template_int_values;
+        for (std::size_t arg_index = 0; arg_index < spec.args.size(); ++arg_index) {
+            current_template_int_values[info.template_params[arg_index]] =
+                spec.args[arg_index];
+        }
+
+        CXCursor function_cursor = primaryFunctionDeclForTemplate(info.function_decl);
+        auto helper = std::make_shared<FunctionAST>(
+            convertFunctionDecl(function_cursor, spec.internal_name));
+        if (helper->params.empty() &&
+            clang_getCursorKind(function_cursor) == CXCursor_FunctionTemplate) {
+            helper->params = parseFunctionParamsFromTemplateText(
+                cursorText(function_cursor, true), spec.source_name);
+        }
+        helper->struct_fields = root.struct_fields;
+        helper->struct_constructors = root.struct_constructors;
+        {
+            auto saved_const_int_values = global_const_int_values;
+            collectScopedConstInts(function_cursor, cursorFileName(function_cursor));
+            collectLocalLambdas(function_cursor, *helper);
+            global_const_int_values = std::move(saved_const_int_values);
+        }
+        current_template_int_values = std::move(saved_template_int_values);
+        root.helpers.push_back(std::move(helper));
+    }
+}
+
+static std::unordered_map<std::string, long long>
+templateBindingsForSpecializedFunction(CXCursor cursor) {
+    std::unordered_map<std::string, long long> bindings;
+    if (clang_Cursor_isNull(clang_getSpecializedCursorTemplate(cursor))) {
+        return bindings;
+    }
+    std::string source_name = cxToStr(clang_getCursorSpelling(cursor));
+    auto template_it = source_function_templates_by_name.find(source_name);
+    if (template_it == source_function_templates_by_name.end()) return bindings;
+    int count = clang_Cursor_getNumTemplateArguments(cursor);
+    if (count != static_cast<int>(template_it->second.template_params.size())) {
+        return bindings;
+    }
+    for (int i = 0; i < count; ++i) {
+        if (clang_Cursor_getTemplateArgumentKind(cursor, i) !=
+            CXTemplateArgumentKind_Integral) {
+            return {};
+        }
+        bindings[template_it->second.template_params[i]] =
+            clang_Cursor_getTemplateArgumentValue(cursor, i);
+    }
+    return bindings;
 }
 
 static void collectFunctionLambdas(FunctionAST& fn,
@@ -4992,10 +5582,84 @@ static void collectGlobalConstInts(CXCursor root, const std::string& source_file
     std::string wanted = normalizedPath(source_file);
     clang_visitChildren(root, [](CXCursor c, CXCursor, CXClientData data) -> CXChildVisitResult {
         auto* wanted = static_cast<std::string*>(data);
-        if (clang_getCursorKind(c) != CXCursor_VarDecl) return CXChildVisit_Continue;
+        if (clang_getCursorKind(c) == CXCursor_EnumConstantDecl) {
+            if (normalizedPath(cursorFileName(c)) != *wanted) return CXChildVisit_Continue;
+            std::string name = cxToStr(clang_getCursorSpelling(c));
+            if (!name.empty()) {
+                global_const_int_values[name] = clang_getEnumConstantDeclValue(c);
+            }
+            return CXChildVisit_Continue;
+        }
+        if (clang_getCursorKind(c) != CXCursor_VarDecl) return CXChildVisit_Recurse;
         if (normalizedPath(cursorFileName(c)) != *wanted) return CXChildVisit_Continue;
         CXType cursor_type = clang_getCursorType(c);
         if (!clang_isConstQualifiedType(cursor_type)) return CXChildVisit_Continue;
+        TypeInfo type = convertType(cursor_type);
+        if (type.is_array) return CXChildVisit_Continue;
+        CXEvalResult eval = clang_Cursor_Evaluate(c);
+        if (!eval) return CXChildVisit_Continue;
+        CXEvalResultKind kind = clang_EvalResult_getKind(eval);
+        if (kind == CXEval_Int) {
+            std::string name = cxToStr(clang_getCursorSpelling(c));
+            if (!name.empty()) {
+                global_const_int_values[name] = type.is_signed
+                    ? clang_EvalResult_getAsLongLong(eval)
+                    : static_cast<long long>(clang_EvalResult_getAsUnsigned(eval));
+            }
+        }
+        clang_EvalResult_dispose(eval);
+        return CXChildVisit_Continue;
+    }, &wanted);
+}
+
+static std::vector<std::string> constIntExprTokens(const std::string& expr) {
+    std::vector<std::string> tokens;
+    for (std::size_t i = 0; i < expr.size();) {
+        unsigned char ch = static_cast<unsigned char>(expr[i]);
+        if (std::isspace(ch)) {
+            ++i;
+            continue;
+        }
+        if (expr[i] == '+' || expr[i] == '-') {
+            tokens.push_back(std::string(1, expr[i++]));
+            continue;
+        }
+        if (std::isalnum(ch) || expr[i] == '_') {
+            std::size_t begin = i++;
+            while (i < expr.size()) {
+                unsigned char next = static_cast<unsigned char>(expr[i]);
+                if (!std::isalnum(next) && expr[i] != '_') break;
+                ++i;
+            }
+            tokens.push_back(expr.substr(begin, i - begin));
+            continue;
+        }
+        ++i;
+    }
+    return tokens;
+}
+
+static void collectScopedConstIntsFromText(const std::string& text) {
+    static const std::regex decl_pattern(
+        R"(\b(?:constexpr|const)\s+[^;=(){}]*?\b([A-Za-z_][A-Za-z_0-9]*)\s*=\s*([^;]+);)");
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), decl_pattern);
+         it != std::sregex_iterator(); ++it) {
+        std::string name = (*it)[1].str();
+        std::string expr = (*it)[2].str();
+        auto value = evalTemplateIntTokens(constIntExprTokens(expr));
+        if (value) global_const_int_values[name] = *value;
+    }
+}
+
+static void collectScopedConstInts(CXCursor root, const std::string& source_file) {
+    collectScopedConstIntsFromText(cursorText(root));
+    std::string wanted = normalizedPath(source_file);
+    clang_visitChildren(root, [](CXCursor c, CXCursor,
+                                 CXClientData data) -> CXChildVisitResult {
+        auto* wanted = static_cast<std::string*>(data);
+        if (clang_getCursorKind(c) != CXCursor_VarDecl) return CXChildVisit_Recurse;
+        if (normalizedPath(cursorFileName(c)) != *wanted) return CXChildVisit_Continue;
+        CXType cursor_type = clang_getCursorType(c);
         TypeInfo type = convertType(cursor_type);
         if (type.is_array) return CXChildVisit_Continue;
         CXEvalResult eval = clang_Cursor_Evaluate(c);
@@ -5158,12 +5822,21 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     lambda_captures_by_name.clear();
     lambda_param_count_by_name.clear();
     known_lambda_names.clear();
+    lambda_template_specialization_args_by_name.clear();
+    lambda_template_specialization_name_by_key.clear();
+    lambda_template_specialization_method_by_key.clear();
     lambda_unique_counter = 0;
     global_const_int_values.clear();
+    current_template_int_values.clear();
     global_ports_by_usr.clear();
     global_ports_in_source_order.clear();
     helper_function_usr_to_name.clear();
     helper_template_call_to_name.clear();
+    function_return_types_by_name.clear();
+    source_function_templates_by_name.clear();
+    function_template_specialization_name_by_key.clear();
+    pending_function_template_specializations.clear();
+    processed_function_template_specializations.clear();
     recovered_symbol_types.clear();
 
     CXIndex index = clang_createIndex(0, 0);
@@ -5287,6 +5960,7 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     std::string resolved_top_function = ctx.matches.front().first;
 
     std::string top_source_file = cursorFileName(found);
+    collectSourceFunctionTemplateDefinitions(root, top_source_file);
     auto source_functions = collectSourceFunctionDefinitions(root, top_source_file);
     bool saw_top = false;
     for (const auto& fn : source_functions) {
@@ -5357,18 +6031,35 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
         return result;
     }
     func.params = std::move(global_port_params);
-    collectLocalLambdas(found, func);
+    {
+        auto saved_const_int_values = global_const_int_values;
+        collectScopedConstInts(found, cursorFileName(found));
+        collectLocalLambdas(found, func);
+        global_const_int_values = std::move(saved_const_int_values);
+    }
 
     for (const auto& fn : source_functions) {
         if (fn.name == func.name && clang_equalCursors(fn.cursor, found)) continue;
         if (fn.name == func.name) continue;
+        auto saved_template_int_values = current_template_int_values;
+        auto template_bindings = templateBindingsForSpecializedFunction(fn.cursor);
+        for (const auto& [name, value] : template_bindings) {
+            current_template_int_values[name] = value;
+        }
         auto helper = std::make_shared<FunctionAST>(convertFunctionDecl(fn.cursor, fn.name));
         helper->struct_fields = struct_metadata.struct_fields;
         helper->struct_constructors = struct_metadata.struct_constructors;
-        collectLocalLambdas(fn.cursor, *helper);
+        {
+            auto saved_const_int_values = global_const_int_values;
+            collectScopedConstInts(fn.cursor, cursorFileName(fn.cursor));
+            collectLocalLambdas(fn.cursor, *helper);
+            global_const_int_values = std::move(saved_const_int_values);
+        }
+        current_template_int_values = std::move(saved_template_int_values);
         func.helpers.push_back(helper);
     }
 
+    appendPendingFunctionTemplateSpecializations(func);
     propagateLambdaCaptureDependencies(func);
     normalizeLambdaCallsInFunction(func);
     liftGlobalPortsIntoFunctions(func);

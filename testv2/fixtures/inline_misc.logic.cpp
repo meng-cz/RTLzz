@@ -50,6 +50,10 @@ Int<8> loop_calls_helper(Int<8> seed) {
     return acc;
 }
 
+enum : uint32_t {
+    TEMPLATE_ROUTE_OFFSET = 1,
+};
+
 #pragma input_port a
 Int<8> a;
 #pragma input_port b
@@ -104,6 +108,8 @@ Int<8> helper_global_shadow;
 Int<8> helper_template_global_0;
 #pragma output_port helper_template_global_1
 Int<8> helper_template_global_1;
+#pragma output_port helper_template_composed_path
+Int<8> helper_template_composed_path;
 #pragma output_port helper_default_array
 Int<8> helper_default_array;
 #pragma output_port helper_complex_lambda_arg
@@ -132,6 +138,20 @@ void template_write_global(Int<8> value) {
     } else {
         helper_template_global_1 = value;
     }
+}
+
+template <uint32_t P = 0>
+Int<8> template_route_value(Int<8> value) {
+    if constexpr (P == TEMPLATE_ROUTE_OFFSET) {
+        return value + Int<8>(11);
+    } else {
+        return value ^ Int<8>(23);
+    }
+}
+
+template <uint32_t P = 0>
+Int<8> template_helper_routes_with_global(Int<8> value) {
+    return template_route_value<P + TEMPLATE_ROUTE_OFFSET>(value + Int<8>(1));
 }
 
 Int<8> explicitly_initialized_array(Int<8> value) {
@@ -223,6 +243,15 @@ void hls_main() {
     write_global_output(helper_global_chain);
     helper_global_shadow = shadow_global_name(b);
     template_write_global<0>(add_bias(a) + Int<8>(1));
+    Int<8> helper_template_route = template_helper_routes_with_global<0>(a);
+    auto template_lambda_routes_with_global =
+        [&]<uint32_t IDX = 0>(Int<8> x) -> Int<8> {
+            return template_route_value<IDX + TEMPLATE_ROUTE_OFFSET>(
+                x ^ helper_template_route);
+        };
+    Int<8> lambda_template_route =
+        template_lambda_routes_with_global.template operator()<0>(b);
+    helper_template_composed_path = helper_template_route ^ lambda_template_route;
     template_write_global<0>(a);
     template_write_global<1>(b);
     helper_default_array = explicitly_initialized_array(a);
