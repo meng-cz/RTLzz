@@ -1,4 +1,5 @@
 #include "v2/V2AST.h"
+#include "s0ast/S0AST.h"
 #include "s1apinorm/S1APINorm.h"
 #include "s3statementize/S3Statementize.h"
 
@@ -137,6 +138,22 @@ static FunctionAST baseTop() {
     top.name = "hls_main";
     top.return_type = voidType();
     return top;
+}
+
+static FunctionAST parseFixture(const std::string& file) {
+    std::vector<std::string> clang_args = {
+        "-I.",
+        "-Ithird_party/vulsim/vullib",
+        "-std=c++20",
+    };
+    auto parsed = pred::s0ast::parseProgram(file, std::nullopt, "hls_main", clang_args);
+    if (!parsed.ok()) {
+        std::cerr << "S0 parse failed for " << file << ":\n"
+                  << (parsed.error ? parsed.error->message : "unknown error") << "\n";
+    }
+    CHECK(parsed.ok());
+    CHECK(parsed.program.has_value());
+    return pred::s0ast::surfaceAST(*parsed.program);
 }
 
 static std::string statementizeDebug(const FunctionAST& fn) {
@@ -378,6 +395,14 @@ static void shadowedNamesUseDistinctSymbols() {
     CHECK(out_assign->value.var_symbol == inner_x);
 }
 
+static void sourceTemplateCallArgumentBinaryOperatorIsRecovered() {
+    auto debug = statementizeDebug(parseFixture(
+        "testv2/fixtures/s3statementize/source_template_call_arg_binary.logic.cpp"));
+    expectContains(debug, "op __tmp___s0_lambda_tick_");
+    expectContains(debug, " = Add(");
+    expectContains(debug, "call write_value");
+}
+
 int main() {
     nestedCallsBecomeStatementLevel();
     returnIfHelperAndLambdaAreStatementized();
@@ -385,5 +410,6 @@ int main() {
     constructorArgsAndNestedAssignmentAreLowered();
     incrementsShortCircuitTernaryAndLoopConditionAreStructured();
     shadowedNamesUseDistinctSymbols();
+    sourceTemplateCallArgumentBinaryOperatorIsRecovered();
     return 0;
 }

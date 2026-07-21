@@ -530,6 +530,127 @@ static std::string cursorText(CXCursor cursor, bool allow_large = false) {
     return text;
 }
 
+static bool isBinaryOperatorToken(const std::string& token) {
+    static const std::unordered_set<std::string> ops = {
+        "+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^",
+        "&&", "||", "==", "!=", "<", "<=", ">", ">=",
+        "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
+    };
+    return ops.count(token) != 0;
+}
+
+static bool isTemplateArgumentListStart(CXTranslationUnit tu,
+                                        CXToken* tokens,
+                                        unsigned numTokens,
+                                        unsigned index) {
+    if (index == 0 || cxToStr(clang_getTokenSpelling(tu, tokens[index])) != "<") {
+        return false;
+    }
+    std::string prev = cxToStr(clang_getTokenSpelling(tu, tokens[index - 1]));
+    if (prev != "template" && prev != ">" &&
+        (prev.empty() ||
+         !(std::isalnum(static_cast<unsigned char>(prev.back())) || prev.back() == '_'))) {
+        return false;
+    }
+
+    int depth = 0;
+    for (unsigned i = index; i < numTokens; ++i) {
+        std::string tok = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
+        if (tok == "<") {
+            ++depth;
+        } else if (tok == ">") {
+            --depth;
+            if (depth == 0) {
+                if (i + 1 >= numTokens) return false;
+                std::string next = cxToStr(clang_getTokenSpelling(tu, tokens[i + 1]));
+                return next == "(" || next == "::" || next == "." || next == "->";
+            }
+        }
+    }
+    return false;
+}
+
+static std::string fallbackBinaryOperatorFromTokens(CXCursor cursor) {
+    CXSourceRange range = clang_getCursorExtent(cursor);
+    CXTranslationUnit tu = clang_Cursor_getTranslationUnit(cursor);
+    CXToken* tokens = nullptr;
+    unsigned numTokens = 0;
+    clang_tokenize(tu, range, &tokens, &numTokens);
+
+    std::string op;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    for (unsigned i = 0; i < numTokens; ++i) {
+        std::string tok = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
+        if (tok == "(") {
+            ++paren_depth;
+        } else if (tok == ")") {
+            --paren_depth;
+        } else if (tok == "[") {
+            ++bracket_depth;
+        } else if (tok == "]") {
+            --bracket_depth;
+        } else if (tok == "{") {
+            ++brace_depth;
+        } else if (tok == "}") {
+            --brace_depth;
+        } else if (tok == "<" && isTemplateArgumentListStart(tu, tokens, numTokens, i)) {
+            int angle_depth = 1;
+            while (++i < numTokens && angle_depth > 0) {
+                std::string angle_tok = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
+                if (angle_tok == "<") ++angle_depth;
+                else if (angle_tok == ">") --angle_depth;
+            }
+        } else if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 &&
+                   isBinaryOperatorToken(tok)) {
+            op = tok;
+            break;
+        }
+    }
+
+    clang_disposeTokens(tu, tokens, numTokens);
+    return op;
+}
+
+static std::string binaryOperatorFromCursor(CXCursor cursor,
+                                            CXCursor lhs_cursor,
+                                            CXCursor rhs_cursor) {
+    CXSourceRange range = clang_getCursorExtent(cursor);
+    CXTranslationUnit tu = clang_Cursor_getTranslationUnit(cursor);
+    CXToken* tokens = nullptr;
+    unsigned numTokens = 0;
+    clang_tokenize(tu, range, &tokens, &numTokens);
+
+    CXSourceLocation lhsEnd = clang_getRangeEnd(clang_getCursorExtent(lhs_cursor));
+    CXSourceLocation rhsStart = clang_getRangeStart(clang_getCursorExtent(rhs_cursor));
+    unsigned lhsEndOffset = 0;
+    unsigned rhsStartOffset = 0;
+    CXFile f;
+    unsigned line = 0;
+    unsigned col = 0;
+    clang_getSpellingLocation(lhsEnd, &f, &line, &col, &lhsEndOffset);
+    clang_getSpellingLocation(rhsStart, &f, &line, &col, &rhsStartOffset);
+
+    std::string op;
+    for (unsigned i = 0; i < numTokens; ++i) {
+        CXSourceLocation tokLoc = clang_getTokenLocation(tu, tokens[i]);
+        unsigned tokOffset = 0;
+        clang_getSpellingLocation(tokLoc, &f, &line, &col, &tokOffset);
+        if (tokOffset >= lhsEndOffset && tokOffset < rhsStartOffset) {
+            std::string candidate = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
+            if (isBinaryOperatorToken(candidate)) {
+                op = std::move(candidate);
+                break;
+            }
+        }
+    }
+    clang_disposeTokens(tu, tokens, numTokens);
+
+    if (op.empty()) op = fallbackBinaryOperatorFromTokens(cursor);
+    return op.empty() ? "?" : op;
+}
+
 static bool containsAny(const std::string& text,
                         const std::vector<std::string>& needles) {
     for (auto& n : needles) {
@@ -2233,34 +2354,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
     case CXCursor_BinaryOperator:
     case CXCursor_CompoundAssignOperator: {
         if (children.size() >= 2) {
-            // Extract operator from tokens
-            CXSourceRange range = clang_getCursorExtent(cursor);
-            CXTranslationUnit tu = clang_Cursor_getTranslationUnit(cursor);
-            CXToken* tokens = nullptr;
-            unsigned numTokens = 0;
-            clang_tokenize(tu, range, &tokens, &numTokens);
-
-            // Find the operator token (between LHS and RHS)
-            CXSourceLocation lhsEnd = clang_getRangeEnd(clang_getCursorExtent(children[0]));
-            CXSourceLocation rhsStart = clang_getRangeStart(clang_getCursorExtent(children[1]));
-            unsigned lhsEndOffset = 0, rhsStartOffset = 0;
-            CXFile f;
-            unsigned line, col;
-            clang_getSpellingLocation(lhsEnd, &f, &line, &col, &lhsEndOffset);
-            clang_getSpellingLocation(rhsStart, &f, &line, &col, &rhsStartOffset);
-
-            std::string op = "?";
-            for (unsigned i = 0; i < numTokens; ++i) {
-                CXSourceLocation tokLoc = clang_getTokenLocation(tu, tokens[i]);
-                unsigned tokOffset = 0;
-                clang_getSpellingLocation(tokLoc, &f, &line, &col, &tokOffset);
-                if (tokOffset >= lhsEndOffset && tokOffset < rhsStartOffset) {
-                    op = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
-                    break;
-                }
-            }
-            clang_disposeTokens(tu, tokens, numTokens);
-
+            std::string op = binaryOperatorFromCursor(cursor, children[0], children[1]);
             auto lhs = convertExpr(children[0]);
             auto rhs = convertExpr(children[1]);
             markSignedViewIfCursorMentions(lhs, children[0]);
@@ -3644,33 +3738,7 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
     case CXCursor_CompoundAssignOperator: {
         // Check if it's an assignment
         if (children.size() >= 2) {
-            CXSourceRange range = clang_getCursorExtent(cursor);
-            CXTranslationUnit tu = clang_Cursor_getTranslationUnit(cursor);
-            CXToken* tokens = nullptr;
-            unsigned numTokens = 0;
-            clang_tokenize(tu, range, &tokens, &numTokens);
-
-            CXSourceLocation lhsEnd = clang_getRangeEnd(clang_getCursorExtent(children[0]));
-            unsigned lhsEndOffset = 0;
-            CXFile f; unsigned line, col;
-            clang_getSpellingLocation(lhsEnd, &f, &line, &col, &lhsEndOffset);
-
-            CXSourceLocation rhsStart = clang_getRangeStart(clang_getCursorExtent(children[1]));
-            unsigned rhsStartOffset = 0;
-            clang_getSpellingLocation(rhsStart, &f, &line, &col, &rhsStartOffset);
-
-            std::string op;
-            for (unsigned i = 0; i < numTokens; ++i) {
-                CXSourceLocation tokLoc = clang_getTokenLocation(tu, tokens[i]);
-                unsigned tokOffset = 0;
-                clang_getSpellingLocation(tokLoc, &f, &line, &col, &tokOffset);
-                if (tokOffset >= lhsEndOffset && tokOffset < rhsStartOffset) {
-                    op = cxToStr(clang_getTokenSpelling(tu, tokens[i]));
-                    break;
-                }
-            }
-            clang_disposeTokens(tu, tokens, numTokens);
-
+            std::string op = binaryOperatorFromCursor(cursor, children[0], children[1]);
             if (op == "=" || op == "+=" || op == "-=" || op == "*=" ||
                 op == "/=" || op == "%=" || op == "&=" || op == "|=" ||
                 op == "^=" || op == "<<=" || op == ">>=") {

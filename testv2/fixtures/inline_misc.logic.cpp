@@ -222,6 +222,7 @@ void hls_main() {
     helper_global_chain = transitive_global_input();
     write_global_output(helper_global_chain);
     helper_global_shadow = shadow_global_name(b);
+    template_write_global<0>(add_bias(a) + Int<8>(1));
     template_write_global<0>(a);
     template_write_global<1>(b);
     helper_default_array = explicitly_initialized_array(a);
