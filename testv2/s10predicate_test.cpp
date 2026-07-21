@@ -397,6 +397,81 @@ static void readonlyCheckRejectsGuardedReadOutsideCoverage() {
     CHECK(failed);
 }
 
+static void readonlyCheckDoesNotAcceptComplexUnprovenGuard() {
+    s10predicate::S10PredicateProgram program;
+    program.name = "complex_bad";
+    for (int i = 0; i < 13; ++i) {
+        program.base_symbols.push_back(s10predicate::S10Symbol{
+            i, boolType(), "cond" + std::to_string(i), s10predicate::S10SymbolRole::Port});
+        program.values.push_back(predS10Value(i, i, 0, boolType(),
+                                              s10predicate::S10ValueKind::Initial,
+                                              "cond" + std::to_string(i)));
+        program.ports.push_back(s10predicate::S10Port{
+            i, ParamDirection::Input, ParamPassingKind::Value, i, std::nullopt, std::nullopt});
+    }
+    program.base_symbols.push_back(s10predicate::S10Symbol{
+        13, intType(8), "out", s10predicate::S10SymbolRole::Port});
+    program.base_symbols.push_back(s10predicate::S10Symbol{
+        14, intType(8), "x", s10predicate::S10SymbolRole::Local});
+
+    auto addAnd = [&](s10predicate::S10ValueId lhs,
+                      s10predicate::S10ValueId rhs) {
+        s10predicate::S10ValueId id =
+            static_cast<s10predicate::S10ValueId>(program.values.size());
+        program.values.push_back(predS10Value(id, -1, -1, boolType(),
+                                              s10predicate::S10ValueKind::Generated,
+                                              "guard"));
+        s10predicate::S10Definition def;
+        def.kind = s10predicate::S10DefKind::Op;
+        def.target = id;
+        def.guard = predLiteral(1, boolType());
+        def.op.kind = s10predicate::S10OpKind::BoolAnd;
+        def.op.result_width = 1;
+        def.op.operands = {predValue(lhs, boolType()), predValue(rhs, boolType())};
+        program.definitions.push_back(std::move(def));
+        return id;
+    };
+
+    s10predicate::S10ValueId first12 = addAnd(0, 1);
+    for (int i = 2; i < 12; ++i) first12 = addAnd(first12, i);
+    s10predicate::S10ValueId all13 = addAnd(first12, 12);
+
+    s10predicate::S10ValueId x_value =
+        static_cast<s10predicate::S10ValueId>(program.values.size());
+    program.values.push_back(predS10Value(x_value, 14, 0, intType(8),
+                                          s10predicate::S10ValueKind::Statement, "x"));
+    s10predicate::S10Definition define_x;
+    define_x.kind = s10predicate::S10DefKind::Assign;
+    define_x.target = x_value;
+    define_x.guard = predValue(all13, boolType());
+    define_x.value = predLiteral(7, intType(8));
+    program.definitions.push_back(std::move(define_x));
+
+    s10predicate::S10ValueId out_value =
+        static_cast<s10predicate::S10ValueId>(program.values.size());
+    program.values.push_back(predS10Value(out_value, 13, 0, intType(8),
+                                          s10predicate::S10ValueKind::Statement, "out"));
+    s10predicate::S10Definition define_out;
+    define_out.kind = s10predicate::S10DefKind::Assign;
+    define_out.target = out_value;
+    define_out.guard = predValue(first12, boolType());
+    define_out.value = predValue(x_value, intType(8));
+    program.definitions.push_back(std::move(define_out));
+
+    program.ports.push_back(s10predicate::S10Port{
+        13, ParamDirection::Output, ParamPassingKind::MutableRef,
+        std::nullopt, out_value, predValue(first12, boolType())});
+
+    bool failed = false;
+    try {
+        s10predicate::verifyPredicateProgram(program);
+    } catch (const RTLZZException& ex) {
+        failed = true;
+        CHECK(std::string(ex.what()).find("guarded read outside value definition coverage") != std::string::npos);
+    }
+    CHECK(failed);
+}
+
 int main() {
     straightLineUsesTrueGuard();
     branchPhiLowersToMux();
@@ -404,5 +479,6 @@ int main() {
     switchBuildsCaseAndDefaultGuards();
     sourcePipelineRunsThroughS10();
     readonlyCheckRejectsGuardedReadOutsideCoverage();
+    readonlyCheckDoesNotAcceptComplexUnprovenGuard();
     return 0;
 }

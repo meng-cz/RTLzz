@@ -960,48 +960,236 @@ BoolExprPtr boolOr(BoolExprPtr lhs, BoolExprPtr rhs) {
 
 using DefinitionByValue = std::vector<const S10Definition*>;
 
-BoolExprPtr boolExprForOperand(const S10PredicateProgram& program,
-                               const DefinitionByValue& defs,
+std::size_t mixHash(std::size_t seed, std::size_t value) {
+    return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+}
+
+struct BDDNodeKey {
+    S10ValueId var = -1;
+    int low = 0;
+    int high = 0;
+
+    bool operator==(const BDDNodeKey& rhs) const {
+        return var == rhs.var && low == rhs.low && high == rhs.high;
+    }
+};
+
+struct BDDNodeKeyHash {
+    std::size_t operator()(const BDDNodeKey& key) const {
+        std::size_t seed = std::hash<int>{}(key.var);
+        seed = mixHash(seed, std::hash<int>{}(key.low));
+        seed = mixHash(seed, std::hash<int>{}(key.high));
+        return seed;
+    }
+};
+
+struct BDDApplyKey {
+    int op = 0;
+    int lhs = 0;
+    int rhs = 0;
+
+    bool operator==(const BDDApplyKey& other) const {
+        return op == other.op && lhs == other.lhs && rhs == other.rhs;
+    }
+};
+
+struct BDDApplyKeyHash {
+    std::size_t operator()(const BDDApplyKey& key) const {
+        std::size_t seed = std::hash<int>{}(key.op);
+        seed = mixHash(seed, std::hash<int>{}(key.lhs));
+        seed = mixHash(seed, std::hash<int>{}(key.rhs));
+        return seed;
+    }
+};
+
+struct BDDNode {
+    S10ValueId var = -1;
+    int low = 0;
+    int high = 0;
+};
+
+struct BoolBDDManager {
+    enum class ApplyOp {
+        And,
+        Or,
+    };
+
+    std::vector<BDDNode> nodes;
+    std::unordered_map<BDDNodeKey, int, BDDNodeKeyHash> unique_nodes;
+    std::unordered_map<BDDApplyKey, int, BDDApplyKeyHash> apply_cache;
+    std::unordered_map<int, int> not_cache;
+    std::unordered_map<BoolExprPtr, int> expr_cache;
+
+    BoolBDDManager() {
+        nodes.push_back(BDDNode{-1, 0, 0});
+        nodes.push_back(BDDNode{-1, 1, 1});
+    }
+
+    static bool isTerminal(int node) {
+        return node == 0 || node == 1;
+    }
+
+    int makeNode(S10ValueId var, int low, int high) {
+        if (low == high) return low;
+        BDDNodeKey key{var, low, high};
+        auto it = unique_nodes.find(key);
+        if (it != unique_nodes.end()) return it->second;
+        int id = static_cast<int>(nodes.size());
+        nodes.push_back(BDDNode{var, low, high});
+        unique_nodes.emplace(key, id);
+        return id;
+    }
+
+    int negate(int node) {
+        if (node == 0) return 1;
+        if (node == 1) return 0;
+        auto it = not_cache.find(node);
+        if (it != not_cache.end()) return it->second;
+        const auto& info = nodes[static_cast<std::size_t>(node)];
+        int out = makeNode(info.var, negate(info.low), negate(info.high));
+        not_cache.emplace(node, out);
+        return out;
+    }
+
+    int apply(ApplyOp op, int lhs, int rhs) {
+        if (op == ApplyOp::And) {
+            if (lhs == 0 || rhs == 0) return 0;
+            if (lhs == 1) return rhs;
+            if (rhs == 1) return lhs;
+        } else {
+            if (lhs == 1 || rhs == 1) return 1;
+            if (lhs == 0) return rhs;
+            if (rhs == 0) return lhs;
+        }
+        if (lhs == rhs) return lhs;
+        if (lhs > rhs) std::swap(lhs, rhs);
+
+        BDDApplyKey key{op == ApplyOp::And ? 0 : 1, lhs, rhs};
+        auto cached = apply_cache.find(key);
+        if (cached != apply_cache.end()) return cached->second;
+
+        S10ValueId var = -1;
+        if (isTerminal(lhs)) {
+            var = nodes[static_cast<std::size_t>(rhs)].var;
+        } else if (isTerminal(rhs)) {
+            var = nodes[static_cast<std::size_t>(lhs)].var;
+        } else {
+            var = std::min(nodes[static_cast<std::size_t>(lhs)].var,
+                           nodes[static_cast<std::size_t>(rhs)].var);
+        }
+
+        auto branch = [&](int node, bool high) {
+            if (isTerminal(node) || nodes[static_cast<std::size_t>(node)].var != var) {
+                return node;
+            }
+            return high ? nodes[static_cast<std::size_t>(node)].high
+                        : nodes[static_cast<std::size_t>(node)].low;
+        };
+
+        int low = apply(op, branch(lhs, false), branch(rhs, false));
+        int high = apply(op, branch(lhs, true), branch(rhs, true));
+        int out = makeNode(var, low, high);
+        apply_cache.emplace(key, out);
+        return out;
+    }
+
+    int build(const BoolExprPtr& expr) {
+        if (!expr) return 0;
+        auto cached = expr_cache.find(expr);
+        if (cached != expr_cache.end()) return cached->second;
+
+        int out = 0;
+        switch (expr->kind) {
+        case BoolExpr::Kind::Const:
+            out = expr->const_value ? 1 : 0;
+            break;
+        case BoolExpr::Kind::Atom:
+            out = makeNode(expr->atom, 0, 1);
+            break;
+        case BoolExpr::Kind::Not:
+            out = negate(build(expr->lhs));
+            break;
+        case BoolExpr::Kind::And:
+            out = apply(ApplyOp::And, build(expr->lhs), build(expr->rhs));
+            break;
+        case BoolExpr::Kind::Or:
+            out = apply(ApplyOp::Or, build(expr->lhs), build(expr->rhs));
+            break;
+        }
+
+        expr_cache.emplace(expr, out);
+        return out;
+    }
+};
+
+struct ImplyKey {
+    BoolExprPtr premise;
+    BoolExprPtr conclusion;
+
+    bool operator==(const ImplyKey& rhs) const {
+        return premise == rhs.premise && conclusion == rhs.conclusion;
+    }
+};
+
+struct ImplyKeyHash {
+    std::size_t operator()(const ImplyKey& key) const {
+        std::size_t seed = std::hash<BoolExprPtr>{}(key.premise);
+        return mixHash(seed, std::hash<BoolExprPtr>{}(key.conclusion));
+    }
+};
+
+struct ReadonlyContext {
+    const S10PredicateProgram& program;
+    const DefinitionByValue& defs;
+    mutable std::unordered_map<S10ValueId, BoolExprPtr> bool_expr_cache;
+    mutable BoolBDDManager bdd;
+    mutable std::unordered_map<ImplyKey, bool, ImplyKeyHash> implies_cache;
+};
+
+BoolExprPtr boolExprForOperand(const ReadonlyContext& ctx,
                                const S10Operand& operand,
                                std::set<S10ValueId>& expanding);
 
-BoolExprPtr boolExprForValue(const S10PredicateProgram& program,
-                             const DefinitionByValue& defs,
+BoolExprPtr boolExprForValue(const ReadonlyContext& ctx,
                              S10ValueId value,
                              std::set<S10ValueId>& expanding) {
-    const auto& info = valueAt(program, value);
+    const auto& info = valueAt(ctx.program, value);
     if (!isBoolType(info.type)) {
         fail("S10 readonly check expected a bool value", {},
-             "value=" + valueName(program, value));
+             "value=" + valueName(ctx.program, value));
     }
+    auto cached = ctx.bool_expr_cache.find(value);
+    if (cached != ctx.bool_expr_cache.end()) return cached->second;
     if (!expanding.insert(value).second) return boolAtom(value);
     const S10Definition* def = value >= 0 &&
-        value < static_cast<S10ValueId>(defs.size()) ? defs[static_cast<std::size_t>(value)] : nullptr;
-    if (!def) {
+        value < static_cast<S10ValueId>(ctx.defs.size()) ? ctx.defs[static_cast<std::size_t>(value)] : nullptr;
+    auto finish = [&](BoolExprPtr out) {
         expanding.erase(value);
-        return boolAtom(value);
+        ctx.bool_expr_cache.emplace(value, out);
+        return out;
+    };
+    if (!def) {
+        return finish(boolAtom(value));
     }
 
     BoolExprPtr out = boolAtom(value);
     if (def->kind == S10DefKind::Assign) {
-        out = boolExprForOperand(program, defs, def->value, expanding);
+        out = boolExprForOperand(ctx, def->value, expanding);
     } else if (def->kind == S10DefKind::Op) {
         if (def->op.kind == S10OpKind::LogicalNot && def->op.operands.size() == 1) {
-            out = boolNot(boolExprForOperand(program, defs, def->op.operands[0], expanding));
+            out = boolNot(boolExprForOperand(ctx, def->op.operands[0], expanding));
         } else if (def->op.kind == S10OpKind::BoolAnd && def->op.operands.size() == 2) {
-            out = boolAnd(boolExprForOperand(program, defs, def->op.operands[0], expanding),
-                          boolExprForOperand(program, defs, def->op.operands[1], expanding));
+            out = boolAnd(boolExprForOperand(ctx, def->op.operands[0], expanding),
+                          boolExprForOperand(ctx, def->op.operands[1], expanding));
         } else if (def->op.kind == S10OpKind::BoolOr && def->op.operands.size() == 2) {
-            out = boolOr(boolExprForOperand(program, defs, def->op.operands[0], expanding),
-                         boolExprForOperand(program, defs, def->op.operands[1], expanding));
+            out = boolOr(boolExprForOperand(ctx, def->op.operands[0], expanding),
+                         boolExprForOperand(ctx, def->op.operands[1], expanding));
         }
     }
-    expanding.erase(value);
-    return out;
+    return finish(out);
 }
 
-BoolExprPtr boolExprForOperand(const S10PredicateProgram& program,
-                               const DefinitionByValue& defs,
+BoolExprPtr boolExprForOperand(const ReadonlyContext& ctx,
                                const S10Operand& operand,
                                std::set<S10ValueId>& expanding) {
     if (!isBoolType(operand.type)) {
@@ -1014,85 +1202,33 @@ BoolExprPtr boolExprForOperand(const S10PredicateProgram& program,
         }
         return boolConst(value);
     }
-    return boolExprForValue(program, defs, operand.value, expanding);
+    return boolExprForValue(ctx, operand.value, expanding);
 }
 
-void collectAtoms(const BoolExprPtr& expr, std::set<S10ValueId>& atoms) {
-    if (!expr) return;
-    switch (expr->kind) {
-    case BoolExpr::Kind::Const:
-        return;
-    case BoolExpr::Kind::Atom:
-        atoms.insert(expr->atom);
-        return;
-    case BoolExpr::Kind::Not:
-        collectAtoms(expr->lhs, atoms);
-        return;
-    case BoolExpr::Kind::And:
-    case BoolExpr::Kind::Or:
-        collectAtoms(expr->lhs, atoms);
-        collectAtoms(expr->rhs, atoms);
-        return;
-    }
-}
-
-bool evalBoolExpr(const BoolExprPtr& expr,
-                  const std::unordered_map<S10ValueId, int>& atom_index,
-                  std::uint64_t mask) {
-    if (!expr) return false;
-    switch (expr->kind) {
-    case BoolExpr::Kind::Const:
-        return expr->const_value;
-    case BoolExpr::Kind::Atom: {
-        auto it = atom_index.find(expr->atom);
-        if (it == atom_index.end()) return false;
-        return ((mask >> it->second) & 1U) != 0;
-    }
-    case BoolExpr::Kind::Not:
-        return !evalBoolExpr(expr->lhs, atom_index, mask);
-    case BoolExpr::Kind::And:
-        return evalBoolExpr(expr->lhs, atom_index, mask) &&
-               evalBoolExpr(expr->rhs, atom_index, mask);
-    case BoolExpr::Kind::Or:
-        return evalBoolExpr(expr->lhs, atom_index, mask) ||
-               evalBoolExpr(expr->rhs, atom_index, mask);
-    }
-    return false;
-}
-
-bool implies(const BoolExprPtr& premise, const BoolExprPtr& conclusion) {
+bool implies(const ReadonlyContext& ctx,
+             const BoolExprPtr& premise,
+             const BoolExprPtr& conclusion) {
     if (boolExprEqual(premise, conclusion)) return true;
     if (conclusion && conclusion->kind == BoolExpr::Kind::Const && conclusion->const_value) return true;
     if (premise && premise->kind == BoolExpr::Kind::Const && !premise->const_value) return true;
-    std::set<S10ValueId> atoms;
-    collectAtoms(premise, atoms);
-    collectAtoms(conclusion, atoms);
-    if (atoms.size() > 12) {
-        // Too large for this local checker. Avoid rejecting valid designs;
-        // later optimization/verification stages can use stronger reasoning.
-        return true;
-    }
-    std::unordered_map<S10ValueId, int> atom_index;
-    int index = 0;
-    for (S10ValueId atom : atoms) atom_index[atom] = index++;
-    std::uint64_t total = std::uint64_t{1} << atoms.size();
-    for (std::uint64_t mask = 0; mask < total; ++mask) {
-        if (evalBoolExpr(premise, atom_index, mask) &&
-            !evalBoolExpr(conclusion, atom_index, mask)) {
-            return false;
-        }
-    }
-    return true;
-}
 
-struct ReadonlyContext {
-    const S10PredicateProgram& program;
-    const DefinitionByValue& defs;
-};
+    ImplyKey key{premise, conclusion};
+    auto cached = ctx.implies_cache.find(key);
+    if (cached != ctx.implies_cache.end()) return cached->second;
+
+    int premise_node = ctx.bdd.build(premise);
+    int conclusion_node = ctx.bdd.build(conclusion);
+    int counterexample = ctx.bdd.apply(BoolBDDManager::ApplyOp::And,
+                                       premise_node,
+                                       ctx.bdd.negate(conclusion_node));
+    bool result = counterexample == 0;
+    ctx.implies_cache.emplace(std::move(key), result);
+    return result;
+}
 
 BoolExprPtr guardExpr(const ReadonlyContext& ctx, const S10Operand& guard) {
     std::set<S10ValueId> expanding;
-    return boolExprForOperand(ctx.program, ctx.defs, guard, expanding);
+    return boolExprForOperand(ctx, guard, expanding);
 }
 
 BoolExprPtr availabilityExpr(const ReadonlyContext& ctx, S10ValueId value) {
@@ -1112,7 +1248,7 @@ void checkValueUseAvailable(const ReadonlyContext& ctx,
                             DebugLoc loc,
                             const std::string& note) {
     BoolExprPtr available = availabilityExpr(ctx, value);
-    if (!implies(use_guard, available)) {
+    if (!implies(ctx, use_guard, available)) {
         fail("S10 readonly check found guarded read outside value definition coverage",
              loc, note + " value=" + valueName(ctx.program, value));
     }
