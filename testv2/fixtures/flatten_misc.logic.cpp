@@ -123,6 +123,8 @@ Int<8> nested_dynamic_write;
 Int<8> internal_struct_array;
 #pragma output_port const_lookup
 Int<8> const_lookup;
+#pragma output_port multiline_const_lookup
+Int<8> multiline_const_lookup;
 #pragma output_port loop_chain_array_clear
 Int<8> loop_chain_array_clear;
 #pragma output_port final_mix
@@ -209,6 +211,30 @@ void hls_main() {
     };
     const_lookup = const_table[tap_idx] ^ locals[lane_idx].hi;
 
+    auto multiline_lookup = [&](int idx) -> uint8_t {
+        constexpr uint8_t table[17] = {
+            0x21,
+            0x34,
+            0x47,
+            0x5a,
+            0x6d,
+            0x70,
+            0x83,
+            0x96,
+            0xa9,
+            0xbc,
+            0xcf,
+            0xd2,
+            0xe5,
+            0xf8,
+            0x0b,
+            0x1e,
+            0x31
+        };
+        return table[idx];
+    };
+    multiline_const_lookup = Int<8>(multiline_lookup(tap_idx));
+
     std::array<uint8_t, 4> cleared;
     for (int i = 0; i < 4; i++) {
         int idx = i;
@@ -223,5 +249,6 @@ void hls_main() {
         nested_dynamic_read ^
         nested_dynamic_write ^
         internal_struct_array ^
-        const_lookup;
+        const_lookup ^
+        multiline_const_lookup;
 }

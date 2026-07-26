@@ -4147,6 +4147,43 @@ static void collectIntegerInitValues(CXCursor cursor,
     }
 }
 
+static std::size_t arrayLeafCount(const TypeInfo& type) {
+    if (!type.is_array) return 0;
+    std::size_t leaf_count = 1;
+    for (int dim : type.array_dims) {
+        if (dim <= 0) return 0;
+        leaf_count *= static_cast<std::size_t>(dim);
+    }
+    return leaf_count;
+}
+
+static TypeInfo scalarElementType(TypeInfo type) {
+    type.is_array = false;
+    type.array_size = 0;
+    type.array_dims.clear();
+    return type;
+}
+
+static void normalizeArrayAggregateInit(const StmtPtr& stmt, CXCursor init_expr) {
+    if (!stmt || !stmt->decl_type.is_array ||
+        clang_getCursorKind(init_expr) != CXCursor_InitListExpr) {
+        return;
+    }
+
+    std::size_t leaf_count = arrayLeafCount(stmt->decl_type);
+    TypeInfo scalar = scalarElementType(stmt->decl_type);
+    if (!getChildren(init_expr).empty()) {
+        collectInitArgExprs(init_expr, stmt->decl_init_args);
+    }
+    while (stmt->decl_init_args.size() < leaf_count) {
+        stmt->decl_init_args.push_back(defaultValueForAggregateField(scalar));
+    }
+
+    // S1 represents explicit array aggregate initialization, including
+    // `= {}`, as a Construct with one value per flattened leaf.
+    stmt->decl_init = std::nullopt;
+}
+
 static StmtPtr convertStmtImpl(CXCursor cursor) {
     CXCursorKind kind = clang_getCursorKind(cursor);
     if (kind == CXCursor_LambdaExpr) return nullptr;
@@ -4180,12 +4217,16 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                 // such as `std::array<T, N> value;`.  It is not a source
                 // initializer and must not become a surface `array()` call.
                 if (!clang_Cursor_isNull(init_expr) && stmt->decl_type.is_array) {
-                    std::string declaration_text = cursorText(child);
+                    const bool init_list_cursor =
+                        clang_getCursorKind(init_expr) == CXCursor_InitListExpr;
+                    std::string declaration_text =
+                        init_list_cursor ? std::string{} : cursorText(child, true);
                     std::size_t name_pos = declaration_text.rfind(stmt->decl_name);
                     std::string tail = name_pos == std::string::npos
                         ? declaration_text
                         : declaration_text.substr(name_pos + stmt->decl_name.size());
                     const bool explicit_initializer =
+                        init_list_cursor ||
                         tail.find('=') != std::string::npos ||
                         tail.find('{') != std::string::npos ||
                         tail.find('(') != std::string::npos;
@@ -4200,30 +4241,13 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                     isVulFixedIntType(stmt->decl_type);
                 if (!clang_Cursor_isNull(init_expr)) {
                     stmt->decl_init = convertExpr(init_expr);
+                    normalizeArrayAggregateInit(stmt, init_expr);
                     if (isAggregateInitTargetType(stmt->decl_type) &&
                         isAggregateInitCursor(init_expr)) {
                         collectInitArgExprs(init_expr, stmt->decl_init_args);
-                        if (stmt->decl_type.is_array) {
-                            std::size_t leaf_count = 1;
-                            for (int dim : stmt->decl_type.array_dims) {
-                                leaf_count *= static_cast<std::size_t>(dim);
-                            }
-                            TypeInfo scalar = stmt->decl_type;
-                            scalar.is_array = false;
-                            scalar.array_size = 0;
-                            scalar.array_dims.clear();
-                            while (stmt->decl_init_args.size() < leaf_count) {
-                                stmt->decl_init_args.push_back(
-                                    defaultValueForAggregateField(scalar));
-                            }
-                            // S1 represents explicit array aggregate
-                            // initialization (including `= {}`) as a
-                            // Construct with one value per flattened leaf.
-                            stmt->decl_init = std::nullopt;
-                        }
                     }
                     if (stmt->decl_type.is_array) {
-                        const std::string declaration_text = cursorText(child);
+                        const std::string declaration_text = cursorText(child, true);
                         const std::size_t name_pos =
                             declaration_text.rfind(stmt->decl_name);
                         const std::string tail = name_pos == std::string::npos
@@ -4236,14 +4260,8 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                             [](unsigned char ch) { return std::isspace(ch); }),
                             compact_tail.end());
                         if (compact_tail.find("{}") != std::string::npos) {
-                            std::size_t leaf_count = 1;
-                            for (int dim : stmt->decl_type.array_dims) {
-                                leaf_count *= static_cast<std::size_t>(dim);
-                            }
-                            TypeInfo scalar = stmt->decl_type;
-                            scalar.is_array = false;
-                            scalar.array_size = 0;
-                            scalar.array_dims.clear();
+                            std::size_t leaf_count = arrayLeafCount(stmt->decl_type);
+                            TypeInfo scalar = scalarElementType(stmt->decl_type);
                             while (stmt->decl_init_args.size() < leaf_count) {
                                 stmt->decl_init_args.push_back(
                                     defaultValueForAggregateField(scalar));
