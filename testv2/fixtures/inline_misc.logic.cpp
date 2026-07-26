@@ -1,3 +1,4 @@
+#include <array>
 #include <fixint.hpp>
 
 Int<8> add_bias(Int<8> x) {
@@ -64,6 +65,8 @@ Int<12> wide;
 bool sel;
 #pragma input_port alt
 bool alt;
+#pragma input_port array_in
+std::array<Int<8>, 2> array_in;
 #pragma output_port helper_chain
 Int<8> helper_chain;
 #pragma output_port ref_update
@@ -114,6 +117,14 @@ Int<8> helper_template_composed_path;
 Int<8> helper_default_array;
 #pragma output_port helper_complex_lambda_arg
 Int<8> helper_complex_lambda_arg;
+#pragma output_port helper_template_array_read
+Int<8> helper_template_array_read;
+#pragma output_port helper_template_array_write
+std::array<Int<8>, 2> helper_template_array_write;
+#pragma output_port lambda_template_array_read
+Int<8> lambda_template_array_read;
+#pragma output_port lambda_template_array_write
+std::array<Int<8>, 2> lambda_template_array_write;
 
 Int<8> read_global_input() {
     return a + Int<8>(11);
@@ -152,6 +163,16 @@ Int<8> template_route_value(Int<8> value) {
 template <uint32_t P = 0>
 Int<8> template_helper_routes_with_global(Int<8> value) {
     return template_route_value<P + TEMPLATE_ROUTE_OFFSET>(value + Int<8>(1));
+}
+
+template <uint32_t IDX = 0>
+Int<8> template_helper_reads_array_port(Int<8> value) {
+    return array_in[IDX] + value;
+}
+
+template <uint32_t IDX = 0>
+void template_helper_writes_array_port(Int<8> value) {
+    helper_template_array_write[IDX] = array_in[IDX] ^ value;
 }
 
 Int<8> explicitly_initialized_array(Int<8> value) {
@@ -258,4 +279,24 @@ void hls_main() {
     std::array<Int<8>, 2> complex_values = {a, b};
     helper_complex_lambda_arg =
         value_lambda(complex_values[0] ^ complex_values[1], a);
+
+    Int<8> helper_array_0 = template_helper_reads_array_port<0>(a);
+    Int<8> helper_array_1 = template_helper_reads_array_port<1>(b);
+    helper_template_array_read = helper_array_0 ^ helper_array_1;
+    template_helper_writes_array_port<0>(helper_array_0);
+    template_helper_writes_array_port<1>(helper_array_1);
+
+    auto lambda_array_ports = [&]<uint32_t IDX = 0>(Int<8> value) -> Int<8> {
+        if constexpr (IDX == 0) {
+            Int<8> read_value = array_in[0] + value;
+            lambda_template_array_write[0] = read_value ^ helper_template_array_read;
+            return read_value;
+        }
+        Int<8> read_value = array_in[1] + value;
+        lambda_template_array_write[1] = read_value ^ helper_template_array_read;
+        return read_value;
+    };
+    Int<8> lambda_array_0 = lambda_array_ports.template operator()<0>(a);
+    Int<8> lambda_array_1 = lambda_array_ports.template operator()<1>(b);
+    lambda_template_array_read = lambda_array_0 + lambda_array_1;
 }

@@ -317,7 +317,10 @@ static void localMissingIncomingIsRejected() {
     auto program = branchProgram(false, true);
     auto result = s9ssa::buildSSA(program);
     CHECK(!result.ok());
-    CHECK(result.error->message.find("Missing incoming SSA value") != std::string::npos);
+    CHECK(result.error->message.find("Read before definition for symbol 'x'") !=
+          std::string::npos);
+    CHECK(result.error->message.find("Hardware values are not implicitly initialized") !=
+          std::string::npos);
 }
 
 static void explicitReadBeforeDefinitionIsRejected() {

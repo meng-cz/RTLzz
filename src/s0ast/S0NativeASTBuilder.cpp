@@ -1733,10 +1733,24 @@ static ExprPtr parseSimpleRecoveredArgText(std::string text) {
         text = text.substr(1, text.size() - 2);
     }
     if (isSimpleIdentifierText(text)) {
+        auto template_value = current_template_int_values.find(text);
+        if (template_value != current_template_int_values.end()) {
+            return make_literal(std::to_string(template_value->second),
+                                TypeInfo{"uint32_t", 32, false, true, "builtin"});
+        }
         auto known = recovered_symbol_types.find(text);
-        return make_var(text, known == recovered_symbol_types.end()
-                                  ? make_unknown_type()
-                                  : known->second);
+        TypeInfo type = known == recovered_symbol_types.end()
+            ? make_unknown_type()
+            : known->second;
+        auto result = make_var(text, type);
+        for (const auto& port : global_ports_in_source_order) {
+            if (port.name == text) {
+                result->type = port.type;
+                result->global_port_name = port.name;
+                break;
+            }
+        }
+        return result;
     }
     if (!text.empty() &&
         std::all_of(text.begin(), text.end(), [](unsigned char ch) {
