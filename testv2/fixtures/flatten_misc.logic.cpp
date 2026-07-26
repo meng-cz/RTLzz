@@ -105,8 +105,12 @@ Int<8> aggregate_copy;
 Int<8> aggregate_designated;
 #pragma output_port helper_struct_return
 Int<8> helper_struct_return;
+#pragma output_port helper_struct_return_temp_field
+Int<8> helper_struct_return_temp_field;
 #pragma output_port helper_array_return
 Int<8> helper_array_return;
+#pragma output_port helper_array_return_temp_index
+Int<8> helper_array_return_temp_index;
 #pragma output_port lambda_struct_value
 Int<8> lambda_struct_value;
 #pragma output_port lambda_array_value
@@ -144,9 +148,15 @@ void hls_main() {
     Packet pkt = make_packet(seed, bias);
     Pair selected = choose_pair(pkt, lane_idx, tap_idx);
     helper_struct_return = selected.lo + selected.hi;
+    helper_struct_return_temp_field =
+        make_pair_copy_list(seed, bias).lo +
+        make_pair_designated(seed, bias).hi;
 
     Arr2 array_value = make_array(selected.lo, selected.hi);
     helper_array_return = array_value[tap_idx] + pkt.tail[lane_idx];
+    helper_array_return_temp_index =
+        make_array(selected.lo, selected.hi)[tap_idx] +
+        make_array(seed, bias)[lane_idx];
 
     auto pair_lambda = [=](Pair in, Int<8> delta) -> Pair {
         Pair out = in;

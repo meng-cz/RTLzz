@@ -616,6 +616,11 @@ private:
         return lowered;
     }
 
+    struct LValueResult {
+        LValue lvalue;
+        std::vector<S3StmtPtr> prelude;
+    };
+
     LowerResult lowerExpr(const ExprPtr& expr) {
         if (!expr) return {};
         ErrorContextGuard guard("s3statementize", expr->debug_loc, "lowering expression");
@@ -636,7 +641,7 @@ private:
         }
         case ExprKind::ArrayAccess:
         case ExprKind::FieldAccess: {
-            auto lv = lowerLValue(expr);
+            auto lv = lowerReadableLValue(expr);
             result.prelude = std::move(lv.prelude);
             result.operand = lvalueOperand(std::move(lv.lvalue));
             return result;
@@ -773,7 +778,7 @@ private:
         }
         case s1apinorm::S1ExprKind::ArrayAccess:
         case s1apinorm::S1ExprKind::FieldAccess: {
-            auto lv = lowerLValue(expr);
+            auto lv = lowerReadableLValue(expr);
             result.prelude = std::move(lv.prelude);
             result.operand = lvalueOperand(std::move(lv.lvalue));
             return result;
@@ -877,11 +882,6 @@ private:
         return result;
     }
 
-    struct LValueResult {
-        LValue lvalue;
-        std::vector<S3StmtPtr> prelude;
-    };
-
     LValueResult lowerLValue(const ExprPtr& expr) {
         if (!expr) fail(DebugLoc{}, "Expected lvalue expression");
         if (expr->kind == ExprKind::VarRef) {
@@ -942,6 +942,91 @@ private:
         }
         if (expr->kind == s1apinorm::S1ExprKind::Cast) return lowerLValue(expr->cast_expr);
         fail(expr->debug_loc, "Expression is not a supported lvalue");
+    }
+
+    LValue lvalueFromReadableOperand(const Operand& operand, DebugLoc loc) {
+        if (operand.kind == OperandKind::Var) {
+            return varLValue(operand.var_name, operand.var_symbol,
+                             operand.type, std::move(loc));
+        }
+        if (operand.kind == OperandKind::LValueRead) {
+            return operand.lvalue;
+        }
+        fail(std::move(loc), "Expression is not a supported readable aggregate base");
+    }
+
+    LValueResult lowerReadableLValue(const ExprPtr& expr) {
+        if (!expr) fail(DebugLoc{}, "Expected readable lvalue expression");
+        if (expr->kind == ExprKind::VarRef) return lowerLValue(expr);
+        if (expr->kind == ExprKind::Cast) return lowerReadableLValue(expr->cast_expr);
+        if (expr->kind == ExprKind::FieldAccess) {
+            auto base_value = lowerExpr(expr->struct_base);
+            LValueResult result;
+            result.prelude = std::move(base_value.prelude);
+            result.lvalue = lvalueFromReadableOperand(base_value.operand, expr->debug_loc);
+            result.lvalue.accesses.push_back(
+                LValueAccess{LValueAccessKind::Field, expr->field_name, nullptr});
+            result.lvalue.type = expr->type;
+            return result;
+        }
+        if (expr->kind == ExprKind::ArrayAccess) {
+            auto base_value = lowerExpr(expr->array_base);
+            LValueResult result;
+            result.prelude = std::move(base_value.prelude);
+            result.lvalue = lvalueFromReadableOperand(base_value.operand, expr->debug_loc);
+            auto idx = lowerExpr(expr->index);
+            result.prelude.insert(result.prelude.end(), idx.prelude.begin(), idx.prelude.end());
+            auto index = std::make_shared<Operand>(std::move(idx.operand));
+            LValueAccess step;
+            step.kind = LValueAccessKind::Index;
+            step.index = std::move(index);
+            result.lvalue.accesses.push_back(std::move(step));
+            result.lvalue.type = expr->type;
+            return result;
+        }
+        auto value = lowerExpr(expr);
+        LValueResult result;
+        result.prelude = std::move(value.prelude);
+        result.lvalue = lvalueFromReadableOperand(value.operand, expr->debug_loc);
+        return result;
+    }
+
+    LValueResult lowerReadableLValue(const s1apinorm::S1ExprPtr& expr) {
+        if (!expr) fail(DebugLoc{}, "Expected readable lvalue expression");
+        if (expr->kind == s1apinorm::S1ExprKind::VarRef) return lowerLValue(expr);
+        if (expr->kind == s1apinorm::S1ExprKind::Cast) {
+            return lowerReadableLValue(expr->cast_expr);
+        }
+        if (expr->kind == s1apinorm::S1ExprKind::FieldAccess) {
+            auto base_value = lowerExpr(expr->struct_base);
+            LValueResult result;
+            result.prelude = std::move(base_value.prelude);
+            result.lvalue = lvalueFromReadableOperand(base_value.operand, expr->debug_loc);
+            result.lvalue.accesses.push_back(
+                LValueAccess{LValueAccessKind::Field, expr->field_name, nullptr});
+            result.lvalue.type = expr->type;
+            return result;
+        }
+        if (expr->kind == s1apinorm::S1ExprKind::ArrayAccess) {
+            auto base_value = lowerExpr(expr->array_base);
+            LValueResult result;
+            result.prelude = std::move(base_value.prelude);
+            result.lvalue = lvalueFromReadableOperand(base_value.operand, expr->debug_loc);
+            auto idx = lowerExpr(expr->index);
+            result.prelude.insert(result.prelude.end(), idx.prelude.begin(), idx.prelude.end());
+            auto index = std::make_shared<Operand>(std::move(idx.operand));
+            LValueAccess step;
+            step.kind = LValueAccessKind::Index;
+            step.index = std::move(index);
+            result.lvalue.accesses.push_back(std::move(step));
+            result.lvalue.type = expr->type;
+            return result;
+        }
+        auto value = lowerExpr(expr);
+        LValueResult result;
+        result.prelude = std::move(value.prelude);
+        result.lvalue = lvalueFromReadableOperand(value.operand, expr->debug_loc);
+        return result;
     }
 
     bool isCompoundAssign(const std::string& op) const {

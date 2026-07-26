@@ -336,6 +336,97 @@ void collectTermUses(const S8Terminator& term,
     }
 }
 
+bool operandUsesSymbol(const S8Operand& operand, SymbolId symbol) {
+    return operand.kind == S8OperandKind::Var && operand.symbol == symbol;
+}
+
+std::optional<DebugLoc> firstUseLocInStmtOperands(const S8Stmt& stmt, SymbolId symbol) {
+    switch (stmt.kind) {
+    case S8StmtKind::Assign:
+        if (operandUsesSymbol(stmt.value, symbol)) return stmt.value.debug_loc;
+        break;
+    case S8StmtKind::Op:
+        for (const auto& operand : stmt.op.operands) {
+            if (operandUsesSymbol(operand, symbol)) return operand.debug_loc;
+        }
+        break;
+    case S8StmtKind::Lookup:
+        if (operandUsesSymbol(stmt.lookup_index, symbol)) return stmt.lookup_index.debug_loc;
+        for (const auto& elem : stmt.lookup_elements) {
+            if (operandUsesSymbol(elem, symbol)) return elem.debug_loc;
+        }
+        break;
+    case S8StmtKind::LookupWrite:
+        if (operandUsesSymbol(stmt.lookup_index, symbol)) return stmt.lookup_index.debug_loc;
+        if (operandUsesSymbol(stmt.lookup_value, symbol)) return stmt.lookup_value.debug_loc;
+        for (const auto& elem : stmt.lookup_elements) {
+            if (operandUsesSymbol(elem, symbol)) return elem.debug_loc;
+        }
+        break;
+    }
+    return std::nullopt;
+}
+
+std::optional<DebugLoc> firstUseLocInTerm(const S8Terminator& term, SymbolId symbol) {
+    if (term.kind == S8TermKind::Branch) {
+        if (operandUsesSymbol(term.condition, symbol)) return term.condition.debug_loc;
+    } else if (term.kind == S8TermKind::Switch) {
+        if (operandUsesSymbol(term.switch_value, symbol)) return term.switch_value.debug_loc;
+        for (const auto& target : term.switch_targets) {
+            if (target.value && operandUsesSymbol(target.value.value(), symbol)) {
+                return target.value->debug_loc;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+bool stmtDefinesSymbol(const S8Stmt& stmt, SymbolId symbol) {
+    if (stmt.kind == S8StmtKind::LookupWrite) {
+        return std::find(stmt.lookup_write_targets.begin(),
+                         stmt.lookup_write_targets.end(),
+                         symbol) != stmt.lookup_write_targets.end();
+    }
+    return stmt.target == symbol;
+}
+
+std::optional<DebugLoc> firstUseBeforeDefLocInBlock(const S8BasicBlock& block,
+                                                    SymbolId symbol) {
+    for (const auto& stmt : block.stmts) {
+        if (auto loc = firstUseLocInStmtOperands(stmt, symbol)) return loc;
+        if (stmtDefinesSymbol(stmt, symbol)) return std::nullopt;
+    }
+    return firstUseLocInTerm(block.terminator, symbol);
+}
+
+DebugLoc firstUseLocReachableFrom(const S8NormCFG& fn,
+                                  const CFGInfo& cfg,
+                                  BlockId start,
+                                  SymbolId symbol) {
+    if (start < 0 || start >= static_cast<BlockId>(fn.blocks.size())) return {};
+    std::vector<bool> visited(fn.blocks.size(), false);
+    std::deque<BlockId> work;
+    work.push_back(start);
+    while (!work.empty()) {
+        BlockId block_id = work.front();
+        work.pop_front();
+        if (block_id < 0 || block_id >= static_cast<BlockId>(fn.blocks.size())) continue;
+        if (visited[static_cast<std::size_t>(block_id)]) continue;
+        visited[static_cast<std::size_t>(block_id)] = true;
+        if (auto loc = firstUseBeforeDefLocInBlock(
+                fn.blocks[static_cast<std::size_t>(block_id)], symbol)) {
+            return *loc;
+        }
+        for (BlockId succ : cfg.succs[static_cast<std::size_t>(block_id)]) {
+            if (succ >= 0 && succ < static_cast<BlockId>(fn.blocks.size()) &&
+                cfg.reachable[static_cast<std::size_t>(succ)]) {
+                work.push_back(succ);
+            }
+        }
+    }
+    return {};
+}
+
 struct Liveness {
     std::vector<std::set<SymbolId>> live_in;
     std::vector<std::set<SymbolId>> live_out;
@@ -743,9 +834,14 @@ Env mergePredecessorEnvs(Context& ctx,
             const Env& pred_env = env_out[static_cast<std::size_t>(pred)];
             if (symbol < 0 || symbol >= static_cast<SymbolId>(pred_env.size()) ||
                 !pred_env[static_cast<std::size_t>(symbol)]) {
-                fail("Missing incoming SSA value at CFG merge", {},
-                     "bb" + std::to_string(block.id) + " symbol=" +
-                         s8SymbolAt(*ctx.input, symbol).debug_name);
+                const auto& base = s8SymbolAt(*ctx.input, symbol);
+                DebugLoc loc = firstUseLocReachableFrom(*ctx.input, cfg, block.id, symbol);
+                fail("Read before definition for symbol '" + base.debug_name +
+                         "'. Hardware values are not implicitly initialized; provide an "
+                         "explicit initializer before the value is read",
+                     std::move(loc),
+                     "bb" + std::to_string(block.id) + " pred=bb" +
+                         std::to_string(pred));
             }
             S9ValueId value = pred_env[static_cast<std::size_t>(symbol)].value();
             if (!first) first = value;

@@ -413,12 +413,11 @@ Value castTo(Context& ctx,
     } else if (value.type.width > target_type.width) {
         op.kind = S8OpKind::Trunc;
     } else {
-        out.push_back(makeAssign(target, value, loc));
-        return Value{varOperand(ctx.output, target, value.signed_view, loc)};
+        op.kind = S8OpKind::AssignCast;
     }
     out.push_back(makeOp(target, std::move(op), loc));
     ++ctx.summary.inserted_casts;
-    return Value{varOperand(ctx.output, target, value.signed_view, loc)};
+    return Value{varOperand(ctx.output, target, false, loc)};
 }
 
 Value castToBool(Context& ctx, S8Operand value, std::vector<S8Stmt>& out, DebugLoc loc) {

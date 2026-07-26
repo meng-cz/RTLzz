@@ -1606,6 +1606,77 @@ static bool isParenIdentifierListText(std::string text) {
     return saw;
 }
 
+static bool isBracketIndexOnlyText(std::string text) {
+    text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isspace(ch);
+    }), text.end());
+    return text.size() >= 2 && text.front() == '[' && text.back() == ']';
+}
+
+static std::size_t findTopLevelChar(const std::string& text, char target) {
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int angle_depth = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char ch = text[i];
+        if (ch == '(') ++paren_depth;
+        else if (ch == ')') --paren_depth;
+        else if (ch == '[') ++bracket_depth;
+        else if (ch == ']') --bracket_depth;
+        else if (ch == '<') ++angle_depth;
+        else if (ch == '>') --angle_depth;
+        else if (ch == target && paren_depth == 0 &&
+                 bracket_depth == 0 && angle_depth == 0) {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+static std::size_t findLastTopLevelChar(const std::string& text, char target) {
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int angle_depth = 0;
+    std::size_t found = std::string::npos;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char ch = text[i];
+        if (ch == '(') ++paren_depth;
+        else if (ch == ')') --paren_depth;
+        else if (ch == '[') ++bracket_depth;
+        else if (ch == ']') --bracket_depth;
+        else if (ch == '<') ++angle_depth;
+        else if (ch == '>') --angle_depth;
+        else if (ch == target && paren_depth == 0 &&
+                 bracket_depth == 0 && angle_depth == 0) {
+            found = i;
+        }
+    }
+    return found;
+}
+
+static std::vector<std::string> splitTopLevelCommaList(const std::string& text) {
+    std::vector<std::string> out;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int angle_depth = 0;
+    std::size_t begin = 0;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        char ch = i < text.size() ? text[i] : ',';
+        if (ch == '(') ++paren_depth;
+        else if (ch == ')') --paren_depth;
+        else if (ch == '[') ++bracket_depth;
+        else if (ch == ']') --bracket_depth;
+        else if (ch == '<') ++angle_depth;
+        else if (ch == '>') --angle_depth;
+        else if (ch == ',' && paren_depth == 0 &&
+                 bracket_depth == 0 && angle_depth == 0) {
+            out.push_back(text.substr(begin, i - begin));
+            begin = i + 1;
+        }
+    }
+    return out;
+}
+
 static ExprPtr parseSimpleIntConstructText(std::string text) {
     text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char ch) {
         return std::isspace(ch);
@@ -1674,6 +1745,61 @@ static ExprPtr parseSimpleRecoveredArgText(std::string text) {
         return make_literal(text, TypeInfo{"uint32_t", 32, false, true, "builtin"});
     }
     if (auto int_construct = parseSimpleIntConstructText(text)) return int_construct;
+    if (auto dot = findLastTopLevelChar(text, '.'); dot != std::string::npos) {
+        std::string base_text = text.substr(0, dot);
+        std::string field = text.substr(dot + 1);
+        field.erase(0, field.find_first_not_of(" \t\r\n"));
+        auto field_end = field.find_last_not_of(" \t\r\n");
+        if (field_end != std::string::npos) field.erase(field_end + 1);
+        auto base = parseSimpleRecoveredArgText(base_text);
+        if (base && isSimpleIdentifierText(field)) {
+            return make_field_access(base, field, make_unknown_type());
+        }
+    }
+    if (!text.empty() && text.back() == ')') {
+        int depth = 0;
+        std::size_t lparen = std::string::npos;
+        for (std::size_t i = text.size(); i-- > 0;) {
+            if (text[i] == ')') ++depth;
+            if (text[i] == '(') {
+                --depth;
+                if (depth == 0) {
+                    lparen = i;
+                    break;
+                }
+            }
+        }
+        if (lparen != std::string::npos) {
+            std::string callee = text.substr(0, lparen);
+            callee.erase(0, callee.find_first_not_of(" \t\r\n"));
+            auto callee_end = callee.find_last_not_of(" \t\r\n");
+            if (callee_end != std::string::npos) callee.erase(callee_end + 1);
+            if (isSimpleIdentifierText(callee)) {
+                std::vector<ExprPtr> args;
+                std::string args_text = text.substr(lparen + 1,
+                                                    text.size() - lparen - 2);
+                bool ok = true;
+                if (!args_text.empty()) {
+                    for (const auto& part : splitTopLevelCommaList(args_text)) {
+                        auto arg = parseSimpleRecoveredArgText(part);
+                        if (!arg) {
+                            ok = false;
+                            break;
+                        }
+                        args.push_back(std::move(arg));
+                    }
+                }
+                if (ok) {
+                    TypeInfo result_type = make_unknown_type();
+                    auto known_return = function_return_types_by_name.find(callee);
+                    if (known_return != function_return_types_by_name.end()) {
+                        result_type = known_return->second;
+                    }
+                    return makeSurfaceCall(callee, result_type, std::move(args));
+                }
+            }
+        }
+    }
     for (const std::string& op : {"^", "+", "-"}) {
         int paren_depth = 0;
         int bracket_depth = 0;
@@ -2873,6 +2999,19 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             return result;
         }
         VulCallInfo vul_call = recognizeVulCall(cursor, children, spelling, first_child_spelling);
+        auto call_text_has_call_result_index = [&]() {
+            std::size_t bracket = call_text.find('[');
+            if (bracket == std::string::npos || call_text.find(']') == std::string::npos) {
+                return false;
+            }
+            while (bracket > 0 &&
+                   std::isspace(static_cast<unsigned char>(call_text[bracket - 1]))) {
+                --bracket;
+            }
+            return bracket > 0 && call_text[bracket - 1] == ')';
+        };
+        const bool is_index_operator =
+            spelling == "operator[]" || call_text_has_call_result_index();
         ExprPtr first_call_child;
         auto get_first_call_child = [&]() -> ExprPtr {
             if (!first_call_child && !children.empty()) first_call_child = convertExpr(children.front());
@@ -3030,7 +3169,8 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 }
             }
         }
-        if ((vul_call.kind == VulCallKind::OperatorCall || spelling == "operator()") &&
+        if (((vul_call.kind == VulCallKind::OperatorCall && !is_index_operator) ||
+             spelling == "operator()") &&
             !(get_first_call_child() && first_call_child->kind == ExprKind::FieldAccess)) {
             size_t receiver_index = children.size() >= 2 ? 1 : 0;
             auto receiver = children.size() > receiver_index ? convertExpr(children[receiver_index]) : nullptr;
@@ -3160,14 +3300,24 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 return result;
             }
         }
-        if (spelling == "operator[]" && children.size() >= 2) {
+        if (is_index_operator && children.size() >= 2) {
             ExprPtr base;
             ExprPtr idx;
             int arg_count = clang_Cursor_getNumArguments(cursor);
-            if (arg_count >= 2) {
+            if (children.size() >= 3) {
+                base = convertExpr(children[children.size() - 2]);
+                idx = convertExpr(children[children.size() - 1]);
+            } else if (arg_count >= 2) {
                 base = convertExpr(clang_Cursor_getArgument(cursor, 0));
                 idx = convertExpr(clang_Cursor_getArgument(cursor, 1));
             } else {
+                base = convertExpr(children[children.size() - 2]);
+                idx = convertExpr(children[children.size() - 1]);
+            }
+            if ((!base ||
+                 (base && base->kind == ExprKind::VarRef && base->var_name == "operator[]") ||
+                 (base && base->kind != ExprKind::Call && astBaseName(base).empty())) &&
+                children.size() >= 3) {
                 base = convertExpr(children[children.size() - 2]);
                 idx = convertExpr(children[children.size() - 1]);
             }
@@ -3179,8 +3329,12 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 if (sameLiteralExpr(base->index, idx)) return base;
                 return make_array_access(base->array_base, idx, convertType(type));
             }
-            if ((base && base->kind == ExprKind::VarRef && base->var_name == "operator[]") ||
-                (base && astBaseName(base).empty())) {
+            if (!base ||
+                (base && base->kind == ExprKind::VarRef && base->var_name == "operator[]") ||
+                (base && base->kind != ExprKind::Call && astBaseName(base).empty())) {
+                if (auto recovered = parseSimpleRecoveredArgText(cursorText(cursor))) {
+                    return recovered;
+                }
                 failUnsupported(cursor, "S0 cannot resolve operator[] base from cursor metadata");
             }
             TypeInfo elem_type = convertType(type);
@@ -3639,8 +3793,14 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             if (isParenIdentifierListText(cursorText(cursor))) {
                 return nullptr;
             }
+            if (isBracketIndexOnlyText(cursorText(cursor))) {
+                return nullptr;
+            }
             if (auto int_construct = parseSimpleIntConstructText(cursorText(cursor))) {
                 return int_construct;
+            }
+            if (auto recovered = parseSimpleRecoveredArgText(cursorText(cursor))) {
+                return recovered;
             }
             failUnsupported(cursor, "S0 cannot resolve operator call receiver from cursor metadata");
         }
@@ -4520,6 +4680,10 @@ static FunctionAST convertFunctionDecl(CXCursor cursor, const std::string& name)
     return func;
 }
 
+static bool isConcreteReturnType(const TypeInfo& type) {
+    return (type.width > 0 || !type.name.empty()) && type.name != "auto";
+}
+
 static std::shared_ptr<FunctionAST> convertLambdaExpr(
     CXCursor lambda_cursor,
     const std::string& name,
@@ -4594,7 +4758,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(
 
     auto collect_lambda_method = [&](CXCursor method) {
         TypeInfo method_return = convertType(clang_getCursorResultType(method));
-        if (!method_return.name.empty() || method_return.width > 0) {
+        if (isConcreteReturnType(method_return)) {
             fn->return_type = method_return;
         }
         for (auto& mc : getChildren(method)) {
@@ -4651,7 +4815,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(
     for (auto& s : fn->body) {
         if (s && s->kind == StmtKind::Return && s->return_value.has_value()) {
             const TypeInfo& return_type = s->return_value.value()->type;
-            if (!return_type.name.empty() && return_type.width > 0) {
+            if (isConcreteReturnType(return_type)) {
                 fn->return_type = return_type;
             }
             break;
