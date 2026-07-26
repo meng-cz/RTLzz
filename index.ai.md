@@ -4,7 +4,7 @@
 
 `S0 native AST -> S1 API norm -> S2 validate -> S3 statementize -> S4 CFG -> S5 unroll -> S6 inline -> S7 flatten -> S8 op norm -> S9 SSA -> S10 predicate -> S11 BEIR -> BEOPT -> RTL`
 
-## 常用验证
+## 回归测试流程
 
 ```bash
 cmake -S . -B build
@@ -15,9 +15,14 @@ python3 scripts/differential_rtl.py testv2/fixtures/int_misc.logic.cpp --top hls
 python3 scripts/differential_rtl.py testv2/fixtures/flatten_misc.logic.cpp --top hls_main --cases 100
 python3 scripts/differential_rtl.py testv2/fixtures/controlflow_misc.logic.cpp --top hls_main --cases 100
 python3 scripts/differential_rtl.py testv2/fixtures/inline_misc.logic.cpp --top hls_main --cases 100
+
+# 真实硬件模块摘出的组合逻辑 example 回归；每个文件使用一个 LogicSubModule_* top。
+for src in testv2/example/*.logic.cpp; do
+  python3 scripts/differential_rtl.py "$src" --top 'LogicSubModule_*' --cases 100
+done
 ```
 
-`scripts/differential_rtl.py` 通过 `predicate-expand --format portmeta` 获取端口元数据，通过 `--format rtl` 获取 RTL，然后使用 C++ oracle 与 Verilator 做随机输入差分。
+`scripts/differential_rtl.py` 通过 `predicate-expand --format portmeta` 获取端口元数据，通过 `--format rtl` 获取 RTL，然后使用 C++ oracle 与 Verilator 做随机输入差分。`testv2/example/*.logic.cpp` 中的每个输入文件代表一个从真实硬件中摘出的模块组合逻辑函数，使用目标函数名通配 `--top 'LogicSubModule_*'` 对每个 example 进行 RTL-DIFF 差分验证。
 
 ## Build And Entry
 
