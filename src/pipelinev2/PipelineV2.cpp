@@ -2,6 +2,7 @@
 
 #include "backend/beopt.hpp"
 #include "backend/rtlgen.hpp"
+#include "debug/RTLZZException.h"
 #include "s0ast/S0AST.h"
 #include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
@@ -16,6 +17,8 @@
 #include "s11beir/S11BEIR.h"
 
 #include <exception>
+#include <functional>
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -27,9 +30,143 @@ using ParamDirection = pred::v2::ParamDirection;
 using ParamPassingKind = pred::v2::ParamPassingKind;
 using pred::v2::paramDirectionName;
 
-PipelineResult errorResult(std::string stage, std::string message) {
+using DebugTextProvider = std::function<std::string()>;
+using DebugSignalsProvider = std::function<std::vector<rtlgen::RtlDebugSignal>()>;
+
+bool sameFileOrUnknown(const std::string& lhs, const std::string& rhs) {
+    return lhs.empty() || rhs.empty() || lhs == rhs;
+}
+
+bool locContains(const DebugLoc& container, const DebugLoc& loc) {
+    if (!container.valid() || !loc.valid()) return false;
+    if (!sameFileOrUnknown(container.file, loc.file)) return false;
+    if (container.line <= 0 || loc.line <= 0) return false;
+    int end_line = container.end_line > 0 ? container.end_line : container.line;
+    int end_column = container.end_column > 0 ? container.end_column : container.column;
+    if (loc.line < container.line || loc.line > end_line) return false;
+    if (loc.line == container.line && container.column > 0 && loc.column > 0 &&
+        loc.column < container.column) {
+        return false;
+    }
+    if (loc.line == end_line && end_column > 0 && loc.column > 0 &&
+        loc.column > end_column) {
+        return false;
+    }
+    return true;
+}
+
+bool locMatches(const DebugLoc& lhs, const DebugLoc& rhs) {
+    if (!lhs.valid() || !rhs.valid()) return false;
+    if (!sameFileOrUnknown(lhs.file, rhs.file)) return false;
+    if (lhs.line > 0 && rhs.line > 0 && lhs.line == rhs.line) return true;
+    return locContains(lhs, rhs) || locContains(rhs, lhs);
+}
+
+bool signalMatchesLoc(const rtlgen::RtlDebugSignal& signal, const DebugLoc& loc) {
+    if (!loc.valid()) return false;
+    if (signal.decl_loc && locMatches(*signal.decl_loc, loc)) return true;
+    for (const auto& candidate : signal.primary_locs) {
+        if (locMatches(candidate, loc)) return true;
+    }
+    for (const auto& candidate : signal.related_locs) {
+        if (locMatches(candidate, loc)) return true;
+    }
+    return false;
+}
+
+std::string locText(const DebugLoc& loc) {
+    if (!loc.valid()) return "<none>";
+    std::ostringstream os;
+    if (!loc.file.empty()) os << loc.file;
+    if (loc.line > 0) {
+        if (!loc.file.empty()) os << ":";
+        os << loc.line;
+        if (loc.column > 0) os << ":" << loc.column;
+    }
+    if (loc.end_line > 0 || loc.end_column > 0) {
+        os << "-";
+        if (loc.end_line > 0) os << loc.end_line;
+        if (loc.end_column > 0) os << ":" << loc.end_column;
+    }
+    return os.str();
+}
+
+void emitLocList(std::ostream& os, const std::vector<DebugLoc>& locs) {
+    bool any = false;
+    for (const auto& loc : locs) {
+        if (!loc.valid()) continue;
+        os << "    - " << locText(loc) << "\n";
+        any = true;
+    }
+    if (!any) os << "    - <none>\n";
+}
+
+std::string signalDebugText(const std::vector<rtlgen::RtlDebugSignal>& signals) {
+    if (signals.empty()) return {};
+    std::ostringstream os;
+    os << "related signal debug\n";
+    for (const auto& signal : signals) {
+        os << "- #" << signal.id << " " << signal.signal_name << "\n";
+        os << "  rtl_line: " << signal.rtl_line << "\n";
+        if (!signal.port_name.empty()) {
+            os << "  port: " << signal.port_name;
+            if (signal.port_element_index >= 0) os << "[" << signal.port_element_index << "]";
+            os << "\n";
+        }
+        os << "  decl:\n";
+        if (signal.decl_loc && signal.decl_loc->valid()) os << "    - " << locText(*signal.decl_loc) << "\n";
+        else os << "    - <none>\n";
+        os << "  primary:\n";
+        emitLocList(os, signal.primary_locs);
+        os << "  related:\n";
+        emitLocList(os, signal.related_locs);
+        os << "  messages:\n";
+        if (signal.messages.empty()) {
+            os << "    - <none>\n";
+        } else {
+            for (const auto& message : signal.messages) os << "    - " << message << "\n";
+        }
+        if (!signal.derived_nodes.empty()) {
+            os << "  derived_nodes:\n";
+            for (const auto& node : signal.derived_nodes) {
+                os << "    - #" << node.id;
+                if (!node.name.empty()) os << " " << node.name;
+                os << "\n";
+            }
+        }
+        if (!signal.derived_names.empty()) {
+            os << "  derived_names:\n";
+            for (const auto& name : signal.derived_names) os << "    - " << name << "\n";
+        }
+    }
+    return os.str();
+}
+
+template <typename ErrorT>
+std::optional<ErrorContext> stageContext(const std::optional<ErrorT>& error) {
+    if (!error) return std::nullopt;
+    return error->context;
+}
+
+PipelineResult errorResult(std::string stage,
+                           std::string message,
+                           std::optional<ErrorContext> context = std::nullopt,
+                           const DebugTextProvider& debug_text = {},
+                           const DebugSignalsProvider& debug_signals = {}) {
     PipelineResult result;
     result.error = std::move(stage) + ": " + std::move(message);
+    if (debug_text) result.error_debug_text = debug_text();
+    if (debug_signals) {
+        result.error_rtl_debug_signals = debug_signals();
+        if (context && context->loc.valid()) {
+            for (const auto& signal : result.error_rtl_debug_signals) {
+                if (signalMatchesLoc(signal, context->loc)) {
+                    result.error_signal_debug_signals.push_back(signal);
+                }
+            }
+        }
+        result.error_signal_debug_text = signalDebugText(result.error_signal_debug_signals);
+    }
     return result;
 }
 
@@ -245,41 +382,63 @@ PipelineResult compile(const PipelineConfig& config) {
     }
     if (config.unroll_limit <= 0) return errorResult("config", "unroll_limit must be positive");
 
+    DebugTextProvider current_debug_text;
+    DebugSignalsProvider current_debug_signals;
+    s0ast::S0Result s0;
+    s1apinorm::APINormResult s1;
+    s2validate::ValidateResult s2;
+    s3statementize::StatementizeResult s3;
+    s4cfg::CFGResult s4;
+    s5unroll::UnrollResult s5;
+    s6inline::InlineResult s6;
+    s7flatten::FlattenResult s7;
+    s8opnorm::NormResult s8;
+    s9ssa::SSAResult s9;
+    s10predicate::PredicateResult s10;
+    s11beir::BEIRResult s11;
+    beir::Program beir_program;
     try {
-        auto s0 = s0ast::parseProgram(config.source_name,
-                                      config.source_text,
-                                      config.top_function,
-                                      config.clang_args);
-        if (!s0.ok()) return errorResult("s0ast", stageError(s0.error));
+        s0 = s0ast::parseProgram(config.source_name,
+                                 config.source_text,
+                                 config.top_function,
+                                 config.clang_args);
+        if (!s0.ok()) return errorResult("s0ast", stageError(s0.error), stageContext(s0.error));
         if (!s0.program) return errorResult("s0ast", "stage produced no program");
-        auto s1 = s1apinorm::normalizeAPIs(s0ast::surfaceAST(*s0.program));
-        if (!s1.ok()) return errorResult("s1apinorm", stageError(s1.error));
-        if (!s1.function) return errorResult("s1apinorm", "stage produced no function");
+        current_debug_text = [&s0]() { return "latest successful stage: s0ast\n" + s0ast::debugPrint(*s0.program); };
+        s1 = s1apinorm::normalizeAPIs(s0ast::surfaceAST(*s0.program));
+        if (!s1.ok()) return errorResult("s1apinorm", stageError(s1.error), stageContext(s1.error), current_debug_text);
+        if (!s1.function) return errorResult("s1apinorm", "stage produced no function", std::nullopt, current_debug_text);
+        current_debug_text = [&s1]() { return "latest successful stage: s1apinorm\n" + s1apinorm::debugPrint(*s1.function, s1.summaries); };
 
-        auto s2 = s2validate::validateFunctionAST(*s1.function);
-        if (!s2.ok()) return errorResult("s2validate", stageError(s2.error));
+        s2 = s2validate::validateFunctionAST(*s1.function);
+        if (!s2.ok()) return errorResult("s2validate", stageError(s2.error), stageContext(s2.error), current_debug_text);
 
-        auto s3 = s3statementize::statementizeFunctionAST(*s1.function);
-        if (!s3.ok()) return errorResult("s3statementize", stageError(s3.error));
-        if (!s3.program) return errorResult("s3statementize", "stage produced no program");
+        s3 = s3statementize::statementizeFunctionAST(*s1.function);
+        if (!s3.ok()) return errorResult("s3statementize", stageError(s3.error), stageContext(s3.error), current_debug_text);
+        if (!s3.program) return errorResult("s3statementize", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s3]() { return "latest successful stage: s3statementize\n" + s3statementize::debugPrint(*s3.program); };
 
-        auto s4 = s4cfg::buildCFGProgram(*s3.program);
-        if (!s4.ok()) return errorResult("s4cfg", stageError(s4.error));
-        if (!s4.program) return errorResult("s4cfg", "stage produced no program");
+        s4 = s4cfg::buildCFGProgram(*s3.program);
+        if (!s4.ok()) return errorResult("s4cfg", stageError(s4.error), stageContext(s4.error), current_debug_text);
+        if (!s4.program) return errorResult("s4cfg", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s4]() { return "latest successful stage: s4cfg\n" + s4cfg::debugPrint(*s4.program); };
 
         s5unroll::UnrollOptions unroll_options;
         unroll_options.max_iterations_per_loop = config.unroll_limit;
-        auto s5 = s5unroll::unrollCFGProgram(*s4.program, unroll_options);
-        if (!s5.ok()) return errorResult("s5unroll", stageError(s5.error));
-        if (!s5.program) return errorResult("s5unroll", "stage produced no program");
+        s5 = s5unroll::unrollCFGProgram(*s4.program, unroll_options);
+        if (!s5.ok()) return errorResult("s5unroll", stageError(s5.error), stageContext(s5.error), current_debug_text);
+        if (!s5.program) return errorResult("s5unroll", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s5]() { return "latest successful stage: s5unroll\n" + s5unroll::debugPrint(*s5.program, s5.summaries); };
 
-        auto s6 = s6inline::inlineCFGProgram(*s5.program);
-        if (!s6.ok()) return errorResult("s6inline", stageError(s6.error));
-        if (!s6.program) return errorResult("s6inline", "stage produced no program");
+        s6 = s6inline::inlineCFGProgram(*s5.program);
+        if (!s6.ok()) return errorResult("s6inline", stageError(s6.error), stageContext(s6.error), current_debug_text);
+        if (!s6.program) return errorResult("s6inline", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s6]() { return "latest successful stage: s6inline\n" + s6inline::debugPrint(*s6.program, s6.summaries); };
 
-        auto s7 = s7flatten::flattenProgram(*s6.program);
-        if (!s7.ok()) return errorResult("s7flatten", stageError(s7.error));
-        if (!s7.program) return errorResult("s7flatten", "stage produced no program");
+        s7 = s7flatten::flattenProgram(*s6.program);
+        if (!s7.ok()) return errorResult("s7flatten", stageError(s7.error), stageContext(s7.error), current_debug_text);
+        if (!s7.program) return errorResult("s7flatten", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s7]() { return "latest successful stage: s7flatten\n" + s7flatten::debugPrint(*s7.program, s7.summaries); };
 
         if (config.output_kind == OutputKind::PortMetadata) {
             PipelineResult result;
@@ -287,27 +446,39 @@ PipelineResult compile(const PipelineConfig& config) {
             return result;
         }
 
-        auto s8 = s8opnorm::normalizeOperations(*s7.program);
-        if (!s8.ok()) return errorResult("s8opnorm", stageError(s8.error));
-        if (!s8.program) return errorResult("s8opnorm", "stage produced no program");
+        s8 = s8opnorm::normalizeOperations(*s7.program);
+        if (!s8.ok()) return errorResult("s8opnorm", stageError(s8.error), stageContext(s8.error), current_debug_text);
+        if (!s8.program) return errorResult("s8opnorm", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s8]() { return "latest successful stage: s8opnorm\n" + s8opnorm::debugPrint(*s8.program, s8.summaries); };
 
-        auto s9 = s9ssa::buildSSA(*s8.program);
-        if (!s9.ok()) return errorResult("s9ssa", stageError(s9.error));
-        if (!s9.program) return errorResult("s9ssa", "stage produced no program");
+        s9 = s9ssa::buildSSA(*s8.program);
+        if (!s9.ok()) return errorResult("s9ssa", stageError(s9.error), stageContext(s9.error), current_debug_text);
+        if (!s9.program) return errorResult("s9ssa", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s9]() { return "latest successful stage: s9ssa\n" + s9ssa::debugPrint(*s9.program, s9.summaries); };
 
-        auto s10 = s10predicate::lowerPredicates(*s9.program);
-        if (!s10.ok()) return errorResult("s10predicate", stageError(s10.error));
-        if (!s10.program) return errorResult("s10predicate", "stage produced no program");
+        s10 = s10predicate::lowerPredicates(*s9.program);
+        if (!s10.ok()) return errorResult("s10predicate", stageError(s10.error), stageContext(s10.error), current_debug_text);
+        if (!s10.program) return errorResult("s10predicate", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s10]() { return "latest successful stage: s10predicate\n" + s10predicate::debugPrint(*s10.program, s10.summaries); };
 
         s11beir::BEIROptions beir_options;
         beir_options.optimize = false;
-        auto s11 = s11beir::buildBEIR(*s10.program, beir_options);
-        if (!s11.ok()) return errorResult("s11beir", stageError(s11.error));
-        if (!s11.program) return errorResult("s11beir", "stage produced no program");
+        s11 = s11beir::buildBEIR(*s10.program, beir_options);
+        if (!s11.ok()) return errorResult("s11beir", stageError(s11.error), stageContext(s11.error), current_debug_text);
+        if (!s11.program) return errorResult("s11beir", "stage produced no program", std::nullopt, current_debug_text);
+        current_debug_text = [&s11]() { return "latest successful stage: s11beir\n" + beir::emitText(*s11.program); };
+        current_debug_signals = [&s11]() { return rtlgen::collectDebugSignals(*s11.program, ""); };
 
-        beir::Program beir_program = beir::opt::optimizeProgram(
-            std::move(*s11.program),
+        beir_program = *s11.program;
+        beir_program = beir::opt::optimizeProgram(
+            std::move(beir_program),
             beir::opt::parseOptions(config.beopt_args));
+        current_debug_text = [&beir_program]() {
+            return "latest successful stage: beir-opt\n" + beir::emitText(beir_program);
+        };
+        current_debug_signals = [&beir_program]() {
+            return rtlgen::collectDebugSignals(beir_program, "");
+        };
 
         PipelineResult result;
         switch (config.output_kind) {
@@ -329,8 +500,14 @@ PipelineResult compile(const PipelineConfig& config) {
         }
         result.beir_program = std::move(beir_program);
         return result;
+    } catch (const RTLZZException& ex) {
+        return errorResult("pipelinev2",
+                           ex.what(),
+                           ex.primaryContext(),
+                           current_debug_text,
+                           current_debug_signals);
     } catch (const std::exception& ex) {
-        return errorResult("pipelinev2", ex.what());
+        return errorResult("pipelinev2", ex.what(), std::nullopt, current_debug_text, current_debug_signals);
     }
 }
 

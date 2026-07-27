@@ -252,6 +252,25 @@ static int runMain(int argc, char* argv[]) {
     }
     if (!result.ok()) {
         std::cerr << "Error: " << result.error << "\n";
+        if (!result.error_signal_debug_text.empty()) {
+            std::cerr << "\nError signal debug:\n"
+                      << result.error_signal_debug_text;
+            if (!result.error_signal_debug_text.empty() &&
+                result.error_signal_debug_text.back() != '\n') {
+                std::cerr << "\n";
+            }
+        }
+        if (format == "rtl" && emit_rtl_debug && !result.error_debug_codelines.empty()) {
+            std::string debug_path = rtl_debug_file.empty()
+                ? defaultRtlDebugFile(source_file, output_file)
+                : rtl_debug_file;
+            std::string write_error;
+            if (writeLinesToFile(debug_path, result.error_debug_codelines, write_error)) {
+                std::cerr << "Error debug snapshot written to: " << debug_path << "\n";
+            } else {
+                std::cerr << "Could not write error debug snapshot: " << write_error << "\n";
+            }
+        }
         return 1;
     }
 

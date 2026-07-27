@@ -37,6 +37,10 @@ struct PipelineResult {
     std::string output_text;
     std::string rtl_debug_text;
     std::vector<rtlgen::RtlDebugSignal> rtl_debug_signals;
+    std::string error_debug_text;
+    std::string error_signal_debug_text;
+    std::vector<rtlgen::RtlDebugSignal> error_rtl_debug_signals;
+    std::vector<rtlgen::RtlDebugSignal> error_signal_debug_signals;
     std::string error;
 
     bool ok() const { return error.empty(); }

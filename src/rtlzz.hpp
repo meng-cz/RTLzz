@@ -82,6 +82,14 @@ struct CompileResult {
     std::vector<std::string> debug_codelines;
     // Populated only when CompileOptions::rtl_debug == RtlDebugMode::Structured.
     std::vector<RtlSignalDebugInfo> debug_signals;
+    // Populated on failed compilations when the pipeline has a debug snapshot.
+    std::string error_debug_text;
+    std::vector<std::string> error_debug_codelines;
+    std::vector<RtlSignalDebugInfo> error_debug_signals;
+    // Best-effort subset related to the failing source location or signal.
+    std::string error_signal_debug_text;
+    std::vector<std::string> error_signal_debug_codelines;
+    std::vector<RtlSignalDebugInfo> error_signal_debug_signals;
     std::string error;
 
     bool ok() const {
@@ -195,9 +203,9 @@ inline std::vector<RtlSignalDebugInfo> convertDebugSignals(
 }
 
 inline CompileResult compileSource(const CompileOptions& options, OutputKind output_kind) {
-    if (options.source_codelines.empty()) return {{}, "", {}, {}, "source_codelines must not be empty"};
+    if (options.source_codelines.empty()) return {{}, "", {}, {}, "", {}, {}, "", {}, {}, "source_codelines must not be empty"};
     if (options.top_function.find_first_not_of(" \t\r\n") == std::string::npos) {
-        return {{}, "", {}, {}, "top_function must not be empty"};
+        return {{}, "", {}, {}, "", {}, {}, "", {}, {}, "top_function must not be empty"};
     }
 
     pred::pipelinev2::PipelineConfig config;
@@ -230,7 +238,19 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
 
     auto result = pred::pipelinev2::compile(config);
     if (!result.ok()) {
-        return {{}, "", {}, {}, result.error};
+        CompileResult out;
+        out.error = result.error;
+        out.error_debug_text = result.error_debug_text;
+        out.error_debug_codelines = result.error_debug_text.empty()
+            ? std::vector<std::string>{}
+            : splitCodeLines(result.error_debug_text);
+        out.error_debug_signals = convertDebugSignals(result.error_rtl_debug_signals);
+        out.error_signal_debug_text = result.error_signal_debug_text;
+        out.error_signal_debug_codelines = result.error_signal_debug_text.empty()
+            ? std::vector<std::string>{}
+            : splitCodeLines(result.error_signal_debug_text);
+        out.error_signal_debug_signals = convertDebugSignals(result.error_signal_debug_signals);
+        return out;
     }
     CompileResult out;
     out.output_codelines = splitCodeLines(result.output_text);
