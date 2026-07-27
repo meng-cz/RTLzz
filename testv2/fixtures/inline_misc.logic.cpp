@@ -119,6 +119,8 @@ Int<8> helper_template_composed_path;
 Int<8> helper_template_config_arg;
 #pragma output_port lambda_template_config_arg
 Int<8> lambda_template_config_arg;
+#pragma output_port lambda_calls_template_lambda
+Int<8> lambda_calls_template_lambda;
 #pragma output_port helper_default_array
 Int<8> helper_default_array;
 #pragma output_port helper_complex_lambda_arg
@@ -298,6 +300,19 @@ void hls_main() {
         };
     lambda_template_config_arg =
         template_lambda_config_arg.template operator()<INLINE_CONFIG_BASE + TEMPLATE_ROUTE_OFFSET>(b);
+    auto nested_template_route =
+        [&]<uint32_t IDX = 0>(Int<8> x) -> Int<8> {
+            if constexpr (IDX == 0) {
+                return x + Int<8>(61);
+            }
+            return x ^ Int<8>(67);
+        };
+    auto call_template_from_lambda = [&]() -> Int<8> {
+        Int<8> left = nested_template_route.template operator()<0>(a);
+        Int<8> right = nested_template_route.template operator()<1>(b);
+        return left ^ right;
+    };
+    lambda_calls_template_lambda = call_template_from_lambda();
     template_write_global<0>(a);
     template_write_global<1>(b);
     helper_default_array = explicitly_initialized_array(a);

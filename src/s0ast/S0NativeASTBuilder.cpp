@@ -419,7 +419,7 @@ static StmtPtr convertStmt(CXCursor cursor);
 static StmtPtr convertStmtImpl(CXCursor cursor);
 static std::vector<StmtPtr> convertChildren(CXCursor cursor);
 static std::string cursorLocation(CXCursor cursor);
-static void collectLocalLambdas(CXCursor cursor, FunctionAST& func);
+static void collectLocalLambdasUntilStable(CXCursor cursor, FunctionAST& func);
 static void collectScopedConstInts(CXCursor root, const std::string& source_file);
 static CXCursor referencedOperatorMethodInCursor(CXCursor cursor);
 static std::vector<std::string> constIntExprTokens(const std::string& expr);
@@ -4974,7 +4974,7 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(
         }, &method_ctx);
     }
 
-    collectLocalLambdas(lambda_cursor, *fn);
+    collectLocalLambdasUntilStable(lambda_cursor, *fn);
 
     for (auto& s : fn->body) {
         if (s && s->kind == StmtKind::Return && s->return_value.has_value()) {
@@ -4996,7 +4996,8 @@ static std::shared_ptr<FunctionAST> convertLambdaExpr(
     return fn;
 }
 
-static void collectLocalLambdas(CXCursor cursor, FunctionAST& func) {
+static bool collectLocalLambdasOnce(CXCursor cursor, FunctionAST& func) {
+    bool changed = false;
     for (auto& child : getChildren(cursor)) {
         if (clang_getCursorKind(child) == CXCursor_VarDecl) {
             std::string source_name = cxToStr(clang_getCursorSpelling(child));
@@ -5012,9 +5013,13 @@ static void collectLocalLambdas(CXCursor cursor, FunctionAST& func) {
                         specs->second.empty()) {
                         continue;
                     }
-                    for (const auto& args : specs->second) {
+                    auto pending_specs = specs->second;
+                    for (const auto& args : pending_specs) {
                         std::string specialized_name =
                             ensureLambdaTemplateSpecializationName(lambda_name, args);
+                        if (func.lambdas.find(specialized_name) != func.lambdas.end()) {
+                            continue;
+                        }
                         CXCursor preferred_method = clang_getNullCursor();
                         auto method_it = lambda_template_specialization_method_by_key.find(
                             lambdaTemplateSpecializationKey(lambda_name, args));
@@ -5027,17 +5032,39 @@ static void collectLocalLambdas(CXCursor cursor, FunctionAST& func) {
                                                         false,
                                                         false,
                                                         preferred_method);
-                        if (lambda) func.lambdas[specialized_name] = lambda;
+                        if (lambda) {
+                            func.lambdas[specialized_name] = lambda;
+                            changed = true;
+                        }
                     }
                 } else {
+                    if (func.lambdas.find(lambda_name) != func.lambdas.end()) {
+                        continue;
+                    }
                     auto lambda = convertLambdaExpr(lambda_cursor, lambda_name);
-                    if (lambda) func.lambdas[lambda_name] = lambda;
+                    if (lambda) {
+                        func.lambdas[lambda_name] = lambda;
+                        changed = true;
+                    }
                 }
                 continue;
             }
         }
-        collectLocalLambdas(child, func);
+        if (collectLocalLambdasOnce(child, func)) {
+            changed = true;
+        }
     }
+    return changed;
+}
+
+static void collectLocalLambdasUntilStable(CXCursor cursor, FunctionAST& func) {
+    constexpr int kMaxIterations = 1024;
+    for (int iteration = 0; iteration < kMaxIterations; ++iteration) {
+        if (!collectLocalLambdasOnce(cursor, func)) {
+            return;
+        }
+    }
+    failUnsupported(cursor, "S0 local lambda collection did not converge");
 }
 
 static void appendPendingFunctionTemplateSpecializations(FunctionAST& root) {
@@ -5070,7 +5097,7 @@ static void appendPendingFunctionTemplateSpecializations(FunctionAST& root) {
         {
             auto saved_const_int_values = global_const_int_values;
             collectScopedConstInts(function_cursor, cursorFileName(function_cursor));
-            collectLocalLambdas(function_cursor, *helper);
+            collectLocalLambdasUntilStable(function_cursor, *helper);
             global_const_int_values = std::move(saved_const_int_values);
         }
         current_template_int_values = std::move(saved_template_int_values);
@@ -6362,7 +6389,7 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
     {
         auto saved_const_int_values = global_const_int_values;
         collectScopedConstInts(found, cursorFileName(found));
-        collectLocalLambdas(found, func);
+        collectLocalLambdasUntilStable(found, func);
         global_const_int_values = std::move(saved_const_int_values);
     }
 
@@ -6380,7 +6407,7 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
         {
             auto saved_const_int_values = global_const_int_values;
             collectScopedConstInts(fn.cursor, cursorFileName(fn.cursor));
-            collectLocalLambdas(fn.cursor, *helper);
+            collectLocalLambdasUntilStable(fn.cursor, *helper);
             global_const_int_values = std::move(saved_const_int_values);
         }
         current_template_int_values = std::move(saved_template_int_values);
