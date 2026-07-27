@@ -11,6 +11,12 @@ enum class SignedMode : int8_t {
     PosSeven = 7,
 };
 
+enum : uint32_t {
+    CONFIG_LOW_BITS = 8,
+    CONFIG_MID_LO = 8,
+    CONFIG_WORD_BITS = 16,
+};
+
 #pragma input_port a
 Int<8> a;
 #pragma input_port b
@@ -55,6 +61,10 @@ Int<16> range_static;
 bool range_bit;
 #pragma output_port range_dynamic
 Int<16> range_dynamic;
+#pragma output_port range_symbolic_at
+Int<8> range_symbolic_at;
+#pragma output_port range_config_at
+Int<8> range_config_at;
 #pragma output_port cat_repeat
 Int<24> cat_repeat;
 #pragma output_port reduce_any
@@ -133,6 +143,10 @@ bool wide_reduce_all;
 bool wide_reduce_parity;
 
 void hls_main() {
+    constexpr int LOW_BITS = 8;
+    constexpr int MID_LO = 8;
+    constexpr int WORD_BITS = 16;
+
     Int<8> low = Int<8>(word.at<7, 0>());
     Int<8> high = Int<8>(word.at<15, 8>());
 
@@ -156,6 +170,12 @@ void hls_main() {
 
     Int<4> dyn_read = a.pick<4>(dyn);
     range_dynamic = Int<16>(dyn_read);
+    Int<8> symbolic_low = Int<8>(word.at<LOW_BITS - 1, 0>());
+    Int<8> symbolic_high = Int<8>(word.at<WORD_BITS - 1, MID_LO>());
+    range_symbolic_at = symbolic_low ^ symbolic_high;
+    Int<8> config_low = Int<8>(word.at<CONFIG_LOW_BITS - 1, 0>());
+    Int<8> config_high = Int<8>(word.at<CONFIG_WORD_BITS - 1, CONFIG_MID_LO>());
+    range_config_at = config_low ^ config_high;
 
     Int<12> joined = Cat(a, Int<4>(b.at<3, 0>()));
     cat_repeat = Repeat<2>(joined);

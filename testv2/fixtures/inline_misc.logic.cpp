@@ -53,6 +53,8 @@ Int<8> loop_calls_helper(Int<8> seed) {
 
 enum : uint32_t {
     TEMPLATE_ROUTE_OFFSET = 1,
+    INLINE_CONFIG_BASE = 0,
+    INLINE_CONFIG_ROUTE = TEMPLATE_ROUTE_OFFSET,
 };
 
 #pragma input_port a
@@ -113,6 +115,10 @@ Int<8> helper_template_global_0;
 Int<8> helper_template_global_1;
 #pragma output_port helper_template_composed_path
 Int<8> helper_template_composed_path;
+#pragma output_port helper_template_config_arg
+Int<8> helper_template_config_arg;
+#pragma output_port lambda_template_config_arg
+Int<8> lambda_template_config_arg;
 #pragma output_port helper_default_array
 Int<8> helper_default_array;
 #pragma output_port helper_complex_lambda_arg
@@ -163,6 +169,14 @@ Int<8> template_route_value(Int<8> value) {
 template <uint32_t P = 0>
 Int<8> template_helper_routes_with_global(Int<8> value) {
     return template_route_value<P + TEMPLATE_ROUTE_OFFSET>(value + Int<8>(1));
+}
+
+template <uint32_t P = 0>
+Int<8> template_config_select(Int<8> value) {
+    if constexpr (P == INLINE_CONFIG_ROUTE) {
+        return value + Int<8>(31);
+    }
+    return value ^ Int<8>(47);
 }
 
 template <uint32_t IDX = 0>
@@ -273,6 +287,17 @@ void hls_main() {
     Int<8> lambda_template_route =
         template_lambda_routes_with_global.template operator()<0>(b);
     helper_template_composed_path = helper_template_route ^ lambda_template_route;
+    helper_template_config_arg =
+        template_config_select<INLINE_CONFIG_BASE + TEMPLATE_ROUTE_OFFSET>(a);
+    auto template_lambda_config_arg =
+        [&]<uint32_t IDX = 0>(Int<8> x) -> Int<8> {
+            if constexpr (IDX == INLINE_CONFIG_ROUTE) {
+                return x ^ Int<8>(53);
+            }
+            return x + Int<8>(59);
+        };
+    lambda_template_config_arg =
+        template_lambda_config_arg.template operator()<INLINE_CONFIG_BASE + TEMPLATE_ROUTE_OFFSET>(b);
     template_write_global<0>(a);
     template_write_global<1>(b);
     helper_default_array = explicitly_initialized_array(a);

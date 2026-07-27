@@ -1370,6 +1370,35 @@ static std::vector<int> templateIntArgsFromText(const std::string& text,
     return values;
 }
 
+static bool callTextHasOperatorTemplateArgs(const std::string& text) {
+    std::size_t op_pos = text.find("operator");
+    if (op_pos == std::string::npos) return false;
+    return text.find('<', op_pos + std::string("operator").size()) != std::string::npos;
+}
+
+static std::string specializeLambdaOperatorCall(CXCursor cursor,
+                                                const std::string& call_text,
+                                                const std::string& base_callee) {
+    if (base_callee.empty() || !callTextHasOperatorTemplateArgs(call_text)) {
+        return base_callee;
+    }
+    auto template_args = templateIntArgsFromTokens(cursor, ")");
+    if (template_args.empty()) {
+        template_args = templateIntArgsFromText(call_text, "operator");
+    }
+    if (template_args.empty()) {
+        template_args = templateIntArgsFromText(call_text, "");
+    }
+    if (template_args.empty()) return base_callee;
+
+    std::string spec_key = lambdaTemplateSpecializationKey(base_callee, template_args);
+    CXCursor referenced = referencedOperatorMethodInCursor(cursor);
+    if (!clang_Cursor_isNull(referenced)) {
+        lambda_template_specialization_method_by_key[spec_key] = referenced;
+    }
+    return ensureLambdaTemplateSpecializationName(base_callee, template_args);
+}
+
 static TypeInfo typeForCallResult(CXType cursor_type, const std::string& callee) {
     TypeInfo result = convertType(cursor_type);
     if ((result.name.empty() || result.width <= 0) && !callee.empty()) {
@@ -2012,6 +2041,58 @@ static void appendIdentifierCallArgsFromText(std::vector<ExprPtr>& args,
     std::string inner = text.substr(lparen + 1, rparen - lparen - 1);
     std::size_t begin = 0;
     depth = 0;
+    for (std::size_t i = 0; i <= inner.size(); ++i) {
+        char ch = i < inner.size() ? inner[i] : ',';
+        if (ch == '(' || ch == '[' || ch == '<') ++depth;
+        if (ch == ')' || ch == ']' || ch == '>') --depth;
+        if (ch != ',' || depth != 0) continue;
+        std::string part = inner.substr(begin, i - begin);
+        part.erase(std::remove_if(part.begin(), part.end(), [](unsigned char c) {
+            return std::isspace(c);
+        }), part.end());
+        if (!part.empty()) {
+            if (auto arg = parseSimpleRecoveredArgText(part)) {
+                args.push_back(std::move(arg));
+            }
+        }
+        begin = i + 1;
+    }
+}
+
+static void appendOperatorTemplateCallArgsFromText(std::vector<ExprPtr>& args,
+                                                   const std::string& text) {
+    std::size_t op_pos = text.find("operator");
+    if (op_pos == std::string::npos) return;
+    std::size_t lt = text.find('<', op_pos + std::string("operator").size());
+    if (lt == std::string::npos) return;
+
+    int angle_depth = 0;
+    std::size_t gt = std::string::npos;
+    for (std::size_t i = lt; i < text.size(); ++i) {
+        if (text[i] == '<') ++angle_depth;
+        if (text[i] == '>' && --angle_depth == 0) {
+            gt = i;
+            break;
+        }
+    }
+    if (gt == std::string::npos) return;
+
+    std::size_t lparen = text.find('(', gt + 1);
+    if (lparen == std::string::npos) return;
+    int paren_depth = 0;
+    std::size_t rparen = std::string::npos;
+    for (std::size_t i = lparen; i < text.size(); ++i) {
+        if (text[i] == '(') ++paren_depth;
+        if (text[i] == ')' && --paren_depth == 0) {
+            rparen = i;
+            break;
+        }
+    }
+    if (rparen == std::string::npos || rparen <= lparen + 1) return;
+
+    std::string inner = text.substr(lparen + 1, rparen - lparen - 1);
+    std::size_t begin = 0;
+    int depth = 0;
     for (std::size_t i = 0; i <= inner.size(); ++i) {
         char ch = i < inner.size() ? inner[i] : ',';
         if (ch == '(' || ch == '[' || ch == '<') ++depth;
@@ -2965,8 +3046,13 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 if (spelling.empty()) spelling = first_child_spelling;
             }
         }
-        if (call_text.find(". template operator ( ) <") != std::string::npos ||
-            call_text.find(".template operator()<") != std::string::npos) {
+        auto is_explicit_template_operator_call = [&]() {
+            if (!callTextHasOperatorTemplateArgs(call_text)) return false;
+            return call_text.find("template") != std::string::npos ||
+                   spelling == "operator()" ||
+                   first_child_spelling == "operator()";
+        };
+        if (is_explicit_template_operator_call()) {
             std::string callee;
             std::size_t receiver_index = children.size();
             for (std::size_t i = 0; i < children.size(); ++i) {
@@ -2980,17 +3066,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 failUnsupported(cursor,
                                 "S0 cannot resolve explicit generic lambda operator() receiver");
             }
-            auto template_args = templateIntArgsFromTokens(cursor, ")");
-            if (!template_args.empty()) {
-                std::string base_callee = callee;
-                std::string spec_key =
-                    lambdaTemplateSpecializationKey(base_callee, template_args);
-                CXCursor referenced = referencedOperatorMethodInCursor(cursor);
-                if (!clang_Cursor_isNull(referenced)) {
-                    lambda_template_specialization_method_by_key[spec_key] = referenced;
-                }
-                callee = ensureLambdaTemplateSpecializationName(base_callee, template_args);
-            }
+            callee = specializeLambdaOperatorCall(cursor, call_text, callee);
             auto result = std::make_shared<Expr>();
             result->kind = ExprKind::Call;
             result->callee = callee;
@@ -3005,6 +3081,9 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 if (arg && !isOperatorOnlyExpr(arg)) {
                     result->args.push_back(std::move(arg));
                 }
+            }
+            if (result->args.empty()) {
+                appendOperatorTemplateCallArgsFromText(result->args, call_text);
             }
             if (result->args.empty()) {
                 appendIdentifierCallArgsFromText(result->args, call_text);
@@ -3096,6 +3175,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 token_callee = lambdaNameFromCallSourceText(cursor);
             }
             if (!token_callee.empty() && token_callee != "operator()") {
+                token_callee = specializeLambdaOperatorCall(cursor, call_text, token_callee);
                 auto result = std::make_shared<Expr>();
                 result->kind = ExprKind::Call;
                 result->callee = token_callee;
@@ -3109,6 +3189,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 }
                 if (result->args.empty()) appendSimpleParenArgFromCursor(result->args, cursor);
                 if (result->args.empty()) appendSingleIdentifierCallArgFromCursor(result->args, cursor);
+                if (result->args.empty()) appendOperatorTemplateCallArgsFromText(result->args, call_text);
                 if (result->args.empty()) appendIdentifierCallArgsFromCursor(result->args, cursor);
                 prependLambdaCaptureArgs(token_callee, result->args, result->debug_loc);
                 return wrapRecoveredCallWithTrailingBinary(result, cursorText(cursor));
@@ -3197,6 +3278,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             }
             if (callee.empty() && spelling != "operator()") callee = astBaseName(receiver);
             if (!callee.empty()) {
+                callee = specializeLambdaOperatorCall(cursor, call_text, callee);
                 int explicit_arg_count = clang_Cursor_getNumArguments(cursor);
                 int receiver_arg_index = -1;
                 for (int i = 0; i < explicit_arg_count; ++i) {
@@ -3218,6 +3300,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 }
                 if (args.empty()) appendSimpleParenArgFromCursor(args, cursor);
                 if (args.empty()) appendSingleIdentifierCallArgFromCursor(args, cursor);
+                if (args.empty()) appendOperatorTemplateCallArgsFromText(args, call_text);
                 if (args.empty()) appendIdentifierCallArgsFromCursor(args, cursor);
                 auto result = std::make_shared<Expr>();
                 result->kind = ExprKind::Call;
@@ -3252,6 +3335,9 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             if (range_args.size() != 2) {
                 range_args = templateIntArgsFromTokens(cursor, "at");
             }
+            if (range_args.size() != 2) {
+                range_args = templateIntArgsFromText(call_text, "at");
+            }
             if (range_args.size() == 1) {
                 range_args.push_back(range_args.front());
             }
@@ -3259,7 +3345,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 range_args = staticRangeArgsFromType(type);
             }
             if (range_args.size() != 2) {
-                return result;
+                failUnsupported(cursor, "S0 cannot resolve Int::at template indices");
             }
             int hi = range_args[0];
             int lo = range_args[1];
@@ -3274,7 +3360,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 }
             }
             if (!receiver) {
-                return result;
+                failUnsupported(cursor, "S0 cannot resolve Int::at receiver");
             }
             result->hi = hi;
             result->lo = lo;
@@ -3617,6 +3703,7 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             if (result->callee.empty()) {
                 failUnsupported(cursor, "S0 cannot resolve operator() receiver from cursor metadata");
             }
+            result->callee = specializeLambdaOperatorCall(cursor, call_text, result->callee);
         }
         if (!children.empty() && clang_getCursorKind(children.front()) == CXCursor_MemberRefExpr) {
             if (firstSpellingDeep(children.front()) != "operator()") {
@@ -3663,6 +3750,9 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             result->literal_value = cursorText(cursor);
             if (result->args.empty()) appendSimpleParenArgFromCursor(result->args, cursor);
             if (result->args.empty()) appendSingleIdentifierCallArgFromCursor(result->args, cursor);
+            if (result->args.empty()) {
+                appendOperatorTemplateCallArgsFromText(result->args, result->literal_value);
+            }
             if (result->args.empty()) appendIdentifierCallArgsFromCursor(result->args, cursor);
             prependLambdaCaptureArgs(result->callee, result->args, debugLocFromCursor(cursor));
             return wrapRecoveredCallWithTrailingBinary(result, cursorText(cursor));
@@ -3701,16 +3791,22 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                 }
             }
             if (!lambda_callee.empty()) {
+                const std::string source_text = cursorText(cursor);
+                lambda_callee =
+                    specializeLambdaOperatorCall(cursor, source_text, lambda_callee);
                 auto recovered = std::make_shared<Expr>();
                 recovered->kind = ExprKind::Call;
                 recovered->callee = lambda_callee;
                 recovered->type = convertType(type);
-                recovered->literal_value = cursorText(cursor);
+                recovered->literal_value = source_text;
                 for (std::size_t i = lambda_receiver_index + 1; i < children.size(); ++i) {
                     if (!clang_isExpression(clang_getCursorKind(children[i]))) continue;
                     if (firstSpellingDeep(children[i]).rfind("operator", 0) == 0) continue;
                     auto arg = convertExpr(children[i]);
                     if (arg && !isOperatorOnlyExpr(arg)) recovered->args.push_back(std::move(arg));
+                }
+                if (recovered->args.empty()) {
+                    appendOperatorTemplateCallArgsFromText(recovered->args, source_text);
                 }
                 prependLambdaCaptureArgs(lambda_callee, recovered->args, debugLocFromCursor(cursor));
                 return wrapRecoveredCallWithTrailingBinary(recovered, cursorText(cursor));
@@ -3765,11 +3861,13 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
             }
             std::string callee = lambdaNameFromCallSourceText(cursor);
             if (!callee.empty()) {
+                const std::string source_text = cursorText(cursor);
+                callee = specializeLambdaOperatorCall(cursor, source_text, callee);
                 auto recovered = std::make_shared<Expr>();
                 recovered->kind = ExprKind::Call;
                 recovered->callee = callee;
                 recovered->type = convertType(type);
-                recovered->literal_value = cursorText(cursor);
+                recovered->literal_value = source_text;
                 int arg_count = clang_Cursor_getNumArguments(cursor);
                 int receiver_arg_index = -1;
                 for (int i = 0; i < arg_count; ++i) {
@@ -3793,9 +3891,12 @@ static ExprPtr convertExprImpl(CXCursor cursor) {
                     appendSingleIdentifierCallArgFromCursor(recovered->args, cursor);
                 }
                 if (recovered->args.empty()) {
+                    appendOperatorTemplateCallArgsFromText(recovered->args, source_text);
+                }
+                if (recovered->args.empty()) {
                     appendIdentifierCallArgsFromCursor(recovered->args, cursor);
                 }
-            prependLambdaCaptureArgs(callee, recovered->args, debugLocFromCursor(cursor));
+                prependLambdaCaptureArgs(callee, recovered->args, debugLocFromCursor(cursor));
                 return wrapRecoveredCallWithTrailingBinary(recovered, cursorText(cursor));
             }
             if (auto identifier = simpleParenthesizedIdentifier(cursorText(cursor))) {
