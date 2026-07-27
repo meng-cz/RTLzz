@@ -685,6 +685,33 @@ static bool containsAny(const std::string& text,
     return false;
 }
 
+static std::string unsupportedStlContainerName(const std::string& type) {
+    std::string normalized;
+    normalized.reserve(type.size());
+    for (unsigned char ch : type) {
+        if (!std::isspace(ch)) {
+            normalized.push_back(static_cast<char>(std::tolower(ch)));
+        }
+    }
+
+    static const std::vector<std::string> containers = {
+        "vector", "map", "unordered_map", "deque", "list", "set", "queue"
+    };
+    for (const auto& name : containers) {
+        std::string needle = name + "<";
+        std::size_t pos = normalized.find(needle);
+        while (pos != std::string::npos) {
+            bool left_boundary =
+                pos == 0 ||
+                (!std::isalnum(static_cast<unsigned char>(normalized[pos - 1])) &&
+                 normalized[pos - 1] != '_');
+            if (left_boundary) return name;
+            pos = normalized.find(needle, pos + 1);
+        }
+    }
+    return "";
+}
+
 static std::string cursorLocation(CXCursor cursor) {
     CXSourceLocation loc = clang_getCursorLocation(cursor);
     CXFile file;
@@ -2655,7 +2682,7 @@ static std::string checkSubset(CXCursor function_cursor, const std::string& curr
             unsupported("function pointer");
             return CXChildVisit_Break;
         }
-        if (containsAny(type, {"vector", "map", "unordered_map", "deque", "list", "set", "queue"})) {
+        if (auto container = unsupportedStlContainerName(type); !container.empty()) {
             unsupported("STL container " + type);
             return CXChildVisit_Break;
         }

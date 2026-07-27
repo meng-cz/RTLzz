@@ -27,6 +27,11 @@ struct Holder {
     Pair dec;
 };
 
+struct QueueSnapshot {
+    Pair pair;
+    Arr2 taps;
+};
+
 Pair make_pair_positional(Int<8> a, Int<8> b) {
     Pair p{a, b};
     return p;
@@ -126,6 +131,8 @@ Int<8> helper_array_return;
 Int<8> helper_array_return_temp_index;
 #pragma output_port lambda_struct_value
 Int<8> lambda_struct_value;
+#pragma output_port query_lambda_snapshot
+Int<8> query_lambda_snapshot;
 #pragma output_port aggregate_temp_arg
 Int<8> aggregate_temp_arg;
 #pragma output_port const_member_ref
@@ -190,6 +197,21 @@ void hls_main() {
     };
     Pair lambda_pair = pair_lambda(selected, bias);
     lambda_struct_value = lambda_pair.lo ^ lambda_pair.hi;
+
+    auto snapshot = [&]() -> QueueSnapshot {
+        QueueSnapshot snap;
+        snap.pair = lambda_pair;
+        snap.taps = make_array(selected.lo, selected.hi);
+        if (choose_hi) {
+            snap.pair.hi = snap.pair.hi + bias;
+        }
+        return snap;
+    };
+    QueueSnapshot query_snapshot = snapshot();
+    query_lambda_snapshot =
+        query_snapshot.pair.lo ^
+        query_snapshot.pair.hi ^
+        query_snapshot.taps[tap_idx];
 
     aggregate_temp_arg =
         consume_pair_temp_arg(Pair{seed + Int<8>(9), bias ^ Int<8>(0x6a)},
@@ -286,6 +308,7 @@ void hls_main() {
     final_mix =
         aggregate_pos ^
         helper_struct_return ^
+        query_lambda_snapshot ^
         aggregate_temp_arg ^
         const_member_ref ^
         nested_dynamic_read ^
