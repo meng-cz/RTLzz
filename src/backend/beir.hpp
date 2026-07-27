@@ -87,7 +87,14 @@ enum class DebugOrigin {
 
 struct DebugInfo {
     DebugOrigin origin = DebugOrigin::Generated;
+    std::optional<DebugLoc> decl_loc;
+    std::vector<DebugLoc> primary_locs;
+    std::vector<DebugLoc> related_locs;
+    std::vector<std::string> messages;
+    // Legacy flattened view kept during the staged migration.  New code should
+    // write decl_loc/primary_locs/related_locs and let helpers maintain this.
     std::vector<DebugLoc> source_locs;
+    // Legacy single message kept for old BEIR text consumers.
     std::string reason;
     std::vector<NodeId> derived_nodes;
     std::vector<std::string> derived_names;
@@ -178,10 +185,24 @@ struct Program {
 };
 
 void addDebugLoc(DebugInfo& debug, const DebugLoc& loc);
+void addPrimaryDebugLoc(DebugInfo& debug, const DebugLoc& loc);
+void addRelatedDebugLoc(DebugInfo& debug, const DebugLoc& loc);
+void setDeclDebugLoc(DebugInfo& debug, const DebugLoc& loc);
 void addDebugLocs(DebugInfo& debug, const std::vector<DebugLoc>& locs);
 void addDebugInfoLocs(DebugInfo& debug, const DebugInfo& source);
+void addDebugInfoAsRelated(DebugInfo& debug, const DebugInfo& source);
+void addDebugMessage(DebugInfo& debug, const std::string& message);
+void addDebugDerivedOperand(DebugInfo& debug, const Operand& operand);
+void addDebugDerivedOperands(DebugInfo& debug, const std::vector<Operand>& operands);
 void addOperandDebugLocs(DebugInfo& debug, const Program& program, const Operand& operand);
 void addOperandDebugLocs(DebugInfo& debug, const Program& program, const std::vector<Operand>& operands);
+void addOperandReplacementDebug(DebugInfo& debug,
+                                const Program& program,
+                                const Operand& before,
+                                const Operand& after,
+                                const std::string& message);
+std::vector<DebugLoc> flattenedDebugLocs(const DebugInfo& debug);
+std::vector<std::string> messageStack(const DebugInfo& debug);
 
 bool sameType(const ValueType& lhs, const ValueType& rhs);
 bool isCommutativeOp(OperationKind kind, OpCode op);

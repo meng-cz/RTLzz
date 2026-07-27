@@ -70,6 +70,7 @@ inline DebugInfo generatedDebug(std::string reason,
                                 const std::vector<DebugLoc>& inherited_locs = {}) {
     DebugInfo debug;
     debug.origin = DebugOrigin::Generated;
+    addDebugMessage(debug, reason);
     debug.reason = std::move(reason);
     addDebugLocs(debug, inherited_locs);
     for (const auto& operand : operands) {
@@ -142,7 +143,11 @@ inline std::vector<DebugLoc> inheritedLocs(const Operation& op) {
 }
 
 inline void finishDebug(Operation& op, const std::string& reason, const Program& program, std::vector<DebugLoc> locs) {
+    DebugInfo previous_debug = op.debug;
     op.debug = generatedDebug(reason, op.operands, &program, locs);
+    addDebugInfoLocs(op.debug, previous_debug);
+    addDebugMessage(op.debug, reason);
+    op.debug.reason = reason;
     op.source_locs = op.debug.source_locs;
 }
 
@@ -643,6 +648,28 @@ inline int literalEffectiveWidth(const Operand& operand) {
     return 1;
 }
 
+inline bool sameValueType(const ValueType& lhs, const ValueType& rhs) {
+    return lhs.width == rhs.width && lhs.array_dims == rhs.array_dims;
+}
+
+inline bool sameConstant(const Operand::Constant& lhs, const Operand::Constant& rhs) {
+    return lhs.width == rhs.width &&
+           lhs.signed_view == rhs.signed_view &&
+           lhs.limbs == rhs.limbs;
+}
+
+inline bool sameOperandForDebug(const Operand& lhs, const Operand& rhs) {
+    if (lhs.kind != rhs.kind ||
+        lhs.node != rhs.node ||
+        lhs.text != rhs.text ||
+        lhs.signed_view != rhs.signed_view ||
+        !sameValueType(lhs.type, rhs.type)) {
+        return false;
+    }
+    if (lhs.kind == OperandKind::Literal && !sameConstant(lhs.constant, rhs.constant)) return false;
+    return true;
+}
+
 inline int operandAssignedWidth(const Program& program, const Operand& operand, const std::vector<int>& assigned) {
     int declared = widthOf(operand.type);
     if (operand.kind == OperandKind::Literal) return std::min(declared, literalEffectiveWidth(operand));
@@ -923,49 +950,69 @@ inline bool rewriteNarrowedLogicalShrToSlice(Operation& op,
     return true;
 }
 
-inline void normalizeOperationOperands(Operation& op, Program& program, const std::vector<int>& assigned) {
+inline bool normalizeOperationOperands(Operation& op, Program& program, const std::vector<int>& assigned) {
     int out_width = widthOf(op.type);
     auto assigned_operand = [&](std::size_t index) {
         return index < op.operands.size() ? operandAssignedWidth(program, op.operands[index], assigned) : out_width;
+    };
+    bool changed = false;
+    auto normalize_operand = [&](std::size_t index, int width) {
+        if (index >= op.operands.size()) return;
+        Operand before = op.operands[index];
+        op.operands[index] = resizeOperandForUse(program, std::move(op.operands[index]), width);
+        if (!sameOperandForDebug(before, op.operands[index])) changed = true;
+    };
+    auto refresh_symbol_type = [&](Operand& operand) {
+        if (operand.kind != OperandKind::Symbol) return;
+        if (const Signal* signal = program.findSignal(operand.node)) {
+            ValueType before = operand.type;
+            operand.type = signal->type;
+            if (!sameValueType(before, operand.type)) changed = true;
+        }
     };
 
     if (op.kind == OperationKind::Binary && op.operands.size() >= 2) {
         if (op.op == OpCode::Add || op.op == OpCode::Sub) {
             int common = std::max(assigned_operand(0), assigned_operand(1));
-            op.operands[0] = resizeOperandForUse(program, std::move(op.operands[0]), common);
-            op.operands[1] = resizeOperandForUse(program, std::move(op.operands[1]), common);
+            normalize_operand(0, common);
+            normalize_operand(1, common);
         } else if (lowBitClosedBinary(op.op)) {
-            op.operands[0] = resizeOperandForUse(program, std::move(op.operands[0]), out_width);
-            op.operands[1] = resizeOperandForUse(program, std::move(op.operands[1]), out_width);
+            normalize_operand(0, out_width);
+            normalize_operand(1, out_width);
         } else if (op.op == OpCode::Eq || op.op == OpCode::Ne ||
                    op.op == OpCode::Lt || op.op == OpCode::Le ||
                    op.op == OpCode::Gt || op.op == OpCode::Ge) {
             int common = std::max(widthOf(op.operands[0].type), widthOf(op.operands[1].type));
-            op.operands[0] = resizeOperandForUse(program, std::move(op.operands[0]), common);
-            op.operands[1] = resizeOperandForUse(program, std::move(op.operands[1]), common);
+            normalize_operand(0, common);
+            normalize_operand(1, common);
         }
     } else if (op.kind == OperationKind::Unary &&
                (op.op == OpCode::BitNot || op.op == OpCode::Neg) &&
                !op.operands.empty()) {
-        op.operands[0] = resizeOperandForUse(program, std::move(op.operands[0]), out_width);
+        normalize_operand(0, out_width);
     } else if (op.kind == OperationKind::WriteBit && op.operands.size() >= 2) {
-        op.operands[0] = resizeOperandForUse(program, std::move(op.operands[0]), out_width);
-        op.operands[1] = resizeOperandForUse(program, std::move(op.operands[1]), 1);
+        normalize_operand(0, out_width);
+        normalize_operand(1, 1);
     } else if (op.kind == OperationKind::WriteSlice && op.operands.size() >= 2) {
-        op.operands[0] = resizeOperandForUse(program, std::move(op.operands[0]), out_width);
-        op.operands[1] = resizeOperandForUse(program, std::move(op.operands[1]), op.hi - op.lo + 1);
+        normalize_operand(0, out_width);
+        normalize_operand(1, op.hi - op.lo + 1);
     } else if ((op.kind == OperationKind::Assign ||
                 op.kind == OperationKind::Cast ||
                 op.kind == OperationKind::ZExt) &&
                !op.operands.empty()) {
-        op.operands[0] = resizeOperandForUse(program, std::move(op.operands[0]), out_width);
+        normalize_operand(0, out_width);
     } else {
         for (auto& operand : op.operands) {
-            if (operand.kind == OperandKind::Symbol) {
-                if (const Signal* signal = program.findSignal(operand.node)) operand.type = signal->type;
-            }
+            refresh_symbol_type(operand);
         }
     }
+    if (changed) {
+        finishDebug(op,
+                    "normalized operand widths by comprehensive BEIR width optimization",
+                    program,
+                    inheritedLocs(op));
+    }
+    return changed;
 }
 
 inline bool applyComprehensiveWidths(MutableProgram& graph,
@@ -1003,8 +1050,9 @@ inline bool applyComprehensiveWidths(MutableProgram& graph,
         Signal& signal = program.signals[index];
         if (!signal.driver) continue;
         std::size_t before = program.signals.size();
-        normalizeOperationOperands(*signal.driver, program, assigned);
-        if (program.signals.size() != before) changed = true;
+        bool signal_changed = normalizeOperationOperands(*signal.driver, program, assigned);
+        if (signal_changed) signal.debug = signal.driver->debug;
+        if (program.signals.size() != before || signal_changed) changed = true;
     }
 
     return changed;

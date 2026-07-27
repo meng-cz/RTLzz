@@ -14,6 +14,13 @@
 namespace pred::beir {
 
 bool DebugInfo::hasSourceLoc() const {
+    if (decl_loc && decl_loc->valid()) return true;
+    for (const auto& loc : primary_locs) {
+        if (loc.valid()) return true;
+    }
+    for (const auto& loc : related_locs) {
+        if (loc.valid()) return true;
+    }
     for (const auto& loc : source_locs) {
         if (loc.valid()) return true;
     }
@@ -30,6 +37,21 @@ static bool sameDebugLoc(const DebugLoc& lhs, const DebugLoc& rhs) {
            lhs.end_column == rhs.end_column;
 }
 
+static bool addUniqueLoc(std::vector<DebugLoc>& locs,
+                         const DebugLoc& loc,
+                         std::size_t limit) {
+    if (!loc.valid() || locs.size() >= limit) return false;
+    for (const auto& existing : locs) {
+        if (sameDebugLoc(existing, loc)) return false;
+    }
+    locs.push_back(loc);
+    return true;
+}
+
+static void addLegacyLoc(DebugInfo& debug, const DebugLoc& loc) {
+    addUniqueLoc(debug.source_locs, loc, 32);
+}
+
 static bool splitVersionedName(const std::string& name, std::string& base) {
     std::size_t pos = name.rfind('_');
     if (pos == std::string::npos || pos + 1 >= name.size()) return false;
@@ -43,12 +65,23 @@ static bool splitVersionedName(const std::string& name, std::string& base) {
 } // namespace
 
 void addDebugLoc(DebugInfo& debug, const DebugLoc& loc) {
-    constexpr std::size_t kMaxSourceLocsPerDebugInfo = 32;
-    if (!loc.valid() || debug.source_locs.size() >= kMaxSourceLocsPerDebugInfo) return;
-    for (const auto& existing : debug.source_locs) {
-        if (sameDebugLoc(existing, loc)) return;
+    addPrimaryDebugLoc(debug, loc);
+}
+
+void addPrimaryDebugLoc(DebugInfo& debug, const DebugLoc& loc) {
+    if (addUniqueLoc(debug.primary_locs, loc, 4)) addLegacyLoc(debug, loc);
+}
+
+void addRelatedDebugLoc(DebugInfo& debug, const DebugLoc& loc) {
+    if (addUniqueLoc(debug.related_locs, loc, 12)) addLegacyLoc(debug, loc);
+}
+
+void setDeclDebugLoc(DebugInfo& debug, const DebugLoc& loc) {
+    if (!loc.valid()) return;
+    if (!debug.decl_loc || !debug.decl_loc->valid()) {
+        debug.decl_loc = loc;
     }
-    debug.source_locs.push_back(loc);
+    addLegacyLoc(debug, loc);
 }
 
 void addDebugLocs(DebugInfo& debug, const std::vector<DebugLoc>& locs) {
@@ -56,26 +89,70 @@ void addDebugLocs(DebugInfo& debug, const std::vector<DebugLoc>& locs) {
 }
 
 void addDebugInfoLocs(DebugInfo& debug, const DebugInfo& source) {
-    addDebugLocs(debug, source.source_locs);
+    if (source.decl_loc) setDeclDebugLoc(debug, *source.decl_loc);
+    for (const auto& loc : source.primary_locs) addPrimaryDebugLoc(debug, loc);
+    for (const auto& loc : source.related_locs) addRelatedDebugLoc(debug, loc);
+    if (source.primary_locs.empty() && source.related_locs.empty() && !source.decl_loc) {
+        addDebugLocs(debug, source.source_locs);
+    }
+    for (const auto& message : messageStack(source)) addDebugMessage(debug, message);
+}
+
+void addDebugInfoAsRelated(DebugInfo& debug, const DebugInfo& source) {
+    if (source.decl_loc) addRelatedDebugLoc(debug, *source.decl_loc);
+    for (const auto& loc : source.primary_locs) addRelatedDebugLoc(debug, loc);
+    for (const auto& loc : source.related_locs) addRelatedDebugLoc(debug, loc);
+    if (source.primary_locs.empty() && source.related_locs.empty() && !source.decl_loc) {
+        for (const auto& loc : source.source_locs) addRelatedDebugLoc(debug, loc);
+    }
+    for (const auto& message : messageStack(source)) addDebugMessage(debug, message);
+}
+
+void addDebugMessage(DebugInfo& debug, const std::string& message) {
+    if (message.empty() || debug.messages.size() >= 64) return;
+    for (const auto& existing : debug.messages) {
+        if (existing == message) return;
+    }
+    debug.messages.push_back(message);
+    if (debug.reason.empty()) debug.reason = message;
+}
+
+void addDebugDerivedOperand(DebugInfo& debug, const Operand& operand) {
+    if (operand.kind == OperandKind::Symbol && operand.node != kInvalidNodeId) {
+        for (NodeId existing : debug.derived_nodes) {
+            if (existing == operand.node) return;
+        }
+        debug.derived_nodes.push_back(operand.node);
+        return;
+    }
+    if (operand.text.empty()) return;
+    for (const auto& existing : debug.derived_names) {
+        if (existing == operand.text) return;
+    }
+    debug.derived_names.push_back(operand.text);
+}
+
+void addDebugDerivedOperands(DebugInfo& debug, const std::vector<Operand>& operands) {
+    for (const auto& operand : operands) addDebugDerivedOperand(debug, operand);
 }
 
 void addOperandDebugLocs(DebugInfo& debug, const Program& program, const Operand& operand) {
     if (operand.kind != OperandKind::Symbol || operand.node == kInvalidNodeId) return;
     const Signal* signal = program.findSignal(operand.node);
     if (!signal) return;
-    addDebugInfoLocs(debug, signal->debug);
+    addDebugInfoAsRelated(debug, signal->debug);
     if (signal->driver) {
-        addDebugInfoLocs(debug, signal->driver->debug);
-        addDebugLocs(debug, signal->driver->source_locs);
+        addDebugInfoAsRelated(debug, signal->driver->debug);
+        for (const auto& loc : signal->driver->source_locs) addRelatedDebugLoc(debug, loc);
     }
     std::string base_name;
     if (splitVersionedName(signal->name, base_name)) {
         for (const auto& candidate : program.signals) {
             if (candidate.name != base_name) continue;
-            addDebugInfoLocs(debug, candidate.debug);
+            addDebugInfoAsRelated(debug, candidate.debug);
             if (candidate.driver) {
-                addDebugInfoLocs(debug, candidate.driver->debug);
-                addDebugLocs(debug, candidate.driver->source_locs);
+                addDebugInfoAsRelated(debug, candidate.driver->debug);
+                for (const auto& loc : candidate.driver->source_locs) addRelatedDebugLoc(debug, loc);
             }
             break;
         }
@@ -84,6 +161,47 @@ void addOperandDebugLocs(DebugInfo& debug, const Program& program, const Operand
 
 void addOperandDebugLocs(DebugInfo& debug, const Program& program, const std::vector<Operand>& operands) {
     for (const auto& operand : operands) addOperandDebugLocs(debug, program, operand);
+}
+
+void addOperandReplacementDebug(DebugInfo& debug,
+                                const Program& program,
+                                const Operand& before,
+                                const Operand& after,
+                                const std::string& message) {
+    debug.origin = DebugOrigin::Generated;
+    addDebugMessage(debug, message);
+    debug.reason = message;
+    addDebugDerivedOperand(debug, before);
+    addDebugDerivedOperand(debug, after);
+    addOperandDebugLocs(debug, program, before);
+    addOperandDebugLocs(debug, program, after);
+}
+
+std::vector<DebugLoc> flattenedDebugLocs(const DebugInfo& debug) {
+    std::vector<DebugLoc> out;
+    auto add = [&](const DebugLoc& loc) {
+        addUniqueLoc(out, loc, 32);
+    };
+    for (const auto& loc : debug.primary_locs) add(loc);
+    if (debug.decl_loc) add(*debug.decl_loc);
+    for (const auto& loc : debug.related_locs) add(loc);
+    for (const auto& loc : debug.source_locs) add(loc);
+    return out;
+}
+
+std::vector<std::string> messageStack(const DebugInfo& debug) {
+    std::vector<std::string> out = debug.messages;
+    if (!debug.reason.empty()) {
+        bool seen = false;
+        for (const auto& message : out) {
+            if (message == debug.reason) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) out.push_back(debug.reason);
+    }
+    return out;
 }
 
 bool Operand::Constant::isZero() const {
@@ -801,12 +919,24 @@ bool MutableProgram::replaceAliases(const std::unordered_map<NodeId, Operand>& a
     bool changed = false;
     for (auto& signal : program_.signals) {
         if (!signal.driver) continue;
+        bool signal_changed = false;
         for (auto& operand : signal.driver->operands) {
             Operand resolved = resolveOperand(operand, aliases);
             if (!(operandSignature(resolved) == operandSignature(operand))) {
+                Operand before = operand;
+                addOperandReplacementDebug(signal.driver->debug,
+                                           program_,
+                                           before,
+                                           resolved,
+                                           "replaced aliased BEIR operand");
                 operand = std::move(resolved);
+                signal_changed = true;
                 changed = true;
             }
+        }
+        if (signal_changed) {
+            signal.driver->source_locs = signal.driver->debug.source_locs;
+            signal.debug = signal.driver->debug;
         }
     }
     if (changed) markValueFactsDirty();
@@ -926,9 +1056,46 @@ static void emitLocs(std::ostream& os, const std::vector<DebugLoc>& locs) {
     os << "]";
 }
 
+static void emitOneLoc(std::ostream& os, const DebugLoc& loc) {
+    os << loc.file << ":" << loc.line << ":" << loc.column;
+    if (loc.end_line || loc.end_column) {
+        os << "-" << loc.end_line << ":" << loc.end_column;
+    }
+}
+
+static void emitNamedLocs(std::ostream& os,
+                          const char* name,
+                          const std::vector<DebugLoc>& locs) {
+    if (locs.empty()) return;
+    os << " " << name << "=[";
+    bool any = false;
+    for (const auto& loc : locs) {
+        if (!loc.valid()) continue;
+        if (any) os << ", ";
+        emitOneLoc(os, loc);
+        any = true;
+    }
+    os << "]";
+}
+
 static void emitDebugInfo(std::ostream& os, const DebugInfo& debug) {
     os << " debug_origin=" << debugOriginText(debug.origin);
+    if (debug.decl_loc && debug.decl_loc->valid()) {
+        os << " debug_decl=";
+        emitOneLoc(os, *debug.decl_loc);
+    }
+    emitNamedLocs(os, "debug_primary", debug.primary_locs);
+    emitNamedLocs(os, "debug_related", debug.related_locs);
     if (!debug.reason.empty()) os << " debug_reason=\"" << debug.reason << "\"";
+    const auto messages = messageStack(debug);
+    if (!messages.empty()) {
+        os << " debug_messages=[";
+        for (std::size_t i = 0; i < messages.size(); ++i) {
+            if (i) os << ", ";
+            os << "\"" << messages[i] << "\"";
+        }
+        os << "]";
+    }
     if (!debug.derived_nodes.empty()) {
         os << " derived_nodes=[";
         for (std::size_t i = 0; i < debug.derived_nodes.size(); ++i) {

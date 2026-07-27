@@ -130,15 +130,17 @@ LValue operandAsWritableLValue(const Operand& operand, const ParamDecl& param) {
 S3StmtPtr makeDecl(const SymbolInfo& symbol) {
     auto stmt = std::make_shared<S3Stmt>();
     stmt->kind = S3StmtKind::Decl;
+    stmt->debug_loc = symbol.debug_loc;
     stmt->decl_name = symbol.name;
     stmt->decl_symbol = symbol.id;
     stmt->decl_type = symbol.type;
     return stmt;
 }
 
-S3StmtPtr makeAssign(LValue target, Operand value) {
+S3StmtPtr makeAssign(LValue target, Operand value, DebugLoc loc = {}) {
     auto stmt = std::make_shared<S3Stmt>();
     stmt->kind = S3StmtKind::Assign;
+    stmt->debug_loc = std::move(loc);
     stmt->target = std::move(target);
     stmt->value = std::move(value);
     return stmt;
@@ -149,6 +151,7 @@ LValue symbolLValue(const SymbolInfo& symbol) {
     out.root = symbol.name;
     out.root_symbol = symbol.id;
     out.type = symbol.type;
+    out.debug_loc = symbol.debug_loc;
     return out;
 }
 
@@ -685,7 +688,9 @@ private:
             Operand value = varOperand(symbolInfo(caller, found->second.symbol));
             writeback->stmts.push_back(CFGStmt{
                 CFGStmtKind::Assign,
-                makeAssign(remapLValue(caller, call_stmt.call_result.value(), {}), value)});
+                makeAssign(remapLValue(caller, call_stmt.call_result.value(), {}),
+                           value,
+                           call_stmt.debug_loc)});
             setJump(*writeback, continuation->id);
         } else if (call_stmt.call_result && isVoidType(callee.return_type)) {
             fail("Void callee '" + callee.name + "' cannot produce a call result",
@@ -747,7 +752,10 @@ private:
             binding.stmts.push_back(CFGStmt{CFGStmtKind::Decl, makeDecl(cloned)});
             binding.stmts.push_back(CFGStmt{
                 CFGStmtKind::Assign,
-                makeAssign(symbolLValue(cloned), cloneOperand(call_stmt.args[i]))});
+                makeAssign(symbolLValue(cloned), cloneOperand(call_stmt.args[i]),
+                           call_stmt.args[i].debug_loc.valid()
+                               ? call_stmt.args[i].debug_loc
+                               : call_stmt.debug_loc)});
         }
     }
 

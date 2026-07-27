@@ -192,9 +192,135 @@ public:
         return os.str();
     }
 
+    std::string emitDebugReport() {
+        std::ostringstream os;
+        os << "rtlzz rtl debug report\n";
+        os << "function " << program_.function_name << "\n";
+        os << "signals\n";
+        for (const auto& entry : collectDebugSignals("")) emitDebugSignal(os, entry);
+        return os.str();
+    }
+
+    std::string emitDebugReport(const std::string& rtl_text) {
+        std::ostringstream os;
+        os << "rtlzz rtl debug report\n";
+        os << "function " << program_.function_name << "\n";
+        os << "signals\n";
+        for (const auto& entry : collectDebugSignals(rtl_text)) emitDebugSignal(os, entry);
+        return os.str();
+    }
+
+    std::vector<RtlDebugSignal> collectDebugSignals(const std::string& rtl_text) {
+        std::vector<std::string> lines = splitLines(rtl_text);
+        std::vector<RtlDebugSignal> out;
+        out.reserve(program_.signals.size());
+        for (const auto& signal : program_.signals) {
+            beir::DebugInfo debug = signalDebug(signal);
+            RtlDebugSignal entry;
+            entry.id = signal.id;
+            entry.signal_name = sanitizeIdentifier(signal.name);
+            entry.rtl_line = findSignalLine(lines, entry.signal_name);
+            entry.port_name = signal.port_name;
+            entry.port_element_index = signal.port_element_index;
+            entry.type = signal.type;
+            entry.decl_loc = debug.decl_loc;
+            entry.primary_locs = debug.primary_locs;
+            entry.related_locs = debug.related_locs;
+            entry.messages = beir::messageStack(debug);
+            for (NodeId id : debug.derived_nodes) {
+                RtlDebugDerivedNode node;
+                node.id = id;
+                if (const auto* source = program_.findSignal(id)) {
+                    node.name = sanitizeIdentifier(source->name);
+                }
+                entry.derived_nodes.push_back(std::move(node));
+            }
+            entry.derived_names = debug.derived_names;
+            out.push_back(std::move(entry));
+        }
+        return out;
+    }
+
 private:
     const beir::Program& program_;
     std::unordered_map<std::string, NodeId> name_to_node_;
+
+    std::vector<std::string> splitLines(const std::string& text) const {
+        std::vector<std::string> lines;
+        std::size_t begin = 0;
+        while (begin < text.size()) {
+            std::size_t end = text.find('\n', begin);
+            if (end == std::string::npos) {
+                lines.push_back(text.substr(begin));
+                break;
+            }
+            lines.push_back(text.substr(begin, end - begin));
+            begin = end + 1;
+        }
+        return lines;
+    }
+
+    bool tokenAt(const std::string& line, const std::string& token, std::size_t pos) const {
+        auto is_ident = [](char ch) {
+            unsigned char c = static_cast<unsigned char>(ch);
+            return std::isalnum(c) || ch == '_';
+        };
+        if (pos > 0 && is_ident(line[pos - 1])) return false;
+        std::size_t end = pos + token.size();
+        if (end < line.size() && is_ident(line[end])) return false;
+        return true;
+    }
+
+    int findSignalLine(const std::vector<std::string>& lines, const std::string& name) const {
+        if (lines.empty() || name.empty()) return 0;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            std::size_t pos = lines[i].find(name);
+            while (pos != std::string::npos) {
+                if (tokenAt(lines[i], name, pos)) return static_cast<int>(i + 1);
+                pos = lines[i].find(name, pos + name.size());
+            }
+        }
+        return 0;
+    }
+
+    void emitDebugSignal(std::ostream& os, const RtlDebugSignal& entry) const {
+        os << "- #" << entry.id << " " << entry.signal_name
+           << " : " << logicType(entry.type) << unpackedDims(entry.type) << "\n";
+        os << "  rtl_line: " << entry.rtl_line << "\n";
+        if (!entry.port_name.empty()) {
+            os << "  port: " << entry.port_name;
+            if (entry.port_element_index >= 0) os << "[" << entry.port_element_index << "]";
+            os << "\n";
+        }
+        os << "  decl:\n";
+        if (entry.decl_loc && entry.decl_loc->valid()) {
+            os << "    - " << locText(*entry.decl_loc) << "\n";
+        } else {
+            os << "    - <none>\n";
+        }
+        os << "  primary:\n";
+        emitLocVector(os, entry.primary_locs);
+        os << "  related:\n";
+        emitLocVector(os, entry.related_locs);
+        os << "  messages:\n";
+        if (entry.messages.empty()) {
+            os << "    - <none>\n";
+        } else {
+            for (const auto& message : entry.messages) os << "    - " << message << "\n";
+        }
+        if (!entry.derived_nodes.empty()) {
+            os << "  derived_nodes:\n";
+            for (const auto& node : entry.derived_nodes) {
+                os << "    - #" << node.id;
+                if (!node.name.empty()) os << " " << node.name;
+                os << "\n";
+            }
+        }
+        if (!entry.derived_names.empty()) {
+            os << "  derived_names:\n";
+            for (const auto& name : entry.derived_names) os << "    - " << name << "\n";
+        }
+    }
 
     std::string sig(NodeId id) const {
         return sanitizeIdentifier(program_.signal(id).name);
@@ -204,36 +330,41 @@ private:
         return !signal.port_name.empty() && signal.name == signal.port_name;
     }
 
+    std::string locText(const DebugLoc& loc) const {
+        if (!loc.valid()) return "<none>";
+        std::ostringstream os;
+        os << loc.file << ":" << loc.line << ":" << loc.column;
+        if (loc.end_line || loc.end_column) {
+            os << "-" << loc.end_line << ":" << loc.end_column;
+        }
+        return os.str();
+    }
+
+    const DebugLoc* lastPrimary(const beir::DebugInfo& debug) const {
+        for (auto it = debug.primary_locs.rbegin(); it != debug.primary_locs.rend(); ++it) {
+            if (it->valid()) return &*it;
+        }
+        return nullptr;
+    }
+
+    void emitLocVector(std::ostream& os, const std::vector<DebugLoc>& locs) const {
+        bool any = false;
+        for (const auto& loc : locs) {
+            if (!loc.valid()) continue;
+            os << "    - " << locText(loc) << "\n";
+            any = true;
+        }
+        if (!any) os << "    - <none>\n";
+    }
+
     std::string debugComment(const beir::DebugInfo& debug) const {
         std::ostringstream os;
-        os << " // loc: ";
-        emitLocList(os, debug.source_locs);
-        os << "; message: ";
-
-        if (debug.origin == beir::DebugOrigin::Source) {
-            os << (debug.reason.empty() ? "direct source construct" : debug.reason);
-            return os.str();
-        }
-
-        os << (debug.reason.empty() ? "intermediate generated value" : debug.reason);
-        if (!debug.derived_nodes.empty()) {
-            os << "; from signals ";
-            for (std::size_t i = 0; i < debug.derived_nodes.size(); ++i) {
-                if (i) os << ", ";
-                NodeId id = debug.derived_nodes[i];
-                os << "#" << id;
-                if (const auto* signal = program_.findSignal(id)) {
-                    os << ":" << sanitizeIdentifier(signal->name);
-                }
-            }
-        }
-        if (!debug.derived_names.empty()) {
-            os << "; from names ";
-            for (std::size_t i = 0; i < debug.derived_names.size(); ++i) {
-                if (i) os << ", ";
-                os << debug.derived_names[i];
-            }
-        }
+        os << " // decl: ";
+        if (debug.decl_loc && debug.decl_loc->valid()) os << locText(*debug.decl_loc);
+        else os << "<none>";
+        os << "; prim: ";
+        if (const DebugLoc* primary = lastPrimary(debug)) os << locText(*primary);
+        else os << "<none>";
         return os.str();
     }
 
@@ -249,19 +380,16 @@ private:
             if (it != name_to_node_.end()) {
                 const auto& base_signal = program_.signal(it->second);
                 beir::DebugInfo debug = signal.debug;
-                debug.source_locs.insert(debug.source_locs.end(),
-                                         base_signal.debug.source_locs.begin(),
-                                         base_signal.debug.source_locs.end());
+                beir::addDebugInfoLocs(debug, base_signal.debug);
                 if (base_signal.driver) {
-                    debug.source_locs.insert(debug.source_locs.end(),
-                                             base_signal.driver->debug.source_locs.begin(),
-                                             base_signal.driver->debug.source_locs.end());
+                    beir::addDebugInfoLocs(debug, base_signal.driver->debug);
                 }
                 if (debug.hasSourceLoc()) return debug;
             }
         }
         beir::DebugInfo debug;
         debug.origin = beir::DebugOrigin::Generated;
+        beir::addDebugMessage(debug, "signal allocated without source location");
         debug.reason = "signal allocated without source location";
         return debug;
     }
@@ -269,16 +397,16 @@ private:
     beir::DebugInfo portDebug(const beir::Port& port) const {
         beir::DebugInfo debug;
         debug.origin = beir::DebugOrigin::Source;
+        beir::addDebugMessage(debug, "module port from source parameter '" + port.name + "'");
         debug.reason = "module port from source parameter '" + port.name + "'";
         for (NodeId id : port.element_nodes) {
             const auto& signal = program_.signal(id);
-            if (!signal.driver) continue;
-            debug.source_locs.insert(debug.source_locs.end(),
-                                     signal.driver->debug.source_locs.begin(),
-                                     signal.driver->debug.source_locs.end());
+            beir::addDebugInfoLocs(debug, signal.debug);
+            if (signal.driver) beir::addDebugInfoLocs(debug, signal.driver->debug);
         }
         if (!debug.hasSourceLoc()) {
             debug.origin = beir::DebugOrigin::Generated;
+            beir::addDebugMessage(debug, "module port generated from BEIR port '" + port.name + "'");
             debug.reason = "module port generated from BEIR port '" + port.name + "'";
         }
         return debug;
@@ -402,6 +530,7 @@ private:
             if (!isDirectPortSignal(signal) && !signal.type.isArray()) {
                 beir::DebugInfo debug;
                 debug.origin = beir::DebugOrigin::Generated;
+                beir::addDebugMessage(debug, "default zero for undriven intermediate signal '" + signal.name + "'");
                 debug.reason = "default zero for undriven intermediate signal '" + signal.name + "'";
                 os << "    assign " << sig(signal.id) << " = " << zeroFor(signal.type) << ";"
                    << debugComment(debug) << "\n";
@@ -709,6 +838,16 @@ private:
 
 std::string emitSystemVerilog(const beir::Program& program) {
     return Emitter(program).emit();
+}
+
+std::vector<RtlDebugSignal> collectDebugSignals(const beir::Program& program,
+                                                const std::string& rtl_text) {
+    return Emitter(program).collectDebugSignals(rtl_text);
+}
+
+std::string emitDebugReport(const beir::Program& program,
+                            const std::string& rtl_text) {
+    return Emitter(program).emitDebugReport(rtl_text);
 }
 
 } // namespace pred::rtlgen

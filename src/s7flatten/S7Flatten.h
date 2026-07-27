@@ -26,6 +26,7 @@ struct S7Symbol {
     SymbolId id = -1;
     TypeInfo type;
     std::string debug_name;
+    DebugLoc debug_loc;
     S7SymbolRole role = S7SymbolRole::Local;
 };
 

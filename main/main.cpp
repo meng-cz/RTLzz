@@ -13,8 +13,10 @@ static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <source.cpp> --top <function_name> [--format beir|rtl|portmeta]"
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
-              << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]\n";
+              << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]"
+              << " [--rtl-debug-file FILE] [--no-rtl-debug]\n";
     std::cerr << "Default format is rtl. portmeta emits the V2 port metadata used by RTL differential tests.\n";
+    std::cerr << "For rtl output, a debug report is emitted by default to <rtl-output>.dgb.\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -92,6 +94,34 @@ static bool parseUnrollLimit(const std::string& text, int& value, std::string& e
     return true;
 }
 
+static bool writeLinesToFile(const std::string& output_file,
+                             const std::vector<std::string>& lines,
+                             std::string& error) {
+    std::filesystem::path out_path(output_file);
+    if (out_path.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(out_path.parent_path(), ec);
+        if (ec) {
+            error = "Cannot create output directory: " +
+                    out_path.parent_path().string() + ": " + ec.message();
+            return false;
+        }
+    }
+    std::ofstream ofs(output_file);
+    if (!ofs) {
+        error = "Cannot open output file: " + output_file;
+        return false;
+    }
+    for (const auto& line : lines) ofs << line;
+    return true;
+}
+
+static std::string defaultRtlDebugFile(const std::string& source_file,
+                                       const std::string& output_file) {
+    if (!output_file.empty()) return output_file + ".dgb";
+    return source_file + ".rtl.dgb";
+}
+
 static int runMain(int argc, char* argv[]) {
     if (argc < 4) {
         printUsage(argv[0]);
@@ -102,8 +132,10 @@ static int runMain(int argc, char* argv[]) {
     std::string top_function;
     std::string format = "rtl";
     std::string output_file;
+    std::string rtl_debug_file;
     std::string vullib_dir;
     int unroll_limit = 1024;
+    bool emit_rtl_debug = true;
     std::vector<std::string> clang_args;
     std::vector<std::string> beopt_args;
 
@@ -124,6 +156,11 @@ static int runMain(int argc, char* argv[]) {
             vullib_dir = argv[++i];
         } else if (arg == "-o" && i + 1 < argc) {
             output_file = argv[++i];
+        } else if (arg == "--rtl-debug-file" && i + 1 < argc) {
+            rtl_debug_file = argv[++i];
+            emit_rtl_debug = true;
+        } else if (arg == "--no-rtl-debug") {
+            emit_rtl_debug = false;
         } else if (arg == "--unroll-limit" && i + 1 < argc) {
             std::string error;
             std::string value = argv[++i];
@@ -173,6 +210,9 @@ static int runMain(int argc, char* argv[]) {
     options.clang_args = std::move(clang_args);
     options.beopt_args = std::move(beopt_args);
     options.vullib_dir = vullib_dir;
+    if (format == "rtl" && emit_rtl_debug) {
+        options.rtl_debug = rtlzz::RtlDebugMode::Text;
+    }
 
     rtlzz::CompileResult result;
     if (format == "portmeta") {
@@ -207,6 +247,17 @@ static int runMain(int argc, char* argv[]) {
             return 1;
         }
         for (const auto& line : result.output_codelines) ofs << line;
+    }
+
+    if (format == "rtl" && emit_rtl_debug && !result.debug_codelines.empty()) {
+        std::string debug_path = rtl_debug_file.empty()
+            ? defaultRtlDebugFile(source_file, output_file)
+            : rtl_debug_file;
+        std::string write_error;
+        if (!writeLinesToFile(debug_path, result.debug_codelines, write_error)) {
+            std::cerr << write_error << "\n";
+            return 1;
+        }
     }
 
     return 0;

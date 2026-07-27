@@ -35,6 +35,7 @@ struct S9Value {
     S9Type type;
     S9ValueKind kind = S9ValueKind::Statement;
     std::string debug_name;
+    DebugLoc debug_loc;
     BlockId def_block = -1;
 };
 
@@ -124,6 +125,7 @@ struct S9Symbol {
     SymbolId id = -1;
     S9Type type;
     std::string debug_name;
+    DebugLoc debug_loc;
     S9SymbolRole role = S9SymbolRole::Local;
 };
 

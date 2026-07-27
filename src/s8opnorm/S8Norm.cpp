@@ -324,7 +324,7 @@ S8Operand varOperand(const S8NormCFG& fn,
     return out;
 }
 
-SymbolId createTemp(Context& ctx, S8Type type, const std::string& hint) {
+SymbolId createTemp(Context& ctx, S8Type type, const std::string& hint, DebugLoc loc = {}) {
     if (static_cast<int>(ctx.output.symbols.size() + 1) > ctx.options.max_symbols) {
         fail("S8 symbol limit exceeded while creating temporary");
     }
@@ -332,6 +332,7 @@ SymbolId createTemp(Context& ctx, S8Type type, const std::string& hint) {
     symbol.id = static_cast<SymbolId>(ctx.output.symbols.size());
     symbol.type = type;
     symbol.debug_name = "__s8_norm_" + hint + "_" + std::to_string(ctx.temp_counter++);
+    symbol.debug_loc = std::move(loc);
     symbol.role = S8SymbolRole::Temp;
     ctx.output.symbols.push_back(symbol);
     return symbol.id;
@@ -401,7 +402,7 @@ Value castTo(Context& ctx,
         return Value{std::move(value)};
     }
 
-    SymbolId target = target_symbol.value_or(createTemp(ctx, target_type, "cast"));
+    SymbolId target = target_symbol.value_or(createTemp(ctx, target_type, "cast", loc));
     S8Operation op;
     op.debug_loc = loc;
     op.result_width = target_type.width;
@@ -431,7 +432,7 @@ Value materializeOp(Context& ctx,
                     std::vector<S8Stmt>& out,
                     DebugLoc loc,
                     const std::string& hint) {
-    SymbolId temp = createTemp(ctx, result_type, hint);
+    SymbolId temp = createTemp(ctx, result_type, hint, loc);
     S8Operation op;
     op.kind = kind;
     op.debug_loc = loc;
@@ -1305,6 +1306,7 @@ S8NormCFG normalizeFunction(const FlattenedCFG& fn, const NormOptions& options,
         out.id = symbol.id;
         out.type = normType(symbol.type);
         out.debug_name = symbol.debug_name;
+        out.debug_loc = symbol.debug_loc;
         out.role = convertRole(symbol.role);
         if (out.id != static_cast<SymbolId>(ctx.output.symbols.size())) {
             fail("S7 symbols must be dense before S8 operation normalize");

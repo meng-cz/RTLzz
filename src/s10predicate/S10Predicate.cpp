@@ -350,6 +350,7 @@ struct Context {
 S10ValueId addValue(Context& ctx,
                     S10Type type,
                     std::string debug_name,
+                    DebugLoc loc,
                     BlockId source_block,
                     S10ValueKind kind = S10ValueKind::Generated) {
     if (static_cast<int>(ctx.output.values.size() + 1) > ctx.options.max_values) {
@@ -362,6 +363,7 @@ S10ValueId addValue(Context& ctx,
     value.type = type;
     value.kind = kind;
     value.debug_name = std::move(debug_name);
+    value.debug_loc = std::move(loc);
     value.source_block = source_block;
     ctx.output.values.push_back(std::move(value));
     return static_cast<S10ValueId>(ctx.output.values.size() - 1);
@@ -417,6 +419,7 @@ S10Operand emitOp(Context& ctx,
                   const std::string& note = {}) {
     S10ValueId value = addValue(ctx, type,
                                 "__s10_" + hint + "_" + std::to_string(ctx.generated_counter++),
+                                loc,
                                 block);
     ctx.output.definitions.push_back(makeOp(value, kind, type, std::move(operands),
                                             std::move(guard), loc, block, note));
@@ -655,6 +658,7 @@ void lowerPhi(Context& ctx,
             ? phi.result
             : addValue(ctx, result.type,
                        "__s10_phi_mux_" + std::to_string(ctx.generated_counter++),
+                       phi.debug_loc,
                        block_id);
         S10Operand next_suffix_guard = mux_guard;
         ctx.output.definitions.push_back(makeOp(target, S10OpKind::Mux, result.type,
@@ -732,6 +736,7 @@ S10PredicateProgram lowerFunction(const S9SSACFG& fn,
         out.id = symbol.id;
         out.type = symbol.type;
         out.debug_name = symbol.debug_name;
+        out.debug_loc = symbol.debug_loc;
         out.role = symbol.role;
         ctx.output.base_symbols.push_back(std::move(out));
     }
@@ -743,6 +748,7 @@ S10PredicateProgram lowerFunction(const S9SSACFG& fn,
         out.type = value.type;
         out.kind = convertKind(value.kind);
         out.debug_name = value.debug_name;
+        out.debug_loc = value.debug_loc;
         out.source_block = value.def_block;
         if (out.id != static_cast<S10ValueId>(ctx.output.values.size())) {
             fail("S9 values must be dense before S10 predicate lowering");

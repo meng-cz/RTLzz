@@ -37,6 +37,7 @@ struct S8Symbol {
     SymbolId id = -1;
     S8Type type;
     std::string debug_name;
+    DebugLoc debug_loc;
     S8SymbolRole role = S8SymbolRole::Local;
 };
 

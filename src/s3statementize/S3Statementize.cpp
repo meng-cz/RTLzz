@@ -134,6 +134,7 @@ ScopeId createScope(LowerContext& ctx,
 SymbolId createSymbol(LowerContext& ctx,
                       const std::string& name,
                       TypeInfo type,
+                      DebugLoc loc = {},
                       bool is_param = false,
                       bool is_temp = false) {
     if (ctx.scope_stack.empty()) {
@@ -145,6 +146,7 @@ SymbolId createSymbol(LowerContext& ctx,
     symbol.id = static_cast<SymbolId>(ctx.symbols.size());
     symbol.name = name;
     symbol.type = storageType(std::move(type));
+    symbol.debug_loc = std::move(loc);
     symbol.declaring_scope = currentScope(ctx);
     symbol.is_param = is_param;
     symbol.is_temp = is_temp;
@@ -489,7 +491,7 @@ public:
             ctx_.bindings.emplace_back();
         }
         for (const auto& param : fn.params) {
-            createSymbol(ctx_, param.name, param.type, true, false);
+            createSymbol(ctx_, param.name, param.type, param.debug_loc, true, false);
         }
         out.body = lowerStmtList(fn.body);
         finalizeSymbolScopes();
@@ -510,7 +512,7 @@ public:
             ctx_.bindings.emplace_back();
         }
         for (const auto& param : fn.params) {
-            createSymbol(ctx_, param.name, param.type, true, false);
+            createSymbol(ctx_, param.name, param.type, param.debug_loc, true, false);
         }
         out.body = lowerStmtList(fn.body);
         finalizeSymbolScopes();
@@ -546,7 +548,7 @@ private:
                              type.width <= 0 && type.struct_name.empty()
             ? unknownType()
             : type;
-        SymbolId symbol = createSymbol(ctx_, name, temp_type, false, true);
+        SymbolId symbol = createSymbol(ctx_, name, temp_type, loc, false, true);
         out.push_back(makeDecl(name, symbol, temp_type, loc));
         return varLValue(name, symbol, temp_type, loc);
     }
@@ -1599,7 +1601,8 @@ private:
         std::vector<S3StmtPtr> out;
         switch (stmt->kind) {
         case StmtKind::Decl: {
-            SymbolId decl_symbol = createSymbol(ctx_, stmt->decl_name, stmt->decl_type);
+            SymbolId decl_symbol = createSymbol(ctx_, stmt->decl_name, stmt->decl_type,
+                                                stmt->debug_loc);
             out.push_back(makeDecl(stmt->decl_name, decl_symbol,
                                    stmt->decl_type, stmt->debug_loc));
             ctx_.used_names.insert(stmt->decl_name);
@@ -1859,7 +1862,8 @@ private:
         std::vector<S3StmtPtr> out;
         switch (stmt->kind) {
         case s1apinorm::S1StmtKind::Decl: {
-            SymbolId decl_symbol = createSymbol(ctx_, stmt->decl_name, stmt->decl_type);
+            SymbolId decl_symbol = createSymbol(ctx_, stmt->decl_name, stmt->decl_type,
+                                                stmt->debug_loc);
             out.push_back(makeDecl(stmt->decl_name, decl_symbol,
                                    stmt->decl_type, stmt->debug_loc));
             ctx_.used_names.insert(stmt->decl_name);

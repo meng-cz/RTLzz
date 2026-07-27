@@ -35,6 +35,7 @@ struct S10Value {
     S10Type type;
     S10ValueKind kind = S10ValueKind::Statement;
     std::string debug_name;
+    DebugLoc debug_loc;
     BlockId source_block = -1;
 };
 
@@ -94,6 +95,7 @@ struct S10Symbol {
     SymbolId id = -1;
     S10Type type;
     std::string debug_name;
+    DebugLoc debug_loc;
     S10SymbolRole role = S10SymbolRole::Local;
 };
 

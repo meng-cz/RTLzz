@@ -2,13 +2,53 @@
 
 #include "pipelinev2/PipelineV2.h"
 
+#include <cstdint>
 #include <exception>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace rtlzz {
+
+enum class RtlDebugMode {
+    None,
+    Structured,
+    Text,
+};
+
+struct SourceLoc {
+    std::string file;
+    int line = 0;
+    int column = 0;
+    int end_line = 0;
+    int end_column = 0;
+
+    bool valid() const {
+        return !file.empty() || line > 0 || column > 0 ||
+               end_line > 0 || end_column > 0;
+    }
+};
+
+struct RtlDerivedSignalDebugInfo {
+    std::uint64_t node_id = 0;
+    std::string signal_name;
+};
+
+struct RtlSignalDebugInfo {
+    std::uint64_t node_id = 0;
+    std::string signal_name;
+    int rtl_line = 0;
+    std::string port_name;
+    int port_element_index = -1;
+    std::optional<SourceLoc> decl_loc;
+    std::vector<SourceLoc> primary_locs;
+    std::vector<SourceLoc> related_locs;
+    std::vector<std::string> messages;
+    std::vector<RtlDerivedSignalDebugInfo> derived_signals;
+    std::vector<std::string> derived_names;
+};
 
 struct CompileOptions {
     // Target C++ source code, split into caller-owned lines or chunks.
@@ -31,10 +71,17 @@ struct CompileOptions {
     // BEIR optimization options. Empty means the default optimization pipeline;
     // use {"none"} to disable all BEIR optimization passes.
     std::vector<std::string> beopt_args;
+    // Optional RTL debug data. None avoids building API debug payloads.
+    RtlDebugMode rtl_debug = RtlDebugMode::None;
 };
 
 struct CompileResult {
     std::vector<std::string> output_codelines;
+    // Populated only when CompileOptions::rtl_debug == RtlDebugMode::Text.
+    std::string debug_text;
+    std::vector<std::string> debug_codelines;
+    // Populated only when CompileOptions::rtl_debug == RtlDebugMode::Structured.
+    std::vector<RtlSignalDebugInfo> debug_signals;
     std::string error;
 
     bool ok() const {
@@ -98,10 +145,59 @@ inline std::vector<std::string> splitCodeLines(const std::string& output) {
     return lines;
 }
 
+inline SourceLoc convertLoc(const pred::DebugLoc& loc) {
+    SourceLoc out;
+    out.file = loc.file;
+    out.line = loc.line;
+    out.column = loc.column;
+    out.end_line = loc.end_line;
+    out.end_column = loc.end_column;
+    return out;
+}
+
+inline std::optional<SourceLoc> convertLoc(const std::optional<pred::DebugLoc>& loc) {
+    if (!loc || !loc->valid()) return std::nullopt;
+    return convertLoc(*loc);
+}
+
+inline std::vector<SourceLoc> convertLocs(const std::vector<pred::DebugLoc>& locs) {
+    std::vector<SourceLoc> out;
+    out.reserve(locs.size());
+    for (const auto& loc : locs) {
+        if (loc.valid()) out.push_back(convertLoc(loc));
+    }
+    return out;
+}
+
+inline std::vector<RtlSignalDebugInfo> convertDebugSignals(
+    const std::vector<pred::rtlgen::RtlDebugSignal>& signals) {
+    std::vector<RtlSignalDebugInfo> out;
+    out.reserve(signals.size());
+    for (const auto& signal : signals) {
+        RtlSignalDebugInfo converted;
+        converted.node_id = signal.id;
+        converted.signal_name = signal.signal_name;
+        converted.rtl_line = signal.rtl_line;
+        converted.port_name = signal.port_name;
+        converted.port_element_index = signal.port_element_index;
+        converted.decl_loc = convertLoc(signal.decl_loc);
+        converted.primary_locs = convertLocs(signal.primary_locs);
+        converted.related_locs = convertLocs(signal.related_locs);
+        converted.messages = signal.messages;
+        for (const auto& node : signal.derived_nodes) {
+            converted.derived_signals.push_back(
+                RtlDerivedSignalDebugInfo{node.id, node.name});
+        }
+        converted.derived_names = signal.derived_names;
+        out.push_back(std::move(converted));
+    }
+    return out;
+}
+
 inline CompileResult compileSource(const CompileOptions& options, OutputKind output_kind) {
-    if (options.source_codelines.empty()) return {{}, "source_codelines must not be empty"};
+    if (options.source_codelines.empty()) return {{}, "", {}, {}, "source_codelines must not be empty"};
     if (options.top_function.find_first_not_of(" \t\r\n") == std::string::npos) {
-        return {{}, "top_function must not be empty"};
+        return {{}, "", {}, {}, "top_function must not be empty"};
     }
 
     pred::pipelinev2::PipelineConfig config;
@@ -113,6 +209,17 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     config.clang_args = buildClangArgs(options);
     config.unroll_limit = options.unroll_limit;
     config.beopt_args = options.beopt_args;
+    switch (options.rtl_debug) {
+    case RtlDebugMode::None:
+        config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::None;
+        break;
+    case RtlDebugMode::Structured:
+        config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::Structured;
+        break;
+    case RtlDebugMode::Text:
+        config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::Text;
+        break;
+    }
     if (output_kind == OutputKind::Beir) {
         config.output_kind = pred::pipelinev2::OutputKind::Beir;
     } else if (output_kind == OutputKind::PortMetadata) {
@@ -123,9 +230,16 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
 
     auto result = pred::pipelinev2::compile(config);
     if (!result.ok()) {
-        return {{}, result.error};
+        return {{}, "", {}, {}, result.error};
     }
-    return {splitCodeLines(result.output_text), ""};
+    CompileResult out;
+    out.output_codelines = splitCodeLines(result.output_text);
+    out.debug_text = result.rtl_debug_text;
+    out.debug_codelines = result.rtl_debug_text.empty()
+        ? std::vector<std::string>{}
+        : splitCodeLines(result.rtl_debug_text);
+    out.debug_signals = convertDebugSignals(result.rtl_debug_signals);
+    return out;
 }
 
 } // namespace detail

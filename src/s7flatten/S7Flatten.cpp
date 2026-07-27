@@ -291,6 +291,7 @@ std::vector<LeafInfo> createLeaves(Context& ctx, const SymbolInfo& source) {
         symbol.id = static_cast<SymbolId>(ctx.output.symbols.size());
         symbol.debug_name = one.path.empty() ? source.name : pathName(source.name, one.path);
         symbol.type = one.type;
+        symbol.debug_loc = source.debug_loc;
         symbol.role = source.is_temp ? S7SymbolRole::Temp :
             (source.is_param ? S7SymbolRole::Port : S7SymbolRole::Local);
         ctx.output.symbols.push_back(symbol);
@@ -300,6 +301,7 @@ std::vector<LeafInfo> createLeaves(Context& ctx, const SymbolInfo& source) {
         leaf.name = symbol.debug_name;
         leaf.type = symbol.type;
         leaf.path = one.path;
+        leaf.debug_loc = symbol.debug_loc;
         leaves.push_back(std::move(leaf));
     }
     return leaves;
@@ -538,7 +540,7 @@ S7Stmt makeOp(const LeafInfo& leaf, S7Operation op, DebugLoc loc = {}) {
     return stmt;
 }
 
-LeafInfo createTemp(Context& ctx, TypeInfo type, const std::string& hint) {
+LeafInfo createTemp(Context& ctx, TypeInfo type, const std::string& hint, DebugLoc loc = {}) {
     if (static_cast<int>(ctx.output.symbols.size() + 1) > ctx.options.max_leaf_symbols) {
         fail("S7 leaf symbol limit exceeded while creating temporary");
     }
@@ -546,6 +548,7 @@ LeafInfo createTemp(Context& ctx, TypeInfo type, const std::string& hint) {
     symbol.id = static_cast<SymbolId>(ctx.output.symbols.size());
     symbol.debug_name = "__s7_flatten_" + hint + "_" + std::to_string(ctx.temp_counter++);
     symbol.type = canonicalize_bool_type(std::move(type));
+    symbol.debug_loc = loc;
     symbol.role = S7SymbolRole::Temp;
     ctx.output.symbols.push_back(symbol);
 
@@ -553,6 +556,7 @@ LeafInfo createTemp(Context& ctx, TypeInfo type, const std::string& hint) {
     leaf.id = symbol.id;
     leaf.name = symbol.debug_name;
     leaf.type = symbol.type;
+    leaf.debug_loc = symbol.debug_loc;
     return leaf;
 }
 
@@ -605,7 +609,7 @@ S7Operand materializeDynamicRead(Context& ctx,
         type = elem.type;
         elements.push_back(std::move(elem));
     }
-    LeafInfo temp = createTemp(ctx, type, "lookup");
+    LeafInfo temp = createTemp(ctx, type, "lookup", loc);
     out.push_back(makeLookup(temp, dyn.index, std::move(elements), loc));
     ++ctx.summary.dynamic_reads;
     return varOperand(temp);
@@ -715,7 +719,7 @@ std::vector<LeafInfo> createTempLeavesLike(Context& ctx,
     std::vector<LeafInfo> temps;
     temps.reserve(source.size());
     for (const auto& leaf : source) {
-        LeafInfo temp = createTemp(ctx, leaf.type, hint);
+        LeafInfo temp = createTemp(ctx, leaf.type, hint, loc);
         temps.push_back(std::move(temp));
     }
     return temps;
@@ -727,7 +731,7 @@ S7Operand makeLookupTemp(Context& ctx,
                            DebugLoc loc,
                            std::vector<S7Stmt>& out) {
     TypeInfo type = elements.empty() ? TypeInfo{} : elements.front().type;
-    LeafInfo temp = createTemp(ctx, type, "lookup");
+    LeafInfo temp = createTemp(ctx, type, "lookup", loc);
     out.push_back(makeLookup(temp, std::move(index), std::move(elements), loc));
     ++ctx.summary.dynamic_reads;
     return varOperand(temp);

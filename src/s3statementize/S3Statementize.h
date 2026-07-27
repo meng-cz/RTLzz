@@ -99,6 +99,7 @@ struct SymbolInfo {
     SymbolId id = -1;
     std::string name;
     TypeInfo type;
+    DebugLoc debug_loc;
     // S3/source provenance only. This is not a post-S3 semantic visibility
     // relation and later stages must not rely on it for name resolution or
     // variable identity.

@@ -17,6 +17,7 @@ inline DebugInfo generatedDebug(std::string reason,
                                 const Operation& previous) {
     DebugInfo debug;
     debug.origin = DebugOrigin::Generated;
+    addDebugMessage(debug, reason);
     debug.reason = std::move(reason);
     addDebugLocs(debug, previous.source_locs);
     addDebugInfoLocs(debug, previous.debug);

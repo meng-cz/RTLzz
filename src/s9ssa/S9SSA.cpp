@@ -501,6 +501,7 @@ S9ValueId addValue(Context& ctx,
                    S9Type type,
                    S9ValueKind kind,
                    std::string debug_name,
+                   DebugLoc loc,
                    BlockId def_block,
                    std::optional<int> forced_version = std::nullopt) {
     if (static_cast<int>(ctx.output.values.size() + 1) > ctx.options.max_values) {
@@ -512,6 +513,7 @@ S9ValueId addValue(Context& ctx,
     value.type = type;
     value.kind = kind;
     value.debug_name = std::move(debug_name);
+    value.debug_loc = std::move(loc);
     value.def_block = def_block;
     if (base_symbol >= 0) {
         if (base_symbol >= static_cast<SymbolId>(ctx.next_version.size())) {
@@ -598,7 +600,7 @@ S9ValueId defineBase(Context& ctx,
     }
     const auto& symbol = s8SymbolAt(*ctx.input, target);
     S9ValueId value = addValue(ctx, target, symbol.type, kind,
-                               symbol.debug_name, block);
+                               symbol.debug_name, loc, block);
     env[static_cast<std::size_t>(target)] = value;
     return value;
 }
@@ -606,10 +608,11 @@ S9ValueId defineBase(Context& ctx,
 S9ValueId defineGenerated(Context& ctx,
                           S9Type type,
                           const std::string& hint,
+                          DebugLoc loc,
                           BlockId block) {
     std::string name = "__s9_" + hint + "_" + std::to_string(ctx.generated_counter++);
     ++ctx.summary.generated_ops;
-    return addValue(ctx, -1, type, S9ValueKind::Generated, std::move(name), block);
+    return addValue(ctx, -1, type, S9ValueKind::Generated, std::move(name), loc, block);
 }
 
 S9Operation copyOperation(const S8Operation& op) {
@@ -658,7 +661,7 @@ S9Operand castTo(Context& ctx,
     } else if (value.type.width > target_type.width) {
         kind = S9OpKind::Trunc;
     }
-    S9ValueId target = defineGenerated(ctx, target_type, hint, block);
+    S9ValueId target = defineGenerated(ctx, target_type, hint, loc, block);
     out.push_back(makeOpStmt(target, kind, target_type, {std::move(value)}, loc,
                              "cast_for_lookupwrite"));
     return valueOperand(ctx.output, target, false, loc);
@@ -699,7 +702,7 @@ void rewriteLookupWrite(Context& ctx,
         S9Operand case_lit = literalOperand(static_cast<std::uint64_t>(i),
                                             index.type, false, stmt.debug_loc);
         S9ValueId eq_value = defineGenerated(ctx, S9Type{S8TypeKind::Bool, 1},
-                                             "lookupwrite_eq", out_block.id);
+                                             "lookupwrite_eq", stmt.debug_loc, out_block.id);
         out_block.stmts.push_back(makeOpStmt(eq_value, S9OpKind::Eq,
                                              S9Type{S8TypeKind::Bool, 1},
                                              {index, std::move(case_lit)},
@@ -805,7 +808,7 @@ Env initialEnv(Context& ctx) {
     for (const auto& port : ctx.input->ports) {
         const auto& symbol = s8SymbolAt(*ctx.input, port.symbol);
         S9ValueId value = addValue(ctx, port.symbol, symbol.type, S9ValueKind::Initial,
-                                   symbol.debug_name, -1, 0);
+                                   symbol.debug_name, symbol.debug_loc, -1, 0);
         env[static_cast<std::size_t>(port.symbol)] = value;
     }
     return env;
@@ -855,10 +858,11 @@ Env mergePredecessorEnvs(Context& ctx,
         }
         const auto& base = s8SymbolAt(*ctx.input, symbol);
         S9ValueId result = addValue(ctx, symbol, base.type, S9ValueKind::Phi,
-                                    base.debug_name, block.id);
+                                    base.debug_name, base.debug_loc, block.id);
         S9Phi phi;
         phi.result = result;
         phi.base_symbol = symbol;
+        phi.debug_loc = base.debug_loc;
         phi.incoming = std::move(incoming);
         block.phis.push_back(std::move(phi));
         env[static_cast<std::size_t>(symbol)] = result;
@@ -888,6 +892,7 @@ S9SSACFG buildFunction(const S8NormCFG& fn,
         out.id = symbol.id;
         out.type = symbol.type;
         out.debug_name = symbol.debug_name;
+        out.debug_loc = symbol.debug_loc;
         out.role = symbol.role;
         if (out.id != static_cast<SymbolId>(ctx.output.base_symbols.size())) {
             fail("S8 symbols must be dense before S9 SSA");

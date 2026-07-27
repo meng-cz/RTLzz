@@ -212,6 +212,7 @@ inline void setAssign(Operation& op,
                       const Program& program) {
     std::vector<DebugLoc> source_locs = op.source_locs;
     source_locs.insert(source_locs.end(), op.debug.source_locs.begin(), op.debug.source_locs.end());
+    DebugInfo previous_debug = op.debug;
     op.kind = OperationKind::Assign;
     op.op = OpCode::None;
     op.operands.clear();
@@ -223,8 +224,10 @@ inline void setAssign(Operation& op,
     op.bit = -1;
     op.times = 0;
     op.debug.origin = DebugOrigin::Generated;
+    addDebugInfoLocs(op.debug, previous_debug);
+    addDebugLocs(op.debug, source_locs);
+    addDebugMessage(op.debug, reason);
     op.debug.reason = reason;
-    op.debug.source_locs = std::move(source_locs);
     op.debug.derived_nodes.clear();
     op.debug.derived_names.clear();
     for (const auto& operand_ref : op.operands) {

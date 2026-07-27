@@ -1118,6 +1118,12 @@ SymbolId createLoopEnableSymbol(FunctionCFG& fn, const LoopRegion& region) {
     info.name = uniqueSymbolName(fn,
         "__s5_loop_enable_" + std::to_string(region.id) + "_");
     info.type = boolType();
+    if (region.condition >= 0 &&
+        region.condition < static_cast<BlockId>(fn.blocks.size())) {
+        const auto& term = fn.blocks[static_cast<std::size_t>(region.condition)]->terminator;
+        if (term.kind == TermKind::Branch) info.debug_loc = term.condition.debug_loc;
+        else if (term.kind == TermKind::Switch) info.debug_loc = term.switch_value.debug_loc;
+    }
     info.declaring_scope = -1;
     fn.symbols.push_back(info);
     return info.id;
@@ -1136,6 +1142,7 @@ LValue symbolLValue(const FunctionCFG& fn, SymbolId symbol) {
     out.root = info.name;
     out.root_symbol = symbol;
     out.type = info.type;
+    out.debug_loc = info.debug_loc;
     return out;
 }
 
@@ -1146,6 +1153,7 @@ Operand symbolOperand(const FunctionCFG& fn, SymbolId symbol) {
     out.var_name = info.name;
     out.var_symbol = symbol;
     out.type = info.type;
+    out.debug_loc = info.debug_loc;
     return out;
 }
 
@@ -1161,6 +1169,7 @@ S3StmtPtr makeSymbolDecl(const FunctionCFG& fn, SymbolId symbol) {
     const auto& info = symbolInfo(fn, symbol);
     auto stmt = std::make_shared<S3Stmt>();
     stmt->kind = S3StmtKind::Decl;
+    stmt->debug_loc = info.debug_loc;
     stmt->decl_name = info.name;
     stmt->decl_symbol = symbol;
     stmt->decl_type = info.type;
@@ -1170,6 +1179,7 @@ S3StmtPtr makeSymbolDecl(const FunctionCFG& fn, SymbolId symbol) {
 S3StmtPtr makeSymbolAssign(const FunctionCFG& fn, SymbolId symbol, Operand value) {
     auto stmt = std::make_shared<S3Stmt>();
     stmt->kind = S3StmtKind::Assign;
+    stmt->debug_loc = symbolInfo(fn, symbol).debug_loc;
     stmt->target = symbolLValue(fn, symbol);
     stmt->value = std::move(value);
     return stmt;

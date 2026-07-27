@@ -155,8 +155,8 @@ beir::DebugInfo generatedDebug(std::string reason,
                                DebugLoc loc = {}) {
     beir::DebugInfo debug;
     debug.origin = loc.valid() ? beir::DebugOrigin::Source : beir::DebugOrigin::Generated;
-    debug.reason = std::move(reason);
-    if (loc.valid()) debug.source_locs.push_back(loc);
+    beir::addDebugMessage(debug, reason);
+    if (loc.valid()) beir::addPrimaryDebugLoc(debug, loc);
     for (const auto& operand : operands) {
         if (operand.kind == beir::OperandKind::Symbol &&
             operand.node != beir::kInvalidNodeId) {
@@ -219,7 +219,10 @@ struct Builder {
         signal.id = static_cast<beir::NodeId>(output.signals.size());
         signal.name = uniqueName(std::move(name));
         signal.type = std::move(type);
-        if (debug.reason.empty()) debug.reason = "allocated by S11 BEIR builder";
+        if (debug.reason.empty()) {
+            beir::addDebugMessage(debug, "allocated by S11 BEIR builder");
+            debug.reason = "allocated by S11 BEIR builder";
+        }
         signal.debug = std::move(debug);
         output.signals.push_back(std::move(signal));
         return output.signals.back();
@@ -244,6 +247,20 @@ struct Builder {
             if (def.target == value) return &def;
         }
         return nullptr;
+    }
+
+    DebugLoc symbolDebugLoc(SymbolId symbol) const {
+        if (symbol < 0) return {};
+        return symbolAt(input, symbol).debug_loc;
+    }
+
+    DebugLoc valueDebugLoc(const S10Value& value) const {
+        if (value.debug_loc.valid()) return value.debug_loc;
+        if (const auto* def = definitionFor(value.id)) {
+            if (def->debug_loc.valid()) return def->debug_loc;
+            if (def->op.debug_loc.valid()) return def->op.debug_loc;
+        }
+        return symbolDebugLoc(value.base_symbol);
     }
 
     beir::Operand valueOperand(S10ValueId value_id, bool signed_view = false) {
@@ -326,7 +343,10 @@ struct Builder {
         beir::Operation op;
         op.kind = kind;
         op.type = std::move(type);
-        if (loc.valid()) op.source_locs.push_back(loc);
+        if (loc.valid()) {
+            op.source_locs.push_back(loc);
+            beir::addPrimaryDebugLoc(op.debug, loc);
+        }
         op.debug = generatedDebug(std::move(reason), {}, loc);
         return op;
     }
@@ -339,6 +359,12 @@ struct Builder {
         }
         if (sig.driver) fail("S11 attempted to assign a BEIR signal twice", {},
                              "signal=" + sig.name);
+        if (sig.debug.decl_loc && !op.debug.decl_loc) {
+            beir::setDeclDebugLoc(op.debug, *sig.debug.decl_loc);
+        }
+        for (const auto& message : beir::messageStack(sig.debug)) {
+            beir::addDebugMessage(op.debug, message);
+        }
         sig.debug = op.debug;
         sig.driver = std::move(op);
     }
@@ -380,7 +406,9 @@ struct Builder {
             debug.origin = value.kind == S10ValueKind::Generated
                 ? beir::DebugOrigin::Generated
                 : beir::DebugOrigin::Source;
-            debug.reason = "S10 value " + std::to_string(value.id);
+            beir::addDebugMessage(debug, "S10 value " + std::to_string(value.id));
+            beir::addPrimaryDebugLoc(debug, valueDebugLoc(value));
+            beir::setDeclDebugLoc(debug, symbolDebugLoc(value.base_symbol));
             if (!value.debug_name.empty()) debug.derived_names.push_back(value.debug_name);
             auto& signal = addSignal(std::move(name), convertType(value.type), std::move(debug));
             value_nodes[static_cast<std::size_t>(value.id)] = signal.id;
@@ -413,15 +441,18 @@ struct Builder {
 
                 beir::Operation op = baseOperation(beir::OperationKind::PortRead,
                                                    sig.type,
-                                                   {},
+                                                   symbol.debug_loc,
                                                    "read from S10 input port '" + name + "'");
                 op.operands.push_back(portOperand(name, out_port.type));
+                beir::setDeclDebugLoc(op.debug, symbol.debug_loc);
                 op.debug.derived_names.push_back("s10_input");
                 setDriver(node, std::move(op));
                 ++summary.input_ports;
             } else {
                 auto& sig = addSignal(name, out_port.type,
-                                      generatedDebug("S11 output port '" + name + "'"));
+                                      generatedDebug("S11 output port '" + name + "'",
+                                                     {}, symbol.debug_loc));
+                beir::setDeclDebugLoc(sig.debug, symbol.debug_loc);
                 sig.port_name = name;
                 sig.port_element_index = 0;
                 out_port.element_nodes.push_back(sig.id);
@@ -476,11 +507,13 @@ struct Builder {
                     sig.port_name = group.source_name;
                     sig.port_element_index = static_cast<int>(i);
 
+                    DebugLoc loc = symbolDebugLoc(element.symbol);
                     beir::Operation op = baseOperation(
                         beir::OperationKind::PortRead,
                         sig.type,
-                        {},
+                        loc,
                         "read from S10 input port '" + group.source_name + "'");
+                    beir::setDeclDebugLoc(op.debug, loc);
                     op.operands.push_back(portOperand(group.source_name, port_type));
                     if (!group.array_dims.empty()) {
                         op.operands.push_back(literalOperand(static_cast<std::uint64_t>(i),
@@ -505,7 +538,9 @@ struct Builder {
                         : group.source_name + "_" + std::to_string(i);
                     auto& sig = addSignal(element_name, scalar_type,
                                           generatedDebug("S11 output port '" +
-                                                         group.source_name + "' element"));
+                                                         group.source_name + "' element",
+                                                         {}, symbolDebugLoc(element.symbol)));
+                    beir::setDeclDebugLoc(sig.debug, symbolDebugLoc(element.symbol));
                     sig.port_name = group.source_name;
                     sig.port_element_index = static_cast<int>(i);
                     out_port.element_nodes.push_back(sig.id);
@@ -600,7 +635,10 @@ struct Builder {
         op.lo = source.lo;
         op.bit = source.bit;
         op.times = source.times;
-        if (source.debug_loc.valid()) op.source_locs.push_back(source.debug_loc);
+        if (source.debug_loc.valid()) {
+            op.source_locs.push_back(source.debug_loc);
+            beir::addPrimaryDebugLoc(op.debug, source.debug_loc);
+        }
 
         op.operands.reserve(source.operands.size());
         for (const auto& src_operand : source.operands) {
@@ -727,6 +765,7 @@ struct Builder {
             op.debug = generatedDebug("S11 assign; guard erased from BEIR driver",
                                       op.operands,
                                       def.debug_loc);
+            beir::addRelatedDebugLoc(op.debug, def.guard.debug_loc);
             op.debug.derived_names.push_back("guard=" + operandDebugText(input, def.guard));
             if (!def.debug_note.empty()) op.debug.derived_names.push_back(def.debug_note);
             setDriver(target_node, std::move(op));
@@ -734,7 +773,10 @@ struct Builder {
         }
         case S10DefKind::Op: {
             beir::Operation op = convertOperation(def.op, target);
-            op.debug.reason += "; guard erased from BEIR driver";
+            beir::addDebugMessage(op.debug, "guard erased from BEIR driver");
+            if (!op.debug.reason.empty()) op.debug.reason += "; guard erased from BEIR driver";
+            else op.debug.reason = "guard erased from BEIR driver";
+            beir::addRelatedDebugLoc(op.debug, def.guard.debug_loc);
             op.debug.derived_names.push_back("guard=" + operandDebugText(input, def.guard));
             if (!def.debug_note.empty()) op.debug.derived_names.push_back(def.debug_note);
             setDriver(target_node, std::move(op));
@@ -753,11 +795,12 @@ struct Builder {
             beir::NodeId node =
                 value_nodes[static_cast<std::size_t>(*port.initial_value)];
             auto& sig = signal(node);
+            const auto& value = valueAt(input, *port.initial_value);
             beir::Operation op = baseOperation(
-                beir::OperationKind::Assign, sig.type, {},
+                beir::OperationKind::Assign, sig.type, valueDebugLoc(value),
                 "totalize output/mutable-ref initial value to zero");
             op.operands.push_back(literalOperand(
-                0, valueAt(input, *port.initial_value).type));
+                0, value.type));
             setDriver(node, std::move(op));
         }
     }
@@ -777,13 +820,15 @@ struct Builder {
                 fail("S11 output port node was not allocated", {}, "port=" + name);
             }
             const auto& final_value = valueAt(input, *port.final_value);
+            DebugLoc loc = valueDebugLoc(final_value);
             beir::Operation op = baseOperation(beir::OperationKind::Assign,
                                                convertType(final_value.type),
-                                               {},
+                                               loc,
                                                "S11 output final binding");
             op.operands.push_back(valueOperand(*port.final_value));
             op.debug = generatedDebug("S11 output '" + name + "' final binding",
-                                      op.operands);
+                                      op.operands,
+                                      loc);
             setDriver(node_it->second, std::move(op));
         }
     }

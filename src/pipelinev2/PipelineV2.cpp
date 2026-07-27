@@ -316,6 +316,13 @@ PipelineResult compile(const PipelineConfig& config) {
             break;
         case OutputKind::Rtl:
             result.output_text = rtlgen::emitSystemVerilog(beir_program);
+            if (config.rtl_debug_output == RtlDebugOutputKind::Structured) {
+                result.rtl_debug_signals =
+                    rtlgen::collectDebugSignals(beir_program, result.output_text);
+            } else if (config.rtl_debug_output == RtlDebugOutputKind::Text) {
+                result.rtl_debug_text = rtlgen::emitDebugReport(beir_program,
+                                                                result.output_text);
+            }
             break;
         case OutputKind::PortMetadata:
             break;
