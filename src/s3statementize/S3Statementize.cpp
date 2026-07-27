@@ -100,6 +100,63 @@ std::string canonicalName(std::string name) {
     return name;
 }
 
+std::vector<int> normalizedArrayDims(const TypeInfo& type) {
+    if (!type.is_array) return {};
+    if (!type.array_dims.empty()) return type.array_dims;
+    if (type.array_size > 0) return {type.array_size};
+    return {};
+}
+
+TypeInfo arrayElementType(TypeInfo type) {
+    type.is_array = false;
+    type.array_size = 0;
+    type.array_dims.clear();
+    return type;
+}
+
+bool isAggregateType(const TypeInfo& type) {
+    TypeInfo stored = storageType(type);
+    return stored.is_array ||
+           !stored.struct_name.empty() ||
+           (!stored.name.empty() && stored.hw_kind.empty() && !stored.is_hw_int);
+}
+
+bool sameNonArrayStorageType(TypeInfo a, TypeInfo b) {
+    a = storageType(std::move(a));
+    b = storageType(std::move(b));
+    if (a.is_array || b.is_array) return false;
+
+    const bool a_struct = !a.struct_name.empty() ||
+                          (!a.name.empty() && a.hw_kind.empty() && !a.is_hw_int);
+    const bool b_struct = !b.struct_name.empty() ||
+                          (!b.name.empty() && b.hw_kind.empty() && !b.is_hw_int);
+    if (a_struct || b_struct) {
+        std::string a_name = a.struct_name.empty() ? a.name : a.struct_name;
+        std::string b_name = b.struct_name.empty() ? b.name : b.struct_name;
+        return a_struct && b_struct && canonicalName(a_name) == canonicalName(b_name);
+    }
+
+    return a.name == b.name &&
+           a.hw_kind == b.hw_kind &&
+           a.width == b.width &&
+           a.is_hw_int == b.is_hw_int;
+}
+
+bool sameAggregateType(TypeInfo a, TypeInfo b) {
+    a = storageType(std::move(a));
+    b = storageType(std::move(b));
+    if (a.is_array || b.is_array) {
+        if (!a.is_array || !b.is_array) return false;
+        if (normalizedArrayDims(a) != normalizedArrayDims(b)) return false;
+        return sameNonArrayStorageType(arrayElementType(std::move(a)),
+                                       arrayElementType(std::move(b)));
+    }
+    if (isAggregateType(a) || isAggregateType(b)) {
+        return sameNonArrayStorageType(std::move(a), std::move(b));
+    }
+    return false;
+}
+
 std::string makeTempName(LowerContext& ctx, const std::string& hint) {
     std::string base = "__tmp_" + sanitizeName(ctx.function_name) + "_" +
                        sanitizeName(hint) + "_";
@@ -668,6 +725,27 @@ private:
         case ExprKind::Cast: {
             auto value = lowerExpr(expr->cast_expr);
             result.prelude = std::move(value.prelude);
+            TypeInfo target_type = expr->cast_type.name.empty() &&
+                                   expr->cast_type.hw_kind.empty() &&
+                                   expr->cast_type.width <= 0 &&
+                                   expr->cast_type.struct_name.empty()
+                ? expr->type
+                : expr->cast_type;
+            if (isAggregateType(target_type) || isAggregateType(value.operand.type)) {
+                if (!sameAggregateType(value.operand.type, target_type)) {
+                    fail(expr->debug_loc, "Unsupported aggregate cast from '" +
+                         canonicalName(value.operand.type.struct_name.empty()
+                                           ? value.operand.type.name
+                                           : value.operand.type.struct_name) +
+                         "' to '" +
+                         canonicalName(target_type.struct_name.empty()
+                                           ? target_type.name
+                                           : target_type.struct_name) + "'");
+                }
+                value.operand.type = storageType(std::move(target_type));
+                result.operand = std::move(value.operand);
+                return result;
+            }
             if (isSignedViewType(expr->cast_type) || isSignedViewType(expr->type)) {
                 value.operand.signed_view = true;
                 value.operand.type = storageType(expr->cast_type.width > 0 ? expr->cast_type
@@ -805,6 +883,27 @@ private:
         case s1apinorm::S1ExprKind::Cast: {
             auto value = lowerExpr(expr->cast_expr);
             result.prelude = std::move(value.prelude);
+            TypeInfo target_type = expr->cast_type.name.empty() &&
+                                   expr->cast_type.hw_kind.empty() &&
+                                   expr->cast_type.width <= 0 &&
+                                   expr->cast_type.struct_name.empty()
+                ? expr->type
+                : expr->cast_type;
+            if (isAggregateType(target_type) || isAggregateType(value.operand.type)) {
+                if (!sameAggregateType(value.operand.type, target_type)) {
+                    fail(expr->debug_loc, "Unsupported aggregate cast from '" +
+                         canonicalName(value.operand.type.struct_name.empty()
+                                           ? value.operand.type.name
+                                           : value.operand.type.struct_name) +
+                         "' to '" +
+                         canonicalName(target_type.struct_name.empty()
+                                           ? target_type.name
+                                           : target_type.struct_name) + "'");
+                }
+                value.operand.type = storageType(std::move(target_type));
+                result.operand = std::move(value.operand);
+                return result;
+            }
             if (isSignedViewType(expr->cast_type) || isSignedViewType(expr->type)) {
                 value.operand.signed_view = true;
                 value.operand.type = storageType(expr->cast_type.width > 0 ? expr->cast_type

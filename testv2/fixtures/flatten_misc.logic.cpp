@@ -80,6 +80,10 @@ void touch_packet(Packet& pkt, int lane_idx, int tap_idx, Pair replacement) {
     pkt.lanes[lane_idx].taps[tap_idx] = replacement.hi;
 }
 
+Int<8> consume_pair_temp_arg(Pair value, Int<8> salt) {
+    return value.lo ^ salt ^ value.hi;
+}
+
 Matrix make_matrix(Packet a, Packet b, Pair p0, Pair p1) {
     Matrix mat;
     mat.packets[0] = a;
@@ -113,6 +117,8 @@ Int<8> helper_array_return;
 Int<8> helper_array_return_temp_index;
 #pragma output_port lambda_struct_value
 Int<8> lambda_struct_value;
+#pragma output_port aggregate_temp_arg
+Int<8> aggregate_temp_arg;
 #pragma output_port lambda_array_value
 Int<8> lambda_array_value;
 #pragma output_port nested_dynamic_read
@@ -173,6 +179,10 @@ void hls_main() {
     };
     Pair lambda_pair = pair_lambda(selected, bias);
     lambda_struct_value = lambda_pair.lo ^ lambda_pair.hi;
+
+    aggregate_temp_arg =
+        consume_pair_temp_arg(Pair{seed + Int<8>(9), bias ^ Int<8>(0x6a)},
+                              selected.lo);
 
     auto array_lambda = [](Arr2 values, int idx, Int<8> patch) -> Arr2 {
         Arr2 out = values;
@@ -261,6 +271,7 @@ void hls_main() {
     final_mix =
         aggregate_pos ^
         helper_struct_return ^
+        aggregate_temp_arg ^
         nested_dynamic_read ^
         nested_dynamic_write ^
         internal_struct_array ^
