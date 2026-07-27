@@ -190,7 +190,7 @@ bram_data_array__s1_writeaddr[0] = 0;
 bram_data_array__s1_writedata[0] = 0;
 
 {
-  ReadStageReg read_stage;
+  ReadStageReg read_stage = {};
     read_stage.addr = 0;
     read_stage.valid = false;
   Int<33> read_stage_flatten = 0;
@@ -202,14 +202,14 @@ bram_data_array__s1_writedata[0] = 0;
 auto refill_s0_impl__ = [&](Int<32> addr, Int<64> data) -> void {
     Int<INDEX_WIDTH> index = addr.at<INDEX_WIDTH - 1, 0>();
     Int<TAG_WIDTH> tag = addr.at<ADDR_WIDTH - 1, INDEX_WIDTH>();
-    TagEntry tag_entry;
+    TagEntry tag_entry = {};
     tag_entry.tag = tag;
     tag_entry.valid = true;
     __vul_bram_write_tag_array<0>(index, tag_entry);
     __vul_bram_write_data_array<0>(index, data);
 };
 auto read_s0_impl__ = [&](Int<32> addr) -> void {
-    ReadStageReg s0;
+    ReadStageReg s0 = {};
     s0.addr = addr;
     s0.valid = true;
     __vul_reg_setnext_read_stage<0>(s0);
@@ -220,7 +220,7 @@ auto read_s0_impl__ = [&](Int<32> addr) -> void {
 };
 auto tick0__ = [&]() {
     bool hit = false;
-    Int<DATA_WIDTH> read_data;
+    Int<DATA_WIDTH> read_data = Int<DATA_WIDTH>(0);
     if (__vul_read_reg_read_stage().valid) {
         Int<TAG_WIDTH> tag = __vul_read_reg_read_stage().addr.at<ADDR_WIDTH - 1, INDEX_WIDTH>();
         TagEntry tag_entry = __vul_bram_readdata_tag_array<0>();
@@ -233,7 +233,8 @@ auto tick0__ = [&]() {
         __vul_req_call_readresp_s1(hit, read_data);
     }
     if (!read_inputed) {
-        ReadStageReg s0;
+        ReadStageReg s0 = {};
+        s0.addr = Int<32>(0);
         s0.valid = false;
         __vul_reg_setnext_read_stage<0>(s0);
     }
