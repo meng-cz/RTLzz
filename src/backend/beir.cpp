@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
@@ -458,6 +459,186 @@ static Operand::Constant factsMakeConstant(std::vector<std::uint64_t> limbs, int
     return constant;
 }
 
+static bool factsAnyBitSet(const std::vector<std::uint64_t>& limbs, int width) {
+    for (int bit = 0; bit < width; ++bit) {
+        if (factsGetBit(limbs, bit)) return true;
+    }
+    return false;
+}
+
+static std::vector<std::uint64_t> factsResizeBits(std::vector<std::uint64_t> limbs,
+                                                  int old_width,
+                                                  int new_width,
+                                                  bool sign_extend) {
+    factsTrim(limbs, old_width);
+    if (new_width <= old_width) {
+        factsTrim(limbs, new_width);
+        return limbs;
+    }
+    bool sign = sign_extend && old_width > 0 && factsGetBit(limbs, old_width - 1);
+    limbs.resize(factsLimbCount(new_width), sign ? std::numeric_limits<std::uint64_t>::max() : 0);
+    if (sign) {
+        for (int bit = old_width; bit < new_width; ++bit) factsSetBit(limbs, bit);
+    }
+    factsTrim(limbs, new_width);
+    return limbs;
+}
+
+static int factsCompareUnsigned(std::vector<std::uint64_t> lhs,
+                                std::vector<std::uint64_t> rhs,
+                                int width) {
+    factsTrim(lhs, width);
+    factsTrim(rhs, width);
+    for (std::size_t i = factsLimbCount(width); i > 0; --i) {
+        std::uint64_t l = i - 1 < lhs.size() ? lhs[i - 1] : 0;
+        std::uint64_t r = i - 1 < rhs.size() ? rhs[i - 1] : 0;
+        if (l < r) return -1;
+        if (l > r) return 1;
+    }
+    return 0;
+}
+
+static int factsCompareSigned(const std::vector<std::uint64_t>& lhs,
+                              const std::vector<std::uint64_t>& rhs,
+                              int width) {
+    bool lhs_negative = factsGetBit(lhs, width - 1);
+    bool rhs_negative = factsGetBit(rhs, width - 1);
+    if (lhs_negative != rhs_negative) return lhs_negative ? -1 : 1;
+    return factsCompareUnsigned(lhs, rhs, width);
+}
+
+static std::vector<std::uint64_t> factsAddBits(const std::vector<std::uint64_t>& lhs,
+                                               const std::vector<std::uint64_t>& rhs,
+                                               int width) {
+    std::vector<std::uint64_t> out = factsZeros(width);
+    unsigned __int128 carry = 0;
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        unsigned __int128 sum = carry;
+        if (i < lhs.size()) sum += lhs[i];
+        if (i < rhs.size()) sum += rhs[i];
+        out[i] = static_cast<std::uint64_t>(sum);
+        carry = sum >> 64;
+    }
+    factsTrim(out, width);
+    return out;
+}
+
+static std::vector<std::uint64_t> factsSubBits(const std::vector<std::uint64_t>& lhs,
+                                               const std::vector<std::uint64_t>& rhs,
+                                               int width) {
+    std::vector<std::uint64_t> out = factsZeros(width);
+    std::uint64_t borrow = 0;
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        std::uint64_t l = i < lhs.size() ? lhs[i] : 0;
+        std::uint64_t r = i < rhs.size() ? rhs[i] : 0;
+        std::uint64_t subtrahend = r + borrow;
+        std::uint64_t next_borrow = (l < r || (borrow && subtrahend == 0)) ? 1 : 0;
+        out[i] = l - subtrahend;
+        borrow = next_borrow;
+    }
+    factsTrim(out, width);
+    return out;
+}
+
+static std::vector<std::uint64_t> factsShlBits(const std::vector<std::uint64_t>& value,
+                                               int width,
+                                               std::uint64_t amount) {
+    std::vector<std::uint64_t> out = factsZeros(width);
+    if (amount >= static_cast<std::uint64_t>(std::max(width, 0))) return out;
+    for (int bit = 0; bit < width; ++bit) {
+        std::uint64_t target = static_cast<std::uint64_t>(bit) + amount;
+        if (target < static_cast<std::uint64_t>(width) && factsGetBit(value, bit)) {
+            factsSetBit(out, static_cast<int>(target));
+        }
+    }
+    return out;
+}
+
+static std::vector<std::uint64_t> factsShrBits(const std::vector<std::uint64_t>& value,
+                                               int width,
+                                               std::uint64_t amount,
+                                               bool sign_extend) {
+    std::vector<std::uint64_t> out = factsZeros(width);
+    bool sign = sign_extend && width > 0 && factsGetBit(value, width - 1);
+    for (int bit = 0; bit < width; ++bit) {
+        std::uint64_t source = static_cast<std::uint64_t>(bit) + amount;
+        if (source < static_cast<std::uint64_t>(width)) {
+            if (factsGetBit(value, static_cast<int>(source))) factsSetBit(out, bit);
+        } else if (sign) {
+            factsSetBit(out, bit);
+        }
+    }
+    return out;
+}
+
+static std::vector<std::uint64_t> factsMulBits(const std::vector<std::uint64_t>& lhs,
+                                               const std::vector<std::uint64_t>& rhs,
+                                               int width) {
+    std::vector<std::uint64_t> out = factsZeros(width);
+    for (int bit = 0; bit < width; ++bit) {
+        if (!factsGetBit(rhs, bit)) continue;
+        out = factsAddBits(out, factsShlBits(lhs, width, static_cast<std::uint64_t>(bit)), width);
+    }
+    return out;
+}
+
+static std::optional<std::pair<std::vector<std::uint64_t>, std::vector<std::uint64_t>>>
+factsDivModUnsigned(const std::vector<std::uint64_t>& numerator,
+                    const std::vector<std::uint64_t>& denominator,
+                    int width) {
+    if (!factsAnyBitSet(denominator, width)) return std::nullopt;
+    std::vector<std::uint64_t> quotient = factsZeros(width);
+    std::vector<std::uint64_t> remainder = factsZeros(width);
+    for (int bit = width - 1; bit >= 0; --bit) {
+        remainder = factsShlBits(remainder, width, 1);
+        if (factsGetBit(numerator, bit)) factsSetBit(remainder, 0);
+        if (factsCompareUnsigned(remainder, denominator, width) >= 0) {
+            remainder = factsSubBits(remainder, denominator, width);
+            factsSetBit(quotient, bit);
+        }
+    }
+    return std::make_pair(std::move(quotient), std::move(remainder));
+}
+
+static std::optional<std::pair<std::vector<std::uint64_t>, std::vector<std::uint64_t>>>
+factsDivModSigned(const std::vector<std::uint64_t>& numerator,
+                  const std::vector<std::uint64_t>& denominator,
+                  int width) {
+    if (!factsAnyBitSet(denominator, width)) return std::nullopt;
+    bool numerator_negative = factsGetBit(numerator, width - 1);
+    bool denominator_negative = factsGetBit(denominator, width - 1);
+    std::vector<std::uint64_t> zero = factsZeros(width);
+    std::vector<std::uint64_t> numerator_abs = numerator_negative
+        ? factsSubBits(zero, numerator, width)
+        : numerator;
+    std::vector<std::uint64_t> denominator_abs = denominator_negative
+        ? factsSubBits(zero, denominator, width)
+        : denominator;
+    auto div_mod = factsDivModUnsigned(numerator_abs, denominator_abs, width);
+    if (!div_mod) return std::nullopt;
+    if (numerator_negative != denominator_negative) {
+        div_mod->first = factsSubBits(zero, div_mod->first, width);
+    }
+    if (numerator_negative) {
+        div_mod->second = factsSubBits(zero, div_mod->second, width);
+    }
+    return div_mod;
+}
+
+static bool factsOperandSigned(const Operand& operand, const ValueFacts& facts) {
+    return operand.signed_view || operand.constant.signed_view ||
+           (facts.constant && facts.value.signed_view);
+}
+
+static bool factsConstantToU64(const ValueFacts& facts, std::uint64_t& out) {
+    if (!facts.constant || facts.value.width > 64) return false;
+    for (std::size_t i = 1; i < facts.value.limbs.size(); ++i) {
+        if (facts.value.limbs[i] != 0) return false;
+    }
+    out = facts.value.limbs.empty() ? 0 : facts.value.limbs[0];
+    return true;
+}
+
 static void factsPromoteKnownConstant(ValueFacts& facts) {
     if (facts.constant || !factsAllBitsKnown(facts)) return;
     facts.constant = true;
@@ -482,6 +663,16 @@ static ValueFacts factsFromConstant(const Operand::Constant& constant, int width
     facts.known_one = facts.value.limbs;
     facts.known_zero = factsBitNot(facts.known_one, width);
     return facts;
+}
+
+static ValueFacts factsBoolConstant(bool value) {
+    return factsFromConstant(factsMakeConstant({value ? 1ULL : 0ULL}, 1), 1);
+}
+
+static ValueFacts factsConstantBits(std::vector<std::uint64_t> limbs,
+                                    int width,
+                                    bool signed_view = false) {
+    return factsFromConstant(factsMakeConstant(std::move(limbs), width, signed_view), width);
 }
 
 static ValueFacts factsZExt(const ValueFacts& src, int out_width) {
@@ -562,6 +753,138 @@ static ValueFacts factsBitSelect(const ValueFacts& src, int bit) {
     return out;
 }
 
+static std::optional<ValueFacts> factsInferUnaryConstant(const Operation& op,
+                                                         const std::vector<ValueFacts>& operands,
+                                                         int width) {
+    if (operands.empty() || !operands[0].constant) return std::nullopt;
+    bool signed_view = factsOperandSigned(op.operands[0], operands[0]);
+    std::vector<std::uint64_t> value = factsResizeBits(operands[0].value.limbs,
+                                                       operands[0].width,
+                                                       width,
+                                                       signed_view);
+    switch (op.op) {
+    case OpCode::LogicNot:
+        return factsBoolConstant(!factsAnyBitSet(value, width));
+    case OpCode::BitNot:
+        return factsConstantBits(factsBitNot(std::move(value), width), width, signed_view);
+    case OpCode::Neg:
+        return factsConstantBits(factsSubBits(factsZeros(width), value, width),
+                                 width,
+                                 signed_view);
+    default:
+        return std::nullopt;
+    }
+}
+
+static std::optional<ValueFacts> factsInferBinaryConstant(const Operation& op,
+                                                          const std::vector<ValueFacts>& operands,
+                                                          int width) {
+    if (operands.size() < 2 || !operands[0].constant || !operands[1].constant) {
+        return std::nullopt;
+    }
+    bool lhs_signed = factsOperandSigned(op.operands[0], operands[0]);
+    bool rhs_signed = factsOperandSigned(op.operands[1], operands[1]);
+    bool signed_context = lhs_signed || rhs_signed;
+
+    if (op.op == OpCode::LogicAnd || op.op == OpCode::LogicOr) {
+        bool lhs_true = factsAnyBitSet(operands[0].value.limbs, operands[0].width);
+        bool rhs_true = factsAnyBitSet(operands[1].value.limbs, operands[1].width);
+        return factsBoolConstant(op.op == OpCode::LogicAnd ? (lhs_true && rhs_true)
+                                                           : (lhs_true || rhs_true));
+    }
+
+    if (op.op == OpCode::Eq || op.op == OpCode::Ne ||
+        op.op == OpCode::Lt || op.op == OpCode::Le ||
+        op.op == OpCode::Gt || op.op == OpCode::Ge) {
+        int compare_width = std::max({1, operands[0].width, operands[1].width});
+        std::vector<std::uint64_t> lhs = factsResizeBits(operands[0].value.limbs,
+                                                         operands[0].width,
+                                                         compare_width,
+                                                         lhs_signed);
+        std::vector<std::uint64_t> rhs = factsResizeBits(operands[1].value.limbs,
+                                                         operands[1].width,
+                                                         compare_width,
+                                                         rhs_signed);
+        int cmp = signed_context ? factsCompareSigned(lhs, rhs, compare_width)
+                                 : factsCompareUnsigned(lhs, rhs, compare_width);
+        bool result = false;
+        switch (op.op) {
+        case OpCode::Eq: result = cmp == 0; break;
+        case OpCode::Ne: result = cmp != 0; break;
+        case OpCode::Lt: result = cmp < 0; break;
+        case OpCode::Le: result = cmp <= 0; break;
+        case OpCode::Gt: result = cmp > 0; break;
+        case OpCode::Ge: result = cmp >= 0; break;
+        default: break;
+        }
+        return factsBoolConstant(result);
+    }
+
+    std::vector<std::uint64_t> lhs = factsResizeBits(operands[0].value.limbs,
+                                                     operands[0].width,
+                                                     width,
+                                                     lhs_signed);
+    std::vector<std::uint64_t> rhs = factsResizeBits(operands[1].value.limbs,
+                                                     operands[1].width,
+                                                     width,
+                                                     rhs_signed);
+
+    switch (op.op) {
+    case OpCode::Add:
+        return factsConstantBits(factsAddBits(lhs, rhs, width), width, signed_context);
+    case OpCode::Sub:
+        return factsConstantBits(factsSubBits(lhs, rhs, width), width, signed_context);
+    case OpCode::Mul:
+        return factsConstantBits(factsMulBits(lhs, rhs, width), width, signed_context);
+    case OpCode::Div:
+    case OpCode::Mod: {
+        auto div_mod = signed_context
+            ? factsDivModSigned(lhs, rhs, width)
+            : factsDivModUnsigned(lhs, rhs, width);
+        if (!div_mod) return std::nullopt;
+        return factsConstantBits(op.op == OpCode::Div ? div_mod->first : div_mod->second,
+                                 width,
+                                 signed_context);
+    }
+    case OpCode::BitAnd: {
+        std::vector<std::uint64_t> out = factsZeros(width);
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            out[i] = (i < lhs.size() ? lhs[i] : 0) & (i < rhs.size() ? rhs[i] : 0);
+        }
+        factsTrim(out, width);
+        return factsConstantBits(std::move(out), width, signed_context);
+    }
+    case OpCode::BitOr: {
+        std::vector<std::uint64_t> out = factsZeros(width);
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            out[i] = (i < lhs.size() ? lhs[i] : 0) | (i < rhs.size() ? rhs[i] : 0);
+        }
+        factsTrim(out, width);
+        return factsConstantBits(std::move(out), width, signed_context);
+    }
+    case OpCode::BitXor: {
+        std::vector<std::uint64_t> out = factsZeros(width);
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            out[i] = (i < lhs.size() ? lhs[i] : 0) ^ (i < rhs.size() ? rhs[i] : 0);
+        }
+        factsTrim(out, width);
+        return factsConstantBits(std::move(out), width, signed_context);
+    }
+    case OpCode::Shl:
+    case OpCode::Shr: {
+        std::uint64_t amount = 0;
+        if (!factsConstantToU64(operands[1], amount)) return std::nullopt;
+        return factsConstantBits(op.op == OpCode::Shl
+                                     ? factsShlBits(lhs, width, amount)
+                                     : factsShrBits(lhs, width, amount, lhs_signed),
+                                 width,
+                                 lhs_signed);
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
 static ValueFacts factsInferOperation(const Operation& op, const Program& program) {
     int width = factsWidthOf(op.type);
     ValueFacts unknown_operand = factsUnknown(width);
@@ -587,6 +910,12 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
     if (op.kind == OperationKind::Trunc) return operands.empty() ? factsUnknown(width) : factsTrunc(operands[0], width);
     if (op.kind == OperationKind::Slice) return operands.empty() ? factsUnknown(width) : factsSlice(operands[0], op.lo, width);
     if (op.kind == OperationKind::BitSelect) return operands.empty() ? factsUnknown(1) : factsBitSelect(operands[0], op.bit);
+    if (op.kind == OperationKind::Unary) {
+        if (auto folded = factsInferUnaryConstant(op, operands, width)) return *folded;
+    }
+    if (op.kind == OperationKind::Binary) {
+        if (auto folded = factsInferBinaryConstant(op, operands, width)) return *folded;
+    }
     if (op.kind == OperationKind::Unary && !operands.empty() && op.op == OpCode::BitNot) {
         ValueFacts out = factsUnknown(operands[0].width);
         out.known_zero = operands[0].known_one;
