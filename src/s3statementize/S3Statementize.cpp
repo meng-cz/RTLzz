@@ -93,10 +93,35 @@ TypeInfo storageType(TypeInfo type) {
 }
 
 std::string canonicalName(std::string name) {
+    auto trim = [](std::string& s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+            s.erase(s.begin());
+        }
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+            s.pop_back();
+        }
+    };
+    auto consume = [&](const std::string& word) {
+        trim(name);
+        if (name == word) {
+            name.clear();
+            return true;
+        }
+        if (name.rfind(word + " ", 0) == 0) {
+            name.erase(0, word.size() + 1);
+            return true;
+        }
+        return false;
+    };
+    while (consume("const") || consume("volatile")) {
+    }
     if (name.rfind("struct ", 0) == 0) name = name.substr(7);
     if (name.rfind("class ", 0) == 0) name = name.substr(6);
+    while (consume("const") || consume("volatile")) {
+    }
     auto lt = name.find('<');
     if (lt != std::string::npos) name = name.substr(0, lt);
+    trim(name);
     return name;
 }
 

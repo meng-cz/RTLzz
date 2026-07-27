@@ -31,6 +31,36 @@ std::string stripSpaces(std::string s) {
     return s;
 }
 
+std::string trim(std::string s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+        s.erase(s.begin());
+    }
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+        s.pop_back();
+    }
+    return s;
+}
+
+bool consumeLeadingWord(std::string& s, const std::string& word) {
+    s = trim(std::move(s));
+    if (s == word) {
+        s.clear();
+        return true;
+    }
+    if (s.rfind(word + " ", 0) == 0) {
+        s.erase(0, word.size() + 1);
+        return true;
+    }
+    return false;
+}
+
+std::string stripLeadingCvQualifiers(std::string s) {
+    while (consumeLeadingWord(s, "const") ||
+           consumeLeadingWord(s, "volatile")) {
+    }
+    return trim(std::move(s));
+}
+
 std::optional<int> parseTemplateWidth(const std::string& text, const std::string& token) {
     std::string compact = stripSpaces(text);
     const std::string prefix = token + "<";
@@ -257,8 +287,10 @@ std::optional<TypeInfo> recognizeRecordType(CXType type) {
         return std::nullopt;
     }
     TypeInfo out;
-    out.name = typeSpelling(type);
-    out.struct_name = out.name.empty() ? canonicalTypeSpelling(type) : out.name;
+    out.name = stripLeadingCvQualifiers(typeSpelling(type));
+    out.struct_name = out.name.empty()
+        ? stripLeadingCvQualifiers(canonicalTypeSpelling(type))
+        : out.name;
     out.width = 0;
     return out;
 }

@@ -23,6 +23,10 @@ struct Matrix {
     Pair loose[2];
 };
 
+struct Holder {
+    Pair dec;
+};
+
 Pair make_pair_positional(Int<8> a, Int<8> b) {
     Pair p{a, b};
     return p;
@@ -84,6 +88,11 @@ Int<8> consume_pair_temp_arg(Pair value, Int<8> salt) {
     return value.lo ^ salt ^ value.hi;
 }
 
+Int<8> read_const_member_ref(const Holder& req) {
+    const Pair& dec = req.dec;
+    return dec.lo ^ dec.hi;
+}
+
 Matrix make_matrix(Packet a, Packet b, Pair p0, Pair p1) {
     Matrix mat;
     mat.packets[0] = a;
@@ -119,6 +128,8 @@ Int<8> helper_array_return_temp_index;
 Int<8> lambda_struct_value;
 #pragma output_port aggregate_temp_arg
 Int<8> aggregate_temp_arg;
+#pragma output_port const_member_ref
+Int<8> const_member_ref;
 #pragma output_port lambda_array_value
 Int<8> lambda_array_value;
 #pragma output_port nested_dynamic_read
@@ -183,6 +194,10 @@ void hls_main() {
     aggregate_temp_arg =
         consume_pair_temp_arg(Pair{seed + Int<8>(9), bias ^ Int<8>(0x6a)},
                               selected.lo);
+
+    Holder holder;
+    holder.dec = selected;
+    const_member_ref = read_const_member_ref(holder);
 
     auto array_lambda = [](Arr2 values, int idx, Int<8> patch) -> Arr2 {
         Arr2 out = values;
@@ -272,6 +287,7 @@ void hls_main() {
         aggregate_pos ^
         helper_struct_return ^
         aggregate_temp_arg ^
+        const_member_ref ^
         nested_dynamic_read ^
         nested_dynamic_write ^
         internal_struct_array ^
