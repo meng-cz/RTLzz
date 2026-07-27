@@ -461,7 +461,10 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
         for flat, element in enumerate(port["element_symbols"]):
             input_order.append(element)
             if is_array:
-                expr = f"top->{verilator_member_name(port['name'])}[{flat}]"
+                expr = access_indices(
+                    f"top->{verilator_member_name(port['name'])}",
+                    element_indices(port, flat),
+                )
             else:
                 expr = f"top->{verilator_member_name(port['name'])}"
             lines.append("  " + rtl_cpp_assign_from_argv(expr, port["type"], arg_index))
@@ -476,7 +479,10 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
         is_array = bool(port["type"].get("is_array"))
         for flat, element in enumerate(port["element_symbols"]):
             if is_array:
-                expr = f"top->{verilator_member_name(port['name'])}[{flat}]"
+                expr = access_indices(
+                    f"top->{verilator_member_name(port['name'])}",
+                    element_indices(port, flat),
+                )
             else:
                 expr = f"top->{verilator_member_name(port['name'])}"
             lines.append(

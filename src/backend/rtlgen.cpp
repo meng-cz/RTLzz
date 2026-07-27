@@ -326,6 +326,33 @@ private:
         return sanitizeIdentifier(program_.signal(id).name);
     }
 
+    std::vector<int> linearIndices(const beir::ValueType& type, std::size_t linear) const {
+        std::vector<int> dims = arrayDims(type);
+        std::vector<int> indices(dims.size(), 0);
+        std::size_t remaining = linear;
+        for (std::size_t reverse = dims.size(); reverse-- > 0;) {
+            int dim = dims[reverse];
+            if (dim <= 0) throw std::runtime_error("rtlgen array port has invalid dimension");
+            indices[reverse] = static_cast<int>(remaining % static_cast<std::size_t>(dim));
+            remaining /= static_cast<std::size_t>(dim);
+        }
+        if (remaining != 0) throw std::runtime_error("rtlgen array port element index out of range");
+        return indices;
+    }
+
+    std::string indexedRef(std::string base, const std::vector<int>& indices) const {
+        for (int index : indices) base += "[" + std::to_string(index) + "]";
+        return base;
+    }
+
+    std::string portElementRef(const beir::Port& port, std::size_t linear) const {
+        return indexedRef(sanitizeIdentifier(port.name), linearIndices(port.type, linear));
+    }
+
+    std::string portElementRef(const beir::Operand& port, std::size_t linear) const {
+        return indexedRef(sanitizeIdentifier(port.text), linearIndices(port.type, linear));
+    }
+
     bool isDirectPortSignal(const beir::Signal& signal) const {
         return !signal.port_name.empty() && signal.name == signal.port_name;
     }
@@ -460,7 +487,7 @@ private:
                 for (std::size_t i = 0; i < port.element_nodes.size(); ++i) {
                     const auto& signal = program_.signal(port.element_nodes[i]);
                     if (isDirectPortSignal(signal)) continue;
-                    os << "    assign " << sanitizeIdentifier(port.name) << "[" << i << "] = "
+                    os << "    assign " << portElementRef(port, i) << " = "
                        << sig(signal.id) << ";" << debugComment(signalDebug(signal)) << "\n";
                 }
                 continue;
@@ -483,7 +510,7 @@ private:
                 const auto& signal = program_.signal(port.element_nodes[i]);
                 if (isDirectPortSignal(signal)) continue;
                 os << "    assign " << sig(port.element_nodes[i]) << " = "
-                   << sanitizeIdentifier(port.name) << "[" << i << "];"
+                   << portElementRef(port, i) << ";"
                    << debugComment(signalDebug(signal)) << "\n";
             }
         }
@@ -643,6 +670,13 @@ private:
         case beir::OperationKind::PortRead:
             need(1);
             if (ops.size() == 1) return operand(ops[0]);
+            if (arrayDims(ops[0].type).size() > 1) {
+                if (ops[1].kind != beir::OperandKind::Literal ||
+                    !ops[1].constant.fitsU64()) {
+                    throw std::runtime_error("rtlgen dynamic linear read of multidimensional port is unsupported");
+                }
+                return portElementRef(ops[0], static_cast<std::size_t>(ops[1].constant.toU64()));
+            }
             return operand(ops[0]) + "[" + operand(ops[1]) + "]";
         case beir::OperationKind::Binary:
             need(2);
