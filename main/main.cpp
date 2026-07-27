@@ -15,8 +15,11 @@ static void printUsage(const char* prog) {
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
               << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]"
               << " [--rtl-debug-file FILE] [--no-rtl-debug]\n";
-    std::cerr << "Default format is rtl. portmeta emits the V2 port metadata used by RTL differential tests.\n";
-    std::cerr << "For rtl output, a debug report is emitted by default to <rtl-output>.dgb.\n";
+    std::cerr << "Required: source.cpp and --top. Default format is rtl.\n";
+    std::cerr << "Default output files append .sv, .beir, or .ptmt to the input file path; use -o - for stdout.\n";
+    std::cerr << "For rtl output, a debug report is emitted by default to <rtl-output>.dbg.\n";
+    std::cerr << "Default --vullib is ./vullib from the current working directory.\n";
+    std::cerr << "Default clang language mode is -std=c++20 unless --clang-arg already sets -std.\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -49,6 +52,13 @@ static std::vector<std::string> splitArgs(const std::string& text) {
 }
 
 static constexpr int kMaxUnrollLimit = 1000000;
+
+static bool hasLanguageStandardArg(const std::vector<std::string>& clang_args) {
+    for (const auto& arg : clang_args) {
+        if (arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0) return true;
+    }
+    return false;
+}
 
 static bool readSourceUnits(const std::string& path,
                             std::vector<std::string>& units,
@@ -116,14 +126,25 @@ static bool writeLinesToFile(const std::string& output_file,
     return true;
 }
 
+static const char* defaultOutputSuffix(const std::string& format) {
+    if (format == "beir") return ".beir";
+    if (format == "portmeta") return ".ptmt";
+    return ".sv";
+}
+
+static std::string defaultOutputFile(const std::string& source_file,
+                                     const std::string& format) {
+    return source_file + defaultOutputSuffix(format);
+}
+
 static std::string defaultRtlDebugFile(const std::string& source_file,
                                        const std::string& output_file) {
-    if (!output_file.empty()) return output_file + ".dgb";
-    return source_file + ".rtl.dgb";
+    if (output_file.empty() || output_file == "-") return defaultOutputFile(source_file, "rtl") + ".dbg";
+    return output_file + ".dbg";
 }
 
 static int runMain(int argc, char* argv[]) {
-    if (argc < 4) {
+    if (argc < 2) {
         printUsage(argv[0]);
         return 1;
     }
@@ -197,6 +218,13 @@ static int runMain(int argc, char* argv[]) {
         std::cerr << "Unknown format: " << format << "\n";
         return 1;
     }
+    if (output_file.empty()) output_file = defaultOutputFile(source_file, format);
+    if (vullib_dir.empty()) {
+        vullib_dir = (std::filesystem::current_path() / "vullib").string();
+    }
+    if (!hasLanguageStandardArg(clang_args)) {
+        clang_args.push_back("-std=c++20");
+    }
 
     rtlzz::CompileOptions options;
     std::string read_error;
@@ -227,26 +255,14 @@ static int runMain(int argc, char* argv[]) {
         return 1;
     }
 
-    if (output_file.empty()) {
+    if (output_file == "-") {
         for (const auto& line : result.output_codelines) std::cout << line;
     } else {
-        std::filesystem::path out_path(output_file);
-        if (out_path.has_parent_path()) {
-            std::error_code ec;
-            std::filesystem::create_directories(out_path.parent_path(), ec);
-            if (ec) {
-                std::cerr << "Cannot create output directory: "
-                          << out_path.parent_path().string() << ": "
-                          << ec.message() << "\n";
-                return 1;
-            }
-        }
-        std::ofstream ofs(output_file);
-        if (!ofs) {
-            std::cerr << "Cannot open output file: " << output_file << "\n";
+        std::string write_error;
+        if (!writeLinesToFile(output_file, result.output_codelines, write_error)) {
+            std::cerr << write_error << "\n";
             return 1;
         }
-        for (const auto& line : result.output_codelines) ofs << line;
     }
 
     if (format == "rtl" && emit_rtl_debug && !result.debug_codelines.empty()) {

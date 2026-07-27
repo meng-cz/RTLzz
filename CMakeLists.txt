@@ -136,6 +136,14 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     target_link_libraries(predicate-expand PRIVATE predicate-expand-objects)
     configure_debug_executable(predicate-expand)
 
+    add_custom_command(TARGET predicate-expand POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${PROJECT_SOURCE_DIR}/third_party/vulsim/vullib"
+            "$<TARGET_FILE_DIR:predicate-expand>/vullib"
+        COMMENT "Copying default vullib directory"
+        VERBATIM
+    )
+
     file(GLOB TESTV2_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/testv2/*.cpp"
     )
