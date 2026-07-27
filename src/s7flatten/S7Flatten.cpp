@@ -140,6 +140,18 @@ struct LeafInfo {
     DebugLoc debug_loc;
 };
 
+S7Operand defaultLiteralOperandForLeaf(const LeafInfo& leaf, DebugLoc loc) {
+    S7Operand out;
+    out.kind = S7OperandKind::Literal;
+    out.type = leaf.type;
+    out.signed_view = false;
+    out.debug_loc = std::move(loc);
+    out.literal_value = (leaf.type.name == "bool" || leaf.type.hw_kind == "bool")
+        ? "false"
+        : "0";
+    return out;
+}
+
 struct SymbolLeafMap {
     SymbolId source_symbol = -1;
     std::string source_name;
@@ -981,8 +993,15 @@ void lowerConstruct(Context& ctx,
     Selection target = resolveLValue(ctx, stmt.target, out);
     if (target.dynamic) fail("Construct target may not be dynamic array element", stmt.debug_loc);
     if (target.leaves.empty()) return;
+    if (stmt.args.empty()) {
+        for (const auto& leaf : target.leaves) {
+            out.push_back(makeAssign(leaf,
+                                     defaultLiteralOperandForLeaf(leaf, stmt.debug_loc),
+                                     stmt.debug_loc));
+        }
+        return;
+    }
     if (target.leaves.size() == 1) {
-        if (stmt.args.empty()) return;
         if (stmt.args.size() != 1) {
             fail("Scalar construct expects at most one value argument", stmt.debug_loc);
         }
@@ -991,7 +1010,6 @@ void lowerConstruct(Context& ctx,
                                  stmt.debug_loc));
         return;
     }
-    if (stmt.args.empty()) return;
     if (auto metadata_values = argsByConstructorMetadata(ctx, stmt, target.leaves, out)) {
         for (std::size_t i = 0; i < target.leaves.size(); ++i) {
             out.push_back(makeAssign(target.leaves[i], metadata_values->at(i), stmt.debug_loc));

@@ -127,6 +127,8 @@ Int<8> const_lookup;
 Int<8> multiline_const_lookup;
 #pragma output_port loop_chain_array_clear
 Int<8> loop_chain_array_clear;
+#pragma output_port array_struct_default_init
+Int<8> array_struct_default_init;
 #pragma output_port final_mix
 Int<8> final_mix;
 
@@ -243,6 +245,19 @@ void hls_main() {
     loop_chain_array_clear =
         Int<8>(cleared[0] | cleared[1] | cleared[2] | cleared[3]);
 
+    std::array<Pair, 2> pair_slots = {};
+    if (choose_hi) {
+        pair_slots[0] = make_pair_positional(seed, bias);
+    }
+    if (choose_tail) {
+        pair_slots[1] = make_pair_copy_list(seed, bias);
+    }
+    array_struct_default_init =
+        pair_slots[lane_idx].lo ^
+        pair_slots[tap_idx].hi ^
+        pair_slots[0].hi ^
+        pair_slots[1].lo;
+
     final_mix =
         aggregate_pos ^
         helper_struct_return ^
@@ -250,5 +265,6 @@ void hls_main() {
         nested_dynamic_write ^
         internal_struct_array ^
         const_lookup ^
-        multiline_const_lookup;
+        multiline_const_lookup ^
+        array_struct_default_init;
 }

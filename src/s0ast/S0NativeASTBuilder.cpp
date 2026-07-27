@@ -3886,7 +3886,8 @@ static bool activeStructHasUserConstructor(const TypeInfo& type) {
 }
 
 static bool isAggregateInitTargetType(const TypeInfo& type) {
-    return activeStructFieldsFor(type) != nullptr &&
+    return !type.is_array &&
+           activeStructFieldsFor(type) != nullptr &&
            !activeStructHasUserConstructor(type);
 }
 
@@ -4069,6 +4070,7 @@ static StmtPtr expandAggregateInitDecl(
     const StmtPtr& stmt,
     const std::vector<std::pair<std::string, ExprPtr>>& designated_args) {
     if (!stmt || stmt->kind != StmtKind::Decl) return nullptr;
+    if (stmt->decl_type.is_array) return nullptr;
     if (stmt->decl_init_args.empty() && designated_args.empty()) return nullptr;
     const auto* fields = activeStructFieldsFor(stmt->decl_type);
     if (!fields || fields->empty()) return nullptr;
@@ -4244,7 +4246,9 @@ static StmtPtr convertStmtImpl(CXCursor cursor) {
                     normalizeArrayAggregateInit(stmt, init_expr);
                     if (isAggregateInitTargetType(stmt->decl_type) &&
                         isAggregateInitCursor(init_expr)) {
-                        collectInitArgExprs(init_expr, stmt->decl_init_args);
+                        if (!getChildren(init_expr).empty()) {
+                            collectInitArgExprs(init_expr, stmt->decl_init_args);
+                        }
                     }
                     if (stmt->decl_type.is_array) {
                         const std::string declaration_text = cursorText(child, true);
