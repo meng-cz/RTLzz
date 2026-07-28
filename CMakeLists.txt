@@ -28,55 +28,51 @@ if(GIT_FOUND)
 endif()
 message(STATUS "Predicate expand build commit: ${PREDICATE_EXPAND_BUILD_COMMIT}")
 
-set(_LLVM_ROOT_HINTS
+set(_LLVM18_ROOT_HINTS
+    "$ENV{LLVM18_ROOT}"
     "$ENV{LLVM_ROOT}"
-    "$ENV{LLVM_DIR}/../../.."
+    "${LLVM18_ROOT}"
     "${LLVM_ROOT}"
-    "${LLVM_DIR}/../../.."
     "/usr/lib/llvm-18"
-    "/usr/lib/llvm-17"
-    "/usr/lib/llvm-16"
-    "/usr/lib/llvm-15"
-    "/usr/lib/llvm-14"
-    "/usr/lib/llvm-13"
+    "/opt/homebrew/opt/llvm@18"
     "/opt/homebrew/opt/llvm"
-    "/usr/local/opt/llvm"
     "C:/Program Files/LLVM"
 )
 
-find_path(LIBCLANG_INCLUDE_DIR
-    NAMES clang-c/Index.h
-    HINTS ${_LLVM_ROOT_HINTS}
-    PATH_SUFFIXES include
-    DOC "Directory containing clang-c/Index.h"
+find_package(LLVM REQUIRED CONFIG
+    HINTS ${_LLVM18_ROOT_HINTS}
+    PATH_SUFFIXES lib/cmake/llvm cmake
+)
+find_package(Clang REQUIRED CONFIG
+    HINTS ${_LLVM18_ROOT_HINTS}
+    PATH_SUFFIXES lib/cmake/clang cmake
 )
 
-find_library(LIBCLANG_LIBRARY
-    NAMES clang libclang
-    HINTS ${_LLVM_ROOT_HINTS}
-    PATH_SUFFIXES lib lib64
-    DOC "libclang C API library"
-)
+if(NOT LLVM_VERSION_MAJOR EQUAL 18)
+    message(FATAL_ERROR
+        "RTLzz requires LLVM/Clang 18.x for the Clang C++ API frontend, "
+        "but CMake found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}."
+    )
+endif()
+
+if(NOT TARGET libclang)
+    message(FATAL_ERROR
+        "Clang package at ${Clang_DIR} does not export the libclang target. "
+        "Install the LLVM/Clang 18 development packages."
+    )
+endif()
+
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}: ${LLVM_DIR}")
+message(STATUS "Found Clang package: ${Clang_DIR}")
 
 if(WIN32)
     find_file(LIBCLANG_RUNTIME
         NAMES libclang.dll clang.dll
-        HINTS ${_LLVM_ROOT_HINTS}
+        HINTS ${_LLVM18_ROOT_HINTS}
         PATH_SUFFIXES bin
         DOC "libclang runtime DLL"
     )
 endif()
-
-if(NOT LIBCLANG_INCLUDE_DIR OR NOT LIBCLANG_LIBRARY)
-    message(FATAL_ERROR
-        "libclang was not found. Install LLVM/Clang development files, or pass "
-        "-DLIBCLANG_INCLUDE_DIR=/path/to/include and "
-        "-DLIBCLANG_LIBRARY=/path/to/libclang."
-    )
-endif()
-
-message(STATUS "Found libclang include dir: ${LIBCLANG_INCLUDE_DIR}")
-message(STATUS "Found libclang library: ${LIBCLANG_LIBRARY}")
 if(WIN32)
     if(LIBCLANG_RUNTIME)
         message(STATUS "Found libclang runtime: ${LIBCLANG_RUNTIME}")
@@ -94,10 +90,17 @@ add_library(predicate-expand::objects ALIAS predicate-expand-objects)
 
 target_include_directories(predicate-expand-objects PUBLIC
     ${PROJECT_SOURCE_DIR}/src
-    ${LIBCLANG_INCLUDE_DIR}
+    ${LLVM_INCLUDE_DIRS}
+    ${CLANG_INCLUDE_DIRS}
 )
 
-target_link_libraries(predicate-expand-objects PUBLIC ${LIBCLANG_LIBRARY})
+target_link_libraries(predicate-expand-objects PUBLIC
+    libclang
+    clangTooling
+    clangFrontend
+    clangAST
+    clangBasic
+)
 
 target_compile_definitions(predicate-expand-objects PRIVATE
     PREDICATE_EXPAND_BUILD_COMMIT="${PREDICATE_EXPAND_BUILD_COMMIT}"
@@ -146,6 +149,7 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 
     file(GLOB TESTV2_SOURCES CONFIGURE_DEPENDS
         "${PROJECT_SOURCE_DIR}/testv2/*.cpp"
+        "${PROJECT_SOURCE_DIR}/testv2/clang18/*.cpp"
     )
     foreach(test_source IN LISTS TESTV2_SOURCES)
         get_filename_component(test_stem "${test_source}" NAME_WE)

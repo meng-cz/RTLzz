@@ -51,6 +51,12 @@ class IntSignedView;
 template <typename Operand>
 struct IntOperandTraits;
 
+template <typename... Operands>
+concept IntCatOperands =
+    sizeof...(Operands) > 0 &&
+    (... && IntOperandTraits<std::remove_cvref_t<Operands>>::VALID) &&
+    (... && !IntOperandTraits<std::remove_cvref_t<Operands>>::IS_SIGNED);
+
 template <typename LhsOperand, typename RhsOperand>
     requires(IntOperandTraits<std::remove_cvref_t<LhsOperand>>::VALID
              && IntOperandTraits<std::remove_cvref_t<RhsOperand>>::VALID
@@ -151,9 +157,7 @@ template <uint32_t N, typename Operand>
 constexpr auto Repeat(const Operand& operand);
 
 template <typename... Operands>
-    requires(sizeof...(Operands) > 0
-             && (... && IntOperandTraits<std::remove_cvref_t<Operands>>::VALID)
-             && (... && !IntOperandTraits<std::remove_cvref_t<Operands>>::IS_SIGNED))
+    requires IntCatOperands<Operands...>
 constexpr auto Cat(const Operands&... operands);
 
 template <typename LhsOperand, typename RhsOperand>
@@ -416,6 +420,10 @@ private:
     }
 
 public:
+    std::array<uint64_t, NUM_WORDS> get_data() const {
+        return data;
+    }
+
     constexpr Int() : data{} {}
 
     constexpr Int(bool value) : data{} {
@@ -660,9 +668,7 @@ public:
                  && !IntOperandTraits<std::remove_cvref_t<Operand>>::IS_SIGNED)
     friend constexpr auto Repeat(const Operand& operand);
     template <typename... Operands>
-        requires(sizeof...(Operands) > 0
-                 && (... && IntOperandTraits<std::remove_cvref_t<Operands>>::VALID)
-                 && (... && !IntOperandTraits<std::remove_cvref_t<Operands>>::IS_SIGNED))
+        requires IntCatOperands<Operands...>
     friend constexpr auto Cat(const Operands&... operands);
     template <typename LhsOperand, typename RhsOperand>
         requires(IntOperandTraits<std::remove_cvref_t<LhsOperand>>::VALID
@@ -1720,9 +1726,7 @@ constexpr auto Repeat(const Operand& operand) {
 }
 
 template <typename... Operands>
-    requires(sizeof...(Operands) > 0
-             && (... && IntOperandTraits<std::remove_cvref_t<Operands>>::VALID)
-             && (... && !IntOperandTraits<std::remove_cvref_t<Operands>>::IS_SIGNED))
+    requires IntCatOperands<Operands...>
 constexpr auto Cat(const Operands&... operands) {
     constexpr uint32_t RESULT_BIT_WIDTH = (int_operand_bit_width_v<Operands> + ...);
     Int<RESULT_BIT_WIDTH> out(0);
