@@ -55,7 +55,10 @@ static constexpr int kMaxUnrollLimit = 1000000;
 
 static bool hasLanguageStandardArg(const std::vector<std::string>& clang_args) {
     for (const auto& arg : clang_args) {
-        if (arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0) return true;
+        if (arg == "-std" || arg == "--std" ||
+            arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0) {
+            return true;
+        }
     }
     return false;
 }

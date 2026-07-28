@@ -6196,8 +6196,16 @@ static NativeBuildResult buildV2ASTFromSourceImpl(const std::string& source_file
 
     CXIndex index = clang_createIndex(0, 0);
 
+    auto has_language_standard_arg = std::any_of(
+        extra_args.begin(), extra_args.end(), [](const std::string& arg) {
+            return arg == "-std" || arg == "--std" ||
+                   arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0;
+        });
+
     std::vector<const char*> args;
-    args.push_back("-std=c++17");
+    if (!has_language_standard_arg) {
+        args.push_back("-std=c++20");
+    }
     args.push_back("-fsyntax-only");
     for (auto& a : extra_args) args.push_back(a.c_str());
 

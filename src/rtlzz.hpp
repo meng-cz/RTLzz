@@ -117,8 +117,21 @@ inline const char* outputKindName(OutputKind kind) {
     return "unknown";
 }
 
+inline bool hasLanguageStandardArg(const std::vector<std::string>& clang_args) {
+    for (const auto& arg : clang_args) {
+        if (arg == "-std" || arg == "--std" ||
+            arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline std::vector<std::string> buildClangArgs(const CompileOptions& options) {
     std::vector<std::string> args = options.clang_args;
+    if (!hasLanguageStandardArg(args)) {
+        args.push_back("-std=c++20");
+    }
     if (!options.vullib_dir.empty()) {
         args.push_back("-I" + options.vullib_dir);
     }
