@@ -180,7 +180,8 @@ bool isSupportedScalar(const TypeInfo& type) {
     }
     if (isBoolType(type)) return true;
     if (type.width <= 0) return false;
-    if (type.hw_kind == "Int" || type.hw_kind == "builtin") {
+    if (type.hw_kind == "Int" || type.hw_kind == "builtin" ||
+        type.hw_kind == "enum") {
         return true;
     }
     if (type.name.rfind("Int<", 0) == 0 ||
@@ -391,7 +392,13 @@ bool isAllowedConstructorCall(const Context& ctx, const ExprPtr& expr) {
     if (!expr || expr->kind != ExprKind::Call) return false;
     if (expr->callee == "Int" ||
         expr->callee.rfind("Int<", 0) == 0 ||
-        expr->callee == "bool") {
+        expr->callee == "bool" ||
+        expr->callee == "__init_list") {
+        return true;
+    }
+    if (expr->type.is_array &&
+        (canonicalName(expr->callee) == canonicalName(typeLabel(expr->type)) ||
+         expr->callee.find('[') != std::string::npos)) {
         return true;
     }
     if (!expr->type.struct_name.empty()) {

@@ -62,6 +62,19 @@ std::string canonicalTypeName(std::string name) {
     return canonicalCallee(std::move(name));
 }
 
+std::string canonicalArrayBaseTypeName(std::string name) {
+    name = canonicalTypeName(std::move(name));
+    auto bracket = name.find('[');
+    if (bracket != std::string::npos) name = name.substr(0, bracket);
+    return name;
+}
+
+std::string constructorTypeName(const TypeInfo& type) {
+    if (type.is_array && !type.name.empty()) return type.name;
+    if (!type.struct_name.empty()) return type.struct_name;
+    return type.name;
+}
+
 bool isDynamicRangeAt(const Expr& expr) {
     return expr.intrinsic == IntrinsicKind::DynamicRangeAt ||
            expr.callee == "__dynamic_range_at";
@@ -433,6 +446,7 @@ private:
     bool isConstructorInit(const ExprPtr& init, const TypeInfo& decl_type) const {
         if (!init || init->kind != ExprKind::Call) return false;
         std::string callee = canonicalTypeName(init->callee);
+        std::string callee_array_base = canonicalArrayBaseTypeName(init->callee);
         std::vector<std::string> type_names;
         if (!decl_type.struct_name.empty()) type_names.push_back(decl_type.struct_name);
         if (!decl_type.name.empty()) type_names.push_back(decl_type.name);
@@ -443,7 +457,22 @@ private:
             type_names.push_back(decl_type.hw_kind);
         }
         for (const auto& name : type_names) {
-            if (!name.empty() && callee == canonicalTypeName(name)) return true;
+            if (name.empty()) continue;
+            if (callee == canonicalTypeName(name)) return true;
+            if ((decl_type.is_array || init->type.is_array) &&
+                callee_array_base == canonicalArrayBaseTypeName(name)) {
+                return true;
+            }
+        }
+        if (decl_type.is_array || init->type.is_array) {
+            if (!decl_type.struct_name.empty() &&
+                callee_array_base == canonicalArrayBaseTypeName(decl_type.struct_name)) {
+                return true;
+            }
+            if (!init->type.struct_name.empty() &&
+                callee_array_base == canonicalArrayBaseTypeName(init->type.struct_name)) {
+                return true;
+            }
         }
         return false;
     }
@@ -474,9 +503,7 @@ private:
         if (!stmt->decl_init_args.empty()) {
             out.push_back(makeConstructStmt(
                 std::move(target),
-                !stmt->decl_type.struct_name.empty()
-                    ? stmt->decl_type.struct_name
-                    : stmt->decl_type.name,
+                constructorTypeName(stmt->decl_type),
                 normalizeExprList(stmt->decl_init_args, stats),
                 stmt->decl_type,
                 stmt->debug_loc));
@@ -486,9 +513,7 @@ private:
         if (stmt->decl_default_constructed) {
             out.push_back(makeConstructStmt(
                 std::move(target),
-                !stmt->decl_type.struct_name.empty()
-                    ? stmt->decl_type.struct_name
-                    : stmt->decl_type.name,
+                constructorTypeName(stmt->decl_type),
                 {},
                 stmt->decl_type,
                 stmt->debug_loc));

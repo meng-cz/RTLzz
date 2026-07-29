@@ -3,8 +3,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <string>
+#include <vector>
 
 [[noreturn]] static void failCheck(const char* expr, const char* file, int line) {
     std::cerr << file << ":" << line << ": CHECK failed: " << expr << "\n";
@@ -200,7 +200,37 @@ void hls_main() {
 
 } // namespace
 
-int main() {
+static bool runOneFile(const std::string& path) {
+    pred::s0clang18::Clang18Options options;
+    options.source_name = path;
+    const char* top_env = std::getenv("RTLZZ_S018_TOP");
+    options.top_function = top_env && *top_env ? top_env : "hls_main";
+    options.clang_args = {"-I.", "-Ithird_party/vulsim/vullib"};
+    options.debug_print = true;
+
+    auto result = pred::s0clang18::buildS0ProgramWithClang18(options);
+    const std::size_t function_count =
+        result.program ? result.program->functions.size() : 0;
+    std::cout << path << ": " << (result.ok() ? "PASS" : "FAIL")
+              << " functions=" << function_count << "\n";
+    if (!result.ok()) {
+        if (result.error) std::cerr << "  error: " << result.error->message << "\n";
+        if (!result.debug_text.empty()) std::cerr << result.debug_text << "\n";
+    } else if (std::getenv("RTLZZ_S018_DUMP")) {
+        std::cerr << result.debug_text << "\n";
+    }
+    return result.ok();
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1) {
+        bool all_ok = true;
+        for (int i = 1; i < argc; ++i) {
+            all_ok = runOneFile(argv[i]) && all_ok;
+        }
+        return all_ok ? 0 : 1;
+    }
+
     testDirectBridge();
     testPipelineEntry();
     std::cout << "s018bridge_test passed\n";

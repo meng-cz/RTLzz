@@ -139,6 +139,12 @@ TypeInfo arrayElementType(TypeInfo type) {
     return type;
 }
 
+std::string constructorTypeName(const TypeInfo& type) {
+    if (type.is_array && !type.name.empty()) return type.name;
+    if (!type.struct_name.empty()) return type.struct_name;
+    return type.name;
+}
+
 bool isAggregateType(const TypeInfo& type) {
     TypeInfo stored = storageType(type);
     return stored.is_array ||
@@ -418,12 +424,27 @@ bool isHardwareConstructorName(const std::string& callee) {
            callee.rfind("Int<", 0) == 0;
 }
 
+std::string arrayBaseConstructorName(std::string callee) {
+    callee = canonicalName(std::move(callee));
+    auto bracket = callee.find('[');
+    if (bracket != std::string::npos) callee = callee.substr(0, bracket);
+    return callee;
+}
+
 bool isConstructorCall(const ExprPtr& expr, const LowerContext& ctx) {
     if (!expr || expr->kind != ExprKind::Call) return false;
     if (isHardwareConstructorName(expr->callee)) {
         return true;
     }
     std::string callee = canonicalName(expr->callee);
+    if (expr->type.is_array && !expr->type.name.empty() &&
+        arrayBaseConstructorName(expr->callee) == canonicalName(expr->type.name)) {
+        return true;
+    }
+    if (expr->type.is_array && !expr->type.struct_name.empty() &&
+        arrayBaseConstructorName(expr->callee) == canonicalName(expr->type.struct_name)) {
+        return true;
+    }
     if (!expr->type.struct_name.empty() &&
         callee == canonicalName(expr->type.struct_name)) {
         return true;
@@ -442,6 +463,14 @@ bool isConstructorCall(const s1apinorm::S1ExprPtr& expr, const LowerContext& ctx
         return true;
     }
     std::string callee = canonicalName(expr->callee);
+    if (expr->type.is_array && !expr->type.name.empty() &&
+        arrayBaseConstructorName(expr->callee) == canonicalName(expr->type.name)) {
+        return true;
+    }
+    if (expr->type.is_array && !expr->type.struct_name.empty() &&
+        arrayBaseConstructorName(expr->callee) == canonicalName(expr->type.struct_name)) {
+        return true;
+    }
     if (!expr->type.struct_name.empty() &&
         callee == canonicalName(expr->type.struct_name)) {
         return true;
@@ -1759,18 +1788,14 @@ private:
                 out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
                                                       stmt->decl_type,
                                                       stmt->debug_loc),
-                                            !stmt->decl_type.struct_name.empty()
-                                                ? stmt->decl_type.struct_name
-                                                : stmt->decl_type.name,
+                                            constructorTypeName(stmt->decl_type),
                                             std::move(args), stmt->decl_type,
                                             stmt->debug_loc));
             } else if (stmt->decl_default_constructed) {
                 out.push_back(makeConstruct(varLValue(stmt->decl_name, decl_symbol,
                                                       stmt->decl_type,
                                                       stmt->debug_loc),
-                                            !stmt->decl_type.struct_name.empty()
-                                                ? stmt->decl_type.struct_name
-                                                : stmt->decl_type.name,
+                                            constructorTypeName(stmt->decl_type),
                                             {}, stmt->decl_type, stmt->debug_loc));
             }
             return out;

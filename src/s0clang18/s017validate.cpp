@@ -122,6 +122,11 @@ bool isVoidType(const TypeInfo& type) {
            !type.is_reference;
 }
 
+bool isLambdaObjectType(const TypeInfo& type) {
+    return type.name.find("(lambda") != std::string::npos ||
+           type.struct_name.find("(lambda") != std::string::npos;
+}
+
 bool isKnownScalarType(const TypeInfo& type,
                        const std::unordered_set<std::string>& records) {
     if (isVoidType(type)) return true;
@@ -153,6 +158,7 @@ void validateType(SurfaceValidationResult& result,
         addIssue(result, SurfaceIssueKind::IllegalReferenceOrPointer, loc,
                  subject + " uses reference type '" + typeLabel(type) + "'");
     }
+    if (isLambdaObjectType(type)) return;
     if (type.is_array) {
         if (type.array_dims.empty()) {
             addIssue(result, SurfaceIssueKind::UnknownType, loc,
@@ -175,6 +181,9 @@ bool isConstructorCallee(const Expr& expr,
                          const std::unordered_set<std::string>& records) {
     const std::string callee = canonicalName(expr.callee);
     if (callee == "Int" || callee == "bool" || callee.rfind("Int<", 0) == 0) {
+        return true;
+    }
+    if (expr.type.is_array && callee == canonicalName(typeLabel(expr.type))) {
         return true;
     }
     if (!expr.type.struct_name.empty() &&

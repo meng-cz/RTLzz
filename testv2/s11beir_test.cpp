@@ -434,7 +434,7 @@ static s10predicate::S10Value predS10Value(s10predicate::S10ValueId id,
 static void outputInitialReadIsZeroTotalized() {
     s10predicate::S10PredicateProgram program;
     program.name = "bad";
-    program.base_symbols.push_back(s10predicate::S10Symbol{0, intType(8), "out", s10predicate::S10SymbolRole::Port});
+    program.base_symbols.push_back(s10predicate::S10Symbol{0, intType(8), "out", {}, s10predicate::S10SymbolRole::Port});
     program.values.push_back(predS10Value(0, 0, 0, intType(8), s10predicate::S10ValueKind::Initial, "out"));
     program.values.push_back(predS10Value(1, 0, 1, intType(8), s10predicate::S10ValueKind::Statement, "out"));
 
@@ -462,8 +462,8 @@ static void outputInitialReadIsZeroTotalized() {
 static void groupedOutputArrayBuildsBEIRArrayPort() {
     s10predicate::S10PredicateProgram program;
     program.name = "manual_grouped_output";
-    program.base_symbols.push_back(s10predicate::S10Symbol{0, intType(8), "out__idx_0", s10predicate::S10SymbolRole::Port});
-    program.base_symbols.push_back(s10predicate::S10Symbol{1, intType(8), "out__idx_1", s10predicate::S10SymbolRole::Port});
+    program.base_symbols.push_back(s10predicate::S10Symbol{0, intType(8), "out__idx_0", {}, s10predicate::S10SymbolRole::Port});
+    program.base_symbols.push_back(s10predicate::S10Symbol{1, intType(8), "out__idx_1", {}, s10predicate::S10SymbolRole::Port});
     program.values.push_back(predS10Value(0, 0, 0, intType(8), s10predicate::S10ValueKind::Statement, "out__idx_0"));
     program.values.push_back(predS10Value(1, 1, 0, intType(8), s10predicate::S10ValueKind::Statement, "out__idx_1"));
 

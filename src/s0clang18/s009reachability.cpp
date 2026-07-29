@@ -135,7 +135,7 @@ std::string stableNameFor(const clang::FunctionDecl* function,
     std::ostringstream os;
     switch (kind) {
     case FunctionEntityKind::Top:
-        os << "top_";
+        os << sanitizeName(qualifiedFunctionName(function));
         break;
     case FunctionEntityKind::Helper:
         os << "helper_";
@@ -154,7 +154,8 @@ std::string stableNameFor(const clang::FunctionDecl* function,
         break;
     }
 
-    if (kind == FunctionEntityKind::Lambda ||
+    if (kind == FunctionEntityKind::Top) {
+    } else if (kind == FunctionEntityKind::Lambda ||
         kind == FunctionEntityKind::GenericLambdaSpecialization) {
         os << "at_" << loc.line << "_" << loc.column;
     } else {
@@ -286,20 +287,36 @@ private:
                                  FunctionEntityKind forced_kind,
                                  DebugLoc loc,
                                  std::vector<Diagnostic>& diagnostics) {
-        function = functionDefinition(function);
+        std::optional<FunctionEntityKind> original_classified =
+            classifyReachableFunction(function, top_);
+        FunctionEntityKind original_kind = forced_kind;
+        if (forced_kind != FunctionEntityKind::Top && original_classified) {
+            original_kind = *original_classified;
+        }
+        const bool original_is_template_instance =
+            original_kind == FunctionEntityKind::FunctionTemplateSpecialization ||
+            original_kind == FunctionEntityKind::GenericLambdaSpecialization;
+        if (!original_is_template_instance) {
+            function = functionDefinition(function);
+        }
         const clang::FunctionDecl* canonical = canonicalFunction(function);
         if (!canonical) canonical = function;
-
-        auto existing = graph_.function_by_decl.find(canonical);
-        if (existing != graph_.function_by_decl.end()) return existing->second;
-        existing = graph_.function_by_decl.find(function);
-        if (existing != graph_.function_by_decl.end()) return existing->second;
 
         std::optional<FunctionEntityKind> classified =
             classifyReachableFunction(function, top_);
         FunctionEntityKind kind = forced_kind;
         if (forced_kind != FunctionEntityKind::Top && classified) {
             kind = *classified;
+        }
+        const bool is_template_instance =
+            kind == FunctionEntityKind::FunctionTemplateSpecialization ||
+            kind == FunctionEntityKind::GenericLambdaSpecialization;
+
+        auto existing = graph_.function_by_decl.find(function);
+        if (existing != graph_.function_by_decl.end()) return existing->second;
+        if (!is_template_instance) {
+            existing = graph_.function_by_decl.find(canonical);
+            if (existing != graph_.function_by_decl.end()) return existing->second;
         }
 
         std::vector<long long> template_values =
@@ -318,7 +335,9 @@ private:
             : debugLocForRange(session_, function->getSourceRange(), loc_policy_);
 
         graph_.function_by_decl.emplace(function, entity.id);
-        if (canonical) graph_.function_by_decl.emplace(canonical, entity.id);
+        if (canonical && !is_template_instance) {
+            graph_.function_by_decl.emplace(canonical, entity.id);
+        }
         graph_.function_by_stable_name.emplace(stable_name, entity.id);
 
         if (entity.kind == FunctionEntityKind::Top) {

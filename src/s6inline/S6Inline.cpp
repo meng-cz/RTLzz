@@ -53,6 +53,26 @@ bool sameTypeRelaxed(TypeInfo lhs, TypeInfo rhs) {
     return true;
 }
 
+std::string typeSummary(const TypeInfo& type) {
+    std::ostringstream os;
+    os << type.name << "/w=" << type.width << "/kind=" << type.hw_kind;
+    if (!type.struct_name.empty()) os << "/struct=" << type.struct_name;
+    if (type.is_array) {
+        os << "/array=" << type.array_size;
+        if (!type.array_dims.empty()) {
+            os << "/dims=";
+            for (std::size_t i = 0; i < type.array_dims.size(); ++i) {
+                if (i) os << "x";
+                os << type.array_dims[i];
+            }
+        }
+    }
+    if (type.is_const) os << "/const";
+    if (type.is_reference) os << "/ref";
+    if (type.is_pointer) os << "/ptr";
+    return os.str();
+}
+
 std::string sanitizeName(std::string text) {
     for (char& c : text) {
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -555,14 +575,22 @@ private:
             for (std::size_t i = 0; i < count; ++i) {
                 if (!sameTypeRelaxed(params[i].type, call.args[i].type)) {
                     detail += "; mismatch[" + std::to_string(i) + "] param=" +
-                        params[i].type.name + "/" +
-                        std::to_string(params[i].type.width) + "/" +
-                        params[i].type.hw_kind + "/array=" +
-                        std::to_string(params[i].type.is_array) + " arg=" +
-                        call.args[i].type.name + "/" +
-                        std::to_string(call.args[i].type.width) + "/" +
-                        call.args[i].type.hw_kind + "/array=" +
-                        std::to_string(call.args[i].type.is_array);
+                        typeSummary(params[i].type) + " arg=" +
+                        typeSummary(call.args[i].type);
+                }
+            }
+        }
+        for (const auto& helper : input_.helpers) {
+            if (helper.name != call.callee) continue;
+            detail += "; helper params=" + std::to_string(helper.params.size()) +
+                " args=" + std::to_string(call.args.size());
+            const auto& params = helper.params;
+            const std::size_t count = std::min(params.size(), call.args.size());
+            for (std::size_t i = 0; i < count; ++i) {
+                if (!sameTypeRelaxed(params[i].type, call.args[i].type)) {
+                    detail += "; mismatch[" + std::to_string(i) + "] param=" +
+                        typeSummary(params[i].type) + " arg=" +
+                        typeSummary(call.args[i].type);
                 }
             }
         }

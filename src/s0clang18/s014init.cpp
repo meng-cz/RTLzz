@@ -148,6 +148,44 @@ std::size_t leafCountForType(const ExprBuildContext& context,
     return 1;
 }
 
+void appendLeafTypes(const ExprBuildContext& context,
+                     const pred::v2::TypeInfo& type,
+                     std::vector<pred::v2::TypeInfo>& out) {
+    if (type.is_array) {
+        std::size_t elements = 1;
+        for (int dim : type.array_dims) {
+            if (dim <= 0) return;
+            elements *= static_cast<std::size_t>(dim);
+        }
+        pred::v2::TypeInfo elem = scalarElementType(type);
+        for (std::size_t i = 0; i < elements; ++i) {
+            appendLeafTypes(context, elem, out);
+        }
+        return;
+    }
+    if (const RecordMetadata* record = recordForType(context, type)) {
+        for (const RecordField& field : record->fields) {
+            appendLeafTypes(context, field.type, out);
+        }
+        return;
+    }
+    out.push_back(type);
+}
+
+std::size_t leafCountForExpr(const ExprBuildContext& context,
+                             const pred::v2::ExprPtr& expr) {
+    if (!expr) return 0;
+    std::size_t count = leafCountForType(context, expr->type);
+    return count == 0 ? 1 : count;
+}
+
+std::size_t leafCountForExprList(const ExprBuildContext& context,
+                                 const std::vector<pred::v2::ExprPtr>& exprs) {
+    std::size_t count = 0;
+    for (const auto& expr : exprs) count += leafCountForExpr(context, expr);
+    return count;
+}
+
 pred::v2::ExprPtr defaultValueForScalar(const pred::v2::TypeInfo& type,
                                         DebugLoc loc) {
     pred::v2::ExprPtr expr;
@@ -324,7 +362,7 @@ bool isExplicitValueInitialization(const clang::VarDecl* decl,
 bool sourceTextHasInitializer(const std::string& text,
                               const clang::VarDecl* decl) {
     if (!decl) return false;
-    std::size_t name_pos = text.rfind(decl->getNameAsString());
+    std::size_t name_pos = text.find(decl->getNameAsString());
     std::string tail = name_pos == std::string::npos
         ? text
         : text.substr(name_pos + decl->getNameAsString().size());
@@ -384,13 +422,15 @@ InitBuildResult buildAggregateInitializer(const ExprBuildContext& context,
     if (hasError(result.diagnostics)) return result;
 
     std::size_t expected = leafCountForType(context, input.target_type);
-    while (expected > 0 && result.init_args.size() < expected) {
-        appendDefaultLeaves(context, input.target_type, input.loc,
-                            result.init_args);
-        if (result.init_args.size() > expected) break;
-    }
-    if (expected > 0 && result.init_args.size() > expected) {
-        result.init_args.resize(expected);
+    if (expected > 0) {
+        std::vector<pred::v2::TypeInfo> leaf_types;
+        appendLeafTypes(context, input.target_type, leaf_types);
+        std::size_t current = leafCountForExprList(context, result.init_args);
+        while (current < expected && current < leaf_types.size()) {
+            result.init_args.push_back(
+                defaultValueForScalar(leaf_types[current], input.loc));
+            ++current;
+        }
     }
 
     result.default_constructed = isExplicitValueInitialization(input.decl, init);

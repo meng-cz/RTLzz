@@ -4,6 +4,7 @@
 #include "backend/rtlgen.hpp"
 #include "debug/RTLZZException.h"
 #include "s0ast/S0AST.h"
+#include "s0clang18/s018bridge.hpp"
 #include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
@@ -175,6 +176,10 @@ std::string stageError(const std::optional<s1apinorm::APINormError>& error) {
 }
 
 std::string stageError(const std::optional<s0ast::S0Diagnostic>& error) {
+    return error ? error->message : "stage failed";
+}
+
+std::string stageError(const std::optional<s0clang18::Diagnostic>& error) {
     return error ? error->message : "stage failed";
 }
 
@@ -384,7 +389,7 @@ PipelineResult compile(const PipelineConfig& config) {
 
     DebugTextProvider current_debug_text;
     DebugSignalsProvider current_debug_signals;
-    s0ast::S0Result s0;
+    s0clang18::Clang18BuildResult s0;
     s1apinorm::APINormResult s1;
     s2validate::ValidateResult s2;
     s3statementize::StatementizeResult s3;
@@ -398,13 +403,18 @@ PipelineResult compile(const PipelineConfig& config) {
     s11beir::BEIRResult s11;
     beir::Program beir_program;
     try {
-        s0 = s0ast::parseProgram(config.source_name,
-                                 config.source_text,
-                                 config.top_function,
-                                 config.clang_args);
-        if (!s0.ok()) return errorResult("s0ast", stageError(s0.error), stageContext(s0.error));
-        if (!s0.program) return errorResult("s0ast", "stage produced no program");
-        current_debug_text = [&s0]() { return "latest successful stage: s0ast\n" + s0ast::debugPrint(*s0.program); };
+        s0clang18::Clang18Options clang18_options;
+        clang18_options.source_name = config.source_name;
+        clang18_options.source_text = config.source_text;
+        clang18_options.top_function = config.top_function;
+        clang18_options.clang_args = config.clang_args;
+        s0 = s0clang18::buildS0ProgramWithClang18(clang18_options);
+        if (!s0.ok()) return errorResult("s0clang18", stageError(s0.error), stageContext(s0.error));
+        if (!s0.program) return errorResult("s0clang18", "stage produced no program");
+        current_debug_text = [&s0]() {
+            return "latest successful stage: s0clang18\n" +
+                   s0ast::debugPrint(*s0.program);
+        };
         s1 = s1apinorm::normalizeAPIs(s0ast::surfaceAST(*s0.program));
         if (!s1.ok()) return errorResult("s1apinorm", stageError(s1.error), stageContext(s1.error), current_debug_text);
         if (!s1.function) return errorResult("s1apinorm", "stage produced no function", std::nullopt, current_debug_text);

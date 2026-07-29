@@ -247,10 +247,9 @@ int main() {
         if (stmt && stmt->kind == pred::v2::StmtKind::Decl &&
             stmt->decl_name == "local_lambda") {
             saw_lambda_decl = true;
-            CHECK(!stmt->decl_init.has_value());
         }
     }
-    CHECK(saw_lambda_decl);
+    CHECK(!saw_lambda_decl);
 
     const auto* for_stmt = findFirst(top_body.stmts, pred::v2::StmtKind::For);
     CHECK(for_stmt != nullptr);

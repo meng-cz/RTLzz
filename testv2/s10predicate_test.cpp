@@ -363,9 +363,9 @@ static s10predicate::S10Value predS10Value(s10predicate::S10ValueId id,
 static void readonlyCheckRejectsGuardedReadOutsideCoverage() {
     s10predicate::S10PredicateProgram program;
     program.name = "bad";
-    program.base_symbols.push_back(s10predicate::S10Symbol{0, boolType(), "cond", s10predicate::S10SymbolRole::Port});
-    program.base_symbols.push_back(s10predicate::S10Symbol{1, intType(8), "out", s10predicate::S10SymbolRole::Port});
-    program.base_symbols.push_back(s10predicate::S10Symbol{2, intType(8), "x", s10predicate::S10SymbolRole::Local});
+    program.base_symbols.push_back(s10predicate::S10Symbol{0, boolType(), "cond", {}, s10predicate::S10SymbolRole::Port});
+    program.base_symbols.push_back(s10predicate::S10Symbol{1, intType(8), "out", {}, s10predicate::S10SymbolRole::Port});
+    program.base_symbols.push_back(s10predicate::S10Symbol{2, intType(8), "x", {}, s10predicate::S10SymbolRole::Local});
     program.values.push_back(predS10Value(0, 0, 0, boolType(), s10predicate::S10ValueKind::Initial, "cond"));
     program.values.push_back(predS10Value(1, 2, 0, intType(8), s10predicate::S10ValueKind::Statement, "x"));
     program.values.push_back(predS10Value(2, 1, 0, intType(8), s10predicate::S10ValueKind::Statement, "out"));
@@ -402,7 +402,7 @@ static void readonlyCheckDoesNotAcceptComplexUnprovenGuard() {
     program.name = "complex_bad";
     for (int i = 0; i < 13; ++i) {
         program.base_symbols.push_back(s10predicate::S10Symbol{
-            i, boolType(), "cond" + std::to_string(i), s10predicate::S10SymbolRole::Port});
+            i, boolType(), "cond" + std::to_string(i), {}, s10predicate::S10SymbolRole::Port});
         program.values.push_back(predS10Value(i, i, 0, boolType(),
                                               s10predicate::S10ValueKind::Initial,
                                               "cond" + std::to_string(i)));
@@ -410,9 +410,9 @@ static void readonlyCheckDoesNotAcceptComplexUnprovenGuard() {
             i, ParamDirection::Input, ParamPassingKind::Value, i, std::nullopt, std::nullopt});
     }
     program.base_symbols.push_back(s10predicate::S10Symbol{
-        13, intType(8), "out", s10predicate::S10SymbolRole::Port});
+        13, intType(8), "out", {}, s10predicate::S10SymbolRole::Port});
     program.base_symbols.push_back(s10predicate::S10Symbol{
-        14, intType(8), "x", s10predicate::S10SymbolRole::Local});
+        14, intType(8), "x", {}, s10predicate::S10SymbolRole::Local});
 
     auto addAnd = [&](s10predicate::S10ValueId lhs,
                       s10predicate::S10ValueId rhs) {

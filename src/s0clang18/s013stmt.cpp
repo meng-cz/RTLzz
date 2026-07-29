@@ -1,10 +1,12 @@
 #include "s0clang18/s013stmt.hpp"
+#include "s0clang18/s014init.hpp"
 
 #include <clang/AST/Decl.h>
 #include <clang/AST/DeclCXX.h>
 #include <clang/AST/Expr.h>
 #include <clang/AST/ExprCXX.h>
 #include <clang/AST/Stmt.h>
+#include <llvm/ADT/SmallString.h>
 
 #include <algorithm>
 #include <iterator>
@@ -102,7 +104,7 @@ bool hasSyntacticInitializer(const StmtBuildContext& context,
     std::optional<SourceTextSlice> source =
         sourceTextForRange(*context.expr_context.session, var->getSourceRange());
     if (!source) return var->hasInit();
-    std::size_t name_pos = source->text.rfind(var->getNameAsString());
+    std::size_t name_pos = source->text.find(var->getNameAsString());
     std::string tail = name_pos == std::string::npos
         ? source->text
         : source->text.substr(name_pos + var->getNameAsString().size());
@@ -147,6 +149,28 @@ bool isLambdaInitializer(const clang::Expr* expr) {
     return llvm::isa_and_nonnull<clang::LambdaExpr>(ignoreTransparentExpr(expr));
 }
 
+void collectIntegerInitValues(const StmtBuildContext& context,
+                              const clang::Stmt* stmt,
+                              std::vector<std::string>& out,
+                              int depth = 0) {
+    if (!stmt || depth > 8 || !context.expr_context.session ||
+        !context.expr_context.session->ast_context) {
+        return;
+    }
+    if (const auto* expr = llvm::dyn_cast<clang::Expr>(stmt)) {
+        clang::Expr::EvalResult eval;
+        if (expr->EvaluateAsInt(eval, *context.expr_context.session->ast_context)) {
+            llvm::SmallString<64> text;
+            eval.Val.getInt().toString(text, 10);
+            out.push_back(std::string(text.str()));
+            return;
+        }
+    }
+    for (const clang::Stmt* child : stmt->children()) {
+        collectIntegerInitValues(context, child, out, depth + 1);
+    }
+}
+
 std::vector<pred::v2::StmtPtr> blockForSubStmt(const StmtBuildContext& context,
                                                const clang::Stmt* stmt,
                                                std::vector<Diagnostic>& diagnostics) {
@@ -185,11 +209,17 @@ StmtBuildResult buildDeclStmtImpl(const StmtBuildContext& context,
                                   const clang::DeclStmt* decl_stmt) {
     StmtBuildResult result;
     for (const clang::Decl* decl : decl_stmt->decls()) {
+        if (llvm::isa<clang::StaticAssertDecl>(decl)) {
+            continue;
+        }
         const auto* var = llvm::dyn_cast<clang::VarDecl>(decl);
         if (!var) {
             result.diagnostics.push_back(makeError(
                 context, stmtLoc(context, decl_stmt),
                 "Unsupported declaration inside DeclStmt"));
+            continue;
+        }
+        if (var->hasInit() && isLambdaInitializer(var->getInit())) {
             continue;
         }
 
@@ -203,12 +233,25 @@ StmtBuildResult buildDeclStmtImpl(const StmtBuildContext& context,
         auto type = lowerStmtType(context, var->getType(), loc, result.diagnostics);
         if (type) stmt->decl_type = *type;
         stmt->decl_type.is_static = var->isStaticLocal();
+        if (stmt->decl_type.is_static && stmt->decl_type.is_array && var->hasInit()) {
+            collectIntegerInitValues(context, var->getInit(),
+                                     stmt->decl_type.init_values);
+        }
 
-        if (var->hasInit() && hasSyntacticInitializer(context, var) &&
-            !isLambdaInitializer(var->getInit())) {
-            auto init = buildExprRequired(context, var->getInit());
+        if (var->hasInit() && hasSyntacticInitializer(context, var)) {
+            InitBuildInput input;
+            input.decl = var;
+            input.init_expr = var->getInit();
+            input.target_type = stmt->decl_type;
+            input.loc = loc;
+            auto init = buildInitializer(context.expr_context, input);
             appendDiagnostics(result, init.diagnostics);
-            if (init.expr) stmt->decl_init = std::move(init.expr);
+            if (!init.init_args.empty()) {
+                stmt->decl_init_args = std::move(init.init_args);
+            } else if (init.init_expr) {
+                stmt->decl_init = std::move(init.init_expr.value());
+            }
+            stmt->decl_default_constructed = init.default_constructed;
         }
         result.stmts.push_back(std::move(stmt));
     }
@@ -275,6 +318,15 @@ bool isAssignmentOperator(clang::OverloadedOperatorKind op) {
            op == clang::OO_PipeEqual;
 }
 
+const clang::Expr* memberAssignmentRhs(const clang::CXXMemberCallExpr* call) {
+    if (!call || call->getNumArgs() < 1) return nullptr;
+    const clang::CXXMethodDecl* method = call->getMethodDecl();
+    if (!method || !isAssignmentOperator(method->getOverloadedOperator())) {
+        return nullptr;
+    }
+    return call->getArg(0);
+}
+
 std::string assignmentOperatorToken(clang::OverloadedOperatorKind op) {
     switch (op) {
     case clang::OO_Equal: return "=";
@@ -294,19 +346,30 @@ std::string assignmentOperatorToken(clang::OverloadedOperatorKind op) {
 
 StmtBuildResult buildExprStatement(const StmtBuildContext& context,
                                    const clang::Expr* expr) {
-    if (const auto* binary = llvm::dyn_cast<clang::BinaryOperator>(expr)) {
+    const clang::Expr* core = ignoreTransparentExpr(expr);
+    if (!core) core = expr;
+    if (const auto* binary = llvm::dyn_cast<clang::BinaryOperator>(core)) {
         std::string op = assignmentOpcode(binary);
         if (!op.empty()) {
             return buildAssignmentStmt(context, binary, binary->getLHS(),
                                        binary->getRHS(), op);
         }
     }
-    if (const auto* op_call = llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr)) {
+    if (const auto* op_call = llvm::dyn_cast<clang::CXXOperatorCallExpr>(core)) {
         if (isAssignmentOperator(op_call->getOperator()) &&
             op_call->getNumArgs() >= 2) {
             return buildAssignmentStmt(
                 context, op_call, op_call->getArg(0), op_call->getArg(1),
                 assignmentOperatorToken(op_call->getOperator()));
+        }
+    }
+    if (const auto* member_call = llvm::dyn_cast<clang::CXXMemberCallExpr>(core)) {
+        if (const clang::Expr* rhs = memberAssignmentRhs(member_call)) {
+            return buildAssignmentStmt(
+                context, member_call, member_call->getImplicitObjectArgument(),
+                rhs,
+                assignmentOperatorToken(
+                    member_call->getMethodDecl()->getOverloadedOperator()));
         }
     }
 
@@ -395,6 +458,36 @@ StmtBuildResult buildStmt(const StmtBuildContext& context,
     }
 
     if (const auto* if_stmt = llvm::dyn_cast<clang::IfStmt>(stmt)) {
+        std::optional<StepResult<bool>> constant_condition;
+        if (context.expr_context.const_eval) {
+            constant_condition = evalBoolExpr(
+                *context.expr_context.const_eval,
+                if_stmt->getCond(),
+                stmtLoc(context, if_stmt->getCond()));
+        }
+        if ((constant_condition && constant_condition->value.has_value()) ||
+            if_stmt->isConstexpr()) {
+            if (!context.expr_context.const_eval) {
+                return failStmt(context, stmt,
+                                "constexpr if requires const eval context");
+            }
+            StmtBuildResult result;
+            appendDiagnostics(result, constant_condition->diagnostics);
+            if (!constant_condition->value.has_value()) {
+                result.diagnostics.push_back(makeError(
+                    context, stmtLoc(context, stmt),
+                    "Unable to evaluate constexpr if condition"));
+                return result;
+            }
+            const clang::Stmt* selected =
+                *constant_condition->value ? if_stmt->getThen() : if_stmt->getElse();
+            if (selected) {
+                auto selected_result = buildStmt(context, selected);
+                appendDiagnostics(result, selected_result.diagnostics);
+                result.stmts = std::move(selected_result.stmts);
+            }
+            return result;
+        }
         StmtBuildResult result;
         auto out = makeStmt(pred::v2::StmtKind::If, context, stmt);
         auto cond = buildExprRequired(context, if_stmt->getCond());

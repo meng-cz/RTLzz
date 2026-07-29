@@ -105,6 +105,11 @@ inline bool hasError(const std::vector<Diagnostic>& diagnostics) {
                        });
 }
 
+inline bool isLambdaObjectType(const pred::v2::TypeInfo& type) {
+    return type.name.find("(lambda") != std::string::npos ||
+           type.struct_name.find("(lambda") != std::string::npos;
+}
+
 inline void appendDiagnostics(std::vector<Diagnostic>& out,
                               const std::vector<Diagnostic>& in) {
     out.insert(out.end(), in.begin(), in.end());
@@ -212,6 +217,21 @@ inline std::string semanticKindLabel(SemanticEntityKind kind) {
 
 inline std::string paramDirectionLabel(pred::v2::ParamDirection direction) {
     return direction == pred::v2::ParamDirection::Output ? "output" : "input";
+}
+
+inline void applyParamPassingFromType(pred::v2::ParamDecl& param) {
+    param.is_const = param.type.is_const;
+    param.is_pointer = param.type.is_pointer;
+    param.is_reference = param.type.is_reference;
+    if (param.type.is_pointer) {
+        param.passing = pred::v2::ParamPassingKind::Pointer;
+    } else if (param.type.is_reference) {
+        param.passing = param.type.is_const
+            ? pred::v2::ParamPassingKind::ConstRef
+            : pred::v2::ParamPassingKind::MutableRef;
+    } else {
+        param.passing = pred::v2::ParamPassingKind::Value;
+    }
 }
 
 inline std::string debugLocLabel(const DebugLoc& loc) {
@@ -444,6 +464,32 @@ inline StepResult<pred::v2::FunctionAST> buildSurfaceFunctionAST(
                 }
             }
 
+            if (state.lambdas) {
+                if (const LambdaInfo* lambda =
+                        findLambdaInfo(*state.lambdas, entity.id)) {
+                    for (const LambdaCapture& capture : lambda->captures) {
+                        if (capture.kind == LambdaCaptureKind::This) continue;
+                        if (isLambdaObjectType(capture.type)) continue;
+                        pred::v2::ParamDecl capture_param;
+                        capture_param.name = capture.lowered_param_name.empty()
+                            ? capture.source_name
+                            : capture.lowered_param_name;
+                        capture_param.type = capture.type;
+                        capture_param.debug_loc = capture.loc;
+                        applyParamPassingFromType(capture_param);
+                        if (capture.kind == LambdaCaptureKind::ByCopy) {
+                            capture_param.is_const = true;
+                            capture_param.passing = pred::v2::ParamPassingKind::Value;
+                        } else if (capture.kind == LambdaCaptureKind::ByReference) {
+                            capture_param.is_reference = true;
+                            capture_param.passing =
+                                pred::v2::ParamPassingKind::MutableRef;
+                        }
+                        function->params.push_back(std::move(capture_param));
+                    }
+                }
+            }
+
             for (const clang::ParmVarDecl* param : entity.function_decl->parameters()) {
                 pred::v2::ParamDecl lowered_param;
                 lowered_param.name = param ? param->getNameAsString() : "";
@@ -457,6 +503,7 @@ inline StepResult<pred::v2::FunctionAST> buildSurfaceFunctionAST(
                     appendDiagnostics(result.diagnostics, param_type.diagnostics);
                     if (param_type.ok() && param_type.value) {
                         lowered_param.type = param_type.value->type;
+                        applyParamPassingFromType(lowered_param);
                     }
                 }
                 function->params.push_back(std::move(lowered_param));
