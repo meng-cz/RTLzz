@@ -39,6 +39,7 @@ bool typeEq(const S8Type& lhs, const S8Type& rhs) {
 bool typeSigned(const TypeInfo& type) {
     if (type.name == "bool" || type.hw_kind == "bool") return false;
     if (type.hw_kind == "Int") return false;
+    if (type.hw_kind == "enum") return type.is_signed;
     if (type.name.rfind("Int<", 0) == 0) {
         return false;
     }

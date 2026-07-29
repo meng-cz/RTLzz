@@ -78,7 +78,8 @@ bool isScalarType(const TypeInfo& type) {
     }
     if (type.name == "bool" || type.hw_kind == "bool") return true;
     if (type.width <= 0) return false;
-    if (type.hw_kind == "Int" || type.hw_kind == "builtin") {
+    if (type.hw_kind == "Int" || type.hw_kind == "builtin" ||
+        type.hw_kind == "enum") {
         return true;
     }
     if (type.name.rfind("Int<", 0) == 0 ||
