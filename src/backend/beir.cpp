@@ -907,7 +907,14 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
     }
     if (op.kind == OperationKind::ZExt) return operands.empty() ? factsUnknown(width) : factsZExt(operands[0], width);
     if (op.kind == OperationKind::SExt) return operands.empty() ? factsUnknown(width) : factsSExt(operands[0], width);
-    if (op.kind == OperationKind::Trunc) return operands.empty() ? factsUnknown(width) : factsTrunc(operands[0], width);
+    if (op.kind == OperationKind::Trunc) {
+        // Signed narrowing replaces the destination sign bit with the source
+        // sign bit, so it is not an ordinary low-bit truncation.  Keep value
+        // facts conservative until that transform has a dedicated transfer
+        // function.
+        if (op.signed_truncation) return factsUnknown(width);
+        return operands.empty() ? factsUnknown(width) : factsTrunc(operands[0], width);
+    }
     if (op.kind == OperationKind::Slice) return operands.empty() ? factsUnknown(width) : factsSlice(operands[0], op.lo, width);
     if (op.kind == OperationKind::BitSelect) return operands.empty() ? factsUnknown(1) : factsBitSelect(operands[0], op.bit);
     if (op.kind == OperationKind::Unary) {
@@ -1063,6 +1070,7 @@ bool OperationSignature::operator==(const OperationSignature& other) const {
     return kind == other.kind &&
            op == other.op &&
            type == other.type &&
+           signed_truncation == other.signed_truncation &&
            to_width == other.to_width &&
            hi == other.hi &&
            lo == other.lo &&
@@ -1075,6 +1083,7 @@ std::size_t OperationSignatureHash::operator()(const OperationSignature& sig) co
     std::uint64_t seed = static_cast<std::uint64_t>(sig.kind);
     hashCombine(seed, static_cast<std::uint64_t>(sig.op));
     hashCombine(seed, TypeSignatureHash{}(sig.type));
+    hashCombine(seed, sig.signed_truncation ? 1 : 0);
     hashCombine(seed, static_cast<std::uint64_t>(sig.to_width));
     hashCombine(seed, static_cast<std::uint64_t>(sig.hi));
     hashCombine(seed, static_cast<std::uint64_t>(sig.lo));
@@ -1211,6 +1220,7 @@ OperationSignature MutableProgram::operationSignature(const Operation& op) {
     sig.kind = op.kind;
     sig.op = op.op;
     sig.type = typeSignature(op.type);
+    sig.signed_truncation = op.signed_truncation;
     sig.to_width = op.to_width;
     sig.hi = op.hi;
     sig.lo = op.lo;
@@ -1471,6 +1481,7 @@ static void emitOperation(std::ostream& os, const Program& program, const Operat
     os << prefix << "driver " << operationKindText(op.kind);
     if (op.op != OpCode::None) os << " op=\"" << opCodeText(op.op) << "\"";
     os << " : " << typeText(op.type);
+    if (op.signed_truncation) os << " signed_truncation";
     if (op.to_width) os << " to_width=" << op.to_width;
     if (op.hi >= 0 || op.lo >= 0) os << " range=" << op.hi << ":" << op.lo;
     if (op.bit >= 0) os << " bit=" << op.bit;

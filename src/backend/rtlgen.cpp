@@ -18,6 +18,12 @@ static int widthOf(const beir::ValueType& type) {
     return type.width > 0 ? type.width : 1;
 }
 
+static int unsignedWidthForValue(unsigned value) {
+    int width = 1;
+    while (value >>= 1U) ++width;
+    return width;
+}
+
 static int flattenedArraySize(const beir::ValueType& type) {
     if (!type.array_dims.empty()) {
         int size = 1;
@@ -639,6 +645,10 @@ private:
     std::string resizeExpr(std::string value, int from_width, int to_width, bool sign_extend) const {
         if (to_width <= 0 || from_width <= 0 || to_width == from_width) return value;
         if (to_width < from_width) {
+            if (isSimpleIdentifier(value)) {
+                if (to_width == 1) return value + "[0]";
+                return value + "[" + std::to_string(to_width - 1) + ":0]";
+            }
             return std::to_string(to_width) + "'(" + value + ")";
         }
         int pad = to_width - from_width;
@@ -647,6 +657,17 @@ private:
                    std::to_string(from_width - 1) + "]}}, " + value + "})";
         }
         return "({" + std::to_string(pad) + "'h0, " + value + "})";
+    }
+
+    std::string signedTruncateExpr(const std::string& value,
+                                   int from_width,
+                                   int to_width) const {
+        if (to_width <= 0 || from_width <= to_width) {
+            return resizeExpr(value, from_width, to_width, true);
+        }
+        std::string sign = partSelectExpr(value, from_width - 1, from_width - 1);
+        if (to_width == 1) return sign;
+        return "{" + sign + ", " + partSelectExpr(value, to_width - 2, 0) + "}";
     }
 
     std::string binaryOperand(const beir::Operand& op, bool signed_context) const {
@@ -689,8 +710,33 @@ private:
                 }
                 std::string sv_op = svBinaryOp(op.op);
                 if (op.op == beir::OpCode::Shr && signed_context) sv_op = ">>>";
-                return "(" + binaryOperand(ops[0], signed_context) + " " + sv_op + " " +
-                       binaryOperand(ops[1], signed_context) + ")";
+                std::string value =
+                    "(" + binaryOperand(ops[0], signed_context) + " " + sv_op + " " +
+                    binaryOperand(ops[1], signed_context) + ")";
+                if (op.op != beir::OpCode::Shl && op.op != beir::OpCode::Shr) {
+                    return value;
+                }
+
+                // A SystemVerilog shift expression has the width of its left
+                // operand, even when BEIR has narrowed the operation result.
+                // Make that truncation explicit instead of relying on the
+                // assignment target to discard high bits.
+                const int lhs_width = widthOf(ops[0].type);
+                value = resizeExpr(value, lhs_width, widthOf(op.type), false);
+
+                // Int<W> defines every shift by an amount >= W as zero.  This
+                // differs from SystemVerilog arithmetic right shift, which
+                // sign-fills and therefore produces all ones for a negative
+                // operand.  Emit a guard whenever the shift operand can encode
+                // W so RTL and direct simulation have the same totalized
+                // semantics.
+                const int rhs_width = widthOf(ops[1].type);
+                if (rhs_width >= unsignedWidthForValue(static_cast<unsigned>(lhs_width))) {
+                    return "(" + operand(ops[1]) + " >= " +
+                           std::to_string(rhs_width) + "'d" + std::to_string(lhs_width) +
+                           " ? " + zeroFor(op.type) + " : " + value + ")";
+                }
+                return value;
             }
         case beir::OperationKind::Unary:
             need(1);
@@ -702,6 +748,12 @@ private:
         case beir::OperationKind::ZExt:
         case beir::OperationKind::Trunc:
             need(1);
+            if (op.signed_truncation &&
+                widthOf(op.type) < widthOf(ops[0].type)) {
+                return signedTruncateExpr(operand(ops[0]),
+                                          widthOf(ops[0].type),
+                                          widthOf(op.type));
+            }
             return resizeExpr(operand(ops[0]), widthOf(ops[0].type), widthOf(op.type), false);
         case beir::OperationKind::SExt:
             need(1);

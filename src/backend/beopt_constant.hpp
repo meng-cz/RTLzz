@@ -125,6 +125,7 @@ inline void setAssign(Operation& op,
     op.kind = OperationKind::Assign;
     op.op = OpCode::None;
     op.operands.clear();
+    op.signed_truncation = false;
     op.operands.push_back(std::move(operand));
     op.type = type;
     op.to_width = 0;

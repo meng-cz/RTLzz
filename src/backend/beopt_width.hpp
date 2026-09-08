@@ -129,6 +129,7 @@ inline Operand zeroLiteral(const ValueType& type) {
 inline void clearOperationShape(Operation& op) {
     op.op = OpCode::None;
     op.operands.clear();
+    op.signed_truncation = false;
     op.to_width = 0;
     op.hi = -1;
     op.lo = -1;
@@ -274,6 +275,7 @@ inline bool isZeroExtLike(OperationKind kind) {
 inline bool selectedRange(const Operation& op, int& lo, int& width) {
     if (op.operands.size() != 1) return false;
     if (op.kind == OperationKind::Trunc) {
+        if (op.signed_truncation) return false;
         lo = 0;
         width = widthOf(op.type);
         return true;

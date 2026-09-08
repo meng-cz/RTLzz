@@ -664,7 +664,12 @@ struct Builder {
                 op.kind = beir::OperationKind::SExt;
                 if (!op.operands.empty()) op.operands[0].signed_view = true;
                 break;
-            case S10OpKind::Trunc: op.kind = beir::OperationKind::Trunc; break;
+            case S10OpKind::Trunc:
+                op.kind = beir::OperationKind::Trunc;
+                op.signed_truncation =
+                    !op.operands.empty() &&
+                    (op.operands[0].signed_view || op.operands[0].constant.signed_view);
+                break;
             case S10OpKind::Slice: op.kind = beir::OperationKind::Slice; break;
             case S10OpKind::BitSelect: op.kind = beir::OperationKind::BitSelect; break;
             case S10OpKind::DynamicSlice: op.kind = beir::OperationKind::DynamicSlice; break;

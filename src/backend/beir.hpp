@@ -144,6 +144,7 @@ struct Operation {
     OpCode op = OpCode::None;
     std::vector<Operand> operands;
     ValueType type;
+    bool signed_truncation = false;
     int to_width = 0;
     int hi = -1;
     int lo = -1;
@@ -249,6 +250,7 @@ struct OperationSignature {
     OperationKind kind = OperationKind::Assign;
     OpCode op = OpCode::None;
     TypeSignature type;
+    bool signed_truncation = false;
     int to_width = 0;
     int hi = -1;
     int lo = -1;

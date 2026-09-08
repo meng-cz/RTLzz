@@ -267,6 +267,17 @@ static beir::Operand beirPortOperand(std::string name, beir::ValueType type) {
     return operand;
 }
 
+static beir::Operand beirSymbolOperand(beir::NodeId node,
+                                       beir::ValueType type,
+                                       bool signed_view = false) {
+    beir::Operand operand;
+    operand.kind = beir::OperandKind::Symbol;
+    operand.node = node;
+    operand.type = std::move(type);
+    operand.signed_view = signed_view;
+    return operand;
+}
+
 static beir::Signal beirSignal(beir::NodeId id,
                                std::string name,
                                beir::ValueType type,
@@ -536,6 +547,70 @@ static void sourcePipelinePreservesArrayPortGroupsInBEIR() {
     CHECK(selected->element_nodes.size() == 1);
 }
 
+static void rtlgenMakesNarrowShiftsAndSignedTruncationExplicit() {
+    beir::Program program;
+    program.function_name = "width_lowering";
+    program.signals.push_back(beirSignal(0, "wide", beirType(32)));
+    program.signals.push_back(beirSignal(1, "shift", beirType(6)));
+
+    auto left = beirSignal(2, "left5", beirType(5));
+    beir::Operation left_op;
+    left_op.kind = beir::OperationKind::Binary;
+    left_op.op = beir::OpCode::Shl;
+    left_op.type = beirType(5);
+    left_op.operands = {
+        beirSymbolOperand(0, beirType(32)),
+        beirSymbolOperand(1, beirType(6)),
+    };
+    left.driver = std::move(left_op);
+    program.signals.push_back(std::move(left));
+
+    auto arithmetic = beirSignal(3, "arithmetic17", beirType(17));
+    beir::Operation arithmetic_op;
+    arithmetic_op.kind = beir::OperationKind::Binary;
+    arithmetic_op.op = beir::OpCode::Shr;
+    arithmetic_op.type = beirType(17);
+    arithmetic_op.operands = {
+        beirSymbolOperand(0, beirType(32), true),
+        beirSymbolOperand(1, beirType(6)),
+    };
+    arithmetic.driver = std::move(arithmetic_op);
+    program.signals.push_back(std::move(arithmetic));
+
+    auto signed_trunc = beirSignal(4, "signed_trunc5", beirType(5));
+    beir::Operation trunc_op;
+    trunc_op.kind = beir::OperationKind::Trunc;
+    trunc_op.type = beirType(5);
+    trunc_op.signed_truncation = true;
+    trunc_op.operands = {beirSymbolOperand(0, beirType(32), true)};
+    signed_trunc.driver = std::move(trunc_op);
+    program.signals.push_back(std::move(signed_trunc));
+
+    auto unsigned_trunc = beirSignal(5, "unsigned_trunc5", beirType(5));
+    beir::Operation unsigned_trunc_op;
+    unsigned_trunc_op.kind = beir::OperationKind::Trunc;
+    unsigned_trunc_op.type = beirType(5);
+    unsigned_trunc_op.operands = {beirSymbolOperand(0, beirType(32))};
+    unsigned_trunc.driver = std::move(unsigned_trunc_op);
+    program.signals.push_back(std::move(unsigned_trunc));
+
+    std::string rtl = rtlgen::emitSystemVerilog(program);
+
+    // A narrowed shift must carry its BEIR result width into RTL instead of
+    // depending on the assignment target for implicit truncation.
+    CHECK(rtl.find("5'((wide << shift))") != std::string::npos);
+
+    // Direct Int<W> simulation totalizes oversized shifts to zero, including
+    // arithmetic right shifts of negative values.
+    CHECK(rtl.find("shift >= 6'd32 ? 17'h0 : 17'(($signed(wide) >>> shift))") !=
+          std::string::npos);
+
+    // Unsigned truncation is a low-bit slice.  Signed truncation additionally
+    // preserves the source sign in the destination sign bit, matching fixint.
+    CHECK(rtl.find("assign unsigned_trunc5 = wide[4:0]") != std::string::npos);
+    CHECK(rtl.find("{wide[31], wide[3:0]}") != std::string::npos);
+}
+
 int main() {
     rtlgenConnectsScalarPortElementsWithoutArraySelect();
     straightLineBuildsPortsAndOutputAssign();
@@ -545,5 +620,6 @@ int main() {
     groupedOutputArrayBuildsBEIRArrayPort();
     sourcePipelineRunsThroughBEIR();
     sourcePipelinePreservesArrayPortGroupsInBEIR();
+    rtlgenMakesNarrowShiftsAndSignedTruncationExplicit();
     return 0;
 }
