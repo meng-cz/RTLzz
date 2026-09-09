@@ -184,6 +184,7 @@ done
 ### `src/s6inline/S6Inline.cpp`
 - 在 CFG 层 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation。
 - 支持 helper/lambda、多级调用、重载、loop body 内调用和递归检测。
+- `ConstRef` 的 lvalue 实参直接绑定为 caller lvalue alias；全局输入端口提升出的只读聚合参数不会在每个 helper 调用点复制并于 S7 重复展平。rvalue const-ref 仍创建独立存储。
 
 ### `src/s6inline/checklist.md`
 - S6 语义确认记录。
@@ -346,10 +347,16 @@ done
 ### `testv2/fixtures/inline_misc.logic.cpp`
 - End-to-end helper/lambda inline、overload、parameter/return fixture。
 
+### `testv2/fixtures/port_lift_large_array.logic.cpp`
+- End-to-end 32×64-bit array global-port lift、嵌套 helper const-ref alias、RTL/C++ 差分 fixture；防止 helper 内联为每个读取调用复制完整数组。
+
 ### `testv2/fixtures/s*/...`
 - Stage-specific C++ fixtures used by integration tests.
 
 ## Scripts
+
+### `testv2/regression.sh`
+- 一键递归运行 `testv2/fixtures/**/*.logic.cpp` 的 C++/RTL 随机差分；自动构建 `predicate-expand`，区分 `PASS`、预期负向测试 `XFAIL`、`FAIL` 与 `XPASS`，并保存逐项日志和 `summary.tsv`。
 
 ### `scripts/differential_rtl.py`
 - V2 RTL differential harness。

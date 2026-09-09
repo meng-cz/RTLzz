@@ -134,7 +134,7 @@ Operand lvalueOperand(LValue lv) {
     return out;
 }
 
-LValue operandAsWritableLValue(const Operand& operand, const ParamDecl& param) {
+LValue operandAsAliasLValue(const Operand& operand, const ParamDecl& param) {
     if (operand.kind == OperandKind::Var) {
         LValue out;
         out.root = operand.var_name;
@@ -143,8 +143,13 @@ LValue operandAsWritableLValue(const Operand& operand, const ParamDecl& param) {
         return out;
     }
     if (operand.kind == OperandKind::LValueRead) return operand.lvalue;
-    fail("Mutable/output parameter '" + param.name +
-         "' must be bound to a writable lvalue");
+    fail("Reference parameter '" + param.name +
+         "' must be bound to an lvalue");
+}
+
+bool operandCanAliasLValue(const Operand& operand) {
+    return operand.kind == OperandKind::Var ||
+           operand.kind == OperandKind::LValueRead;
 }
 
 S3StmtPtr makeDecl(const SymbolInfo& symbol) {
@@ -762,9 +767,13 @@ private:
                 fail("Argument type mismatch for parameter '" + param.name + "'",
                      call_stmt.debug_loc);
             }
+            const bool const_ref_alias =
+                param.passing == ParamPassingKind::ConstRef &&
+                operandCanAliasLValue(call_stmt.args[i]);
             if (param.passing == ParamPassingKind::MutableRef ||
-                param.direction == ParamDirection::Output) {
-                LValue alias = operandAsWritableLValue(call_stmt.args[i], param);
+                param.direction == ParamDirection::Output ||
+                const_ref_alias) {
+                LValue alias = operandAsAliasLValue(call_stmt.args[i], param);
                 symbol_map[*param_symbol] = SymbolBinding{
                     SymbolBinding::Kind::AliasLValue, -1, std::move(alias)};
                 continue;

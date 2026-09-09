@@ -210,17 +210,23 @@ int main() {
     CHECK(top.params[0].name == "in_value");
     CHECK(top.params[1].name == "lanes");
     CHECK(top.params[2].name == "out_value");
+    CHECK(top.params[0].passing == pred::v2::ParamPassingKind::Value);
+    CHECK(top.params[1].passing == pred::v2::ParamPassingKind::Value);
     CHECK(top.params[2].is_output);
 
     const auto& mid = *top.helpers.at(0);
     CHECK(mid.params.size() == 2);
     CHECK(mid.params[0].name == "__rtlzz_port_in_value");
     CHECK(mid.params[1].name == "__rtlzz_port_lanes");
+    CHECK(mid.params[0].passing == pred::v2::ParamPassingKind::ConstRef);
+    CHECK(mid.params[1].passing == pred::v2::ParamPassingKind::ConstRef);
 
     const auto& leaf = *mid.helpers.at(0);
     CHECK(leaf.params.size() == 2);
     CHECK(leaf.params[0].name == "__rtlzz_port_in_value");
     CHECK(leaf.params[1].name == "__rtlzz_port_lanes");
+    CHECK(leaf.params[0].passing == pred::v2::ParamPassingKind::ConstRef);
+    CHECK(leaf.params[1].passing == pred::v2::ParamPassingKind::ConstRef);
 
     const auto& top_assign = top.body.at(0);
     CHECK(top_assign->assign_target->var_name == "out_value");

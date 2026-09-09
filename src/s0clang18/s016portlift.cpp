@@ -43,6 +43,14 @@ ParamDecl paramForPort(const RawPortDecl& port, bool implicit) {
     param.debug_loc = port.decl_loc;
     param.direction = toV2Direction(port.direction);
     param.is_output = port.direction == PortDirection::Output;
+    // Helpers do not own global input ports.  Mark lifted input parameters as
+    // read-only aliases so S6 can bind them directly to the caller's port
+    // instead of cloning (and later flattening) an entire aggregate at every
+    // call site.  Top-level ports remain value parameters and define the
+    // external hardware interface as before.
+    if (implicit && port.direction == PortDirection::Input) {
+        param.passing = pred::v2::ParamPassingKind::ConstRef;
+    }
     return param;
 }
 

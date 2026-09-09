@@ -63,6 +63,15 @@ static ParamDecl outputParam(const std::string& name, TypeInfo type) {
     return out;
 }
 
+static ParamDecl constRefParam(const std::string& name, TypeInfo type) {
+    ParamDecl out = valueParam(name, std::move(type));
+    out.type.is_const = true;
+    out.type.is_reference = true;
+    out.passing = ParamPassingKind::ConstRef;
+    out.is_reference = true;
+    return out;
+}
+
 static ExprPtr call(const std::string& callee, std::vector<ExprPtr> args, TypeInfo type) {
     auto expr = std::make_shared<Expr>();
     expr->kind = ExprKind::Call;
@@ -308,6 +317,43 @@ static void valueParamWriteDoesNotAliasCallerActual() {
     expectContains(s6.debug_text, "__s6_clobber_");
 }
 
+static void constRefParamAliasesCallerLValue() {
+    auto top = baseTop();
+    top.params.push_back(valueParam("a", int8()));
+    top.params.push_back(outputParam("out", int8()));
+    top.body.push_back(assign(make_var("out", int8()),
+                              call("peek", {make_var("a", int8())}, int8())));
+
+    auto peek = std::make_shared<FunctionAST>();
+    peek->name = "peek";
+    peek->return_type = int8();
+    peek->params.push_back(constRefParam("value", int8()));
+    peek->body.push_back(ret(make_var("value", int8())));
+    top.helpers.push_back(peek);
+
+    auto s6 = runS6(top);
+    expectNoCalls(s6.program->top);
+    CHECK(!hasSymbolContaining(s6.program->top, "__s6_peek_0_value_"));
+}
+
+static void constRefRValueStillGetsStorage() {
+    auto top = baseTop();
+    top.params.push_back(outputParam("out", int8()));
+    top.body.push_back(assign(make_var("out", int8()),
+                              call("peek", {make_literal("5", int8())}, int8())));
+
+    auto peek = std::make_shared<FunctionAST>();
+    peek->name = "peek";
+    peek->return_type = int8();
+    peek->params.push_back(constRefParam("value", int8()));
+    peek->body.push_back(ret(make_var("value", int8())));
+    top.helpers.push_back(peek);
+
+    auto s6 = runS6(top);
+    expectNoCalls(s6.program->top);
+    CHECK(hasSymbolContaining(s6.program->top, "__s6_peek_0_value_"));
+}
+
 static void nestedHelperAndLambdaInline() {
     auto top = baseTop();
     top.params.push_back(valueParam("a", int8()));
@@ -534,6 +580,8 @@ static void sourceLoopCallsInlineAfterUnroll() {
 int main() {
     helperReturnAndMutableRefInline();
     valueParamWriteDoesNotAliasCallerActual();
+    constRefParamAliasesCallerLValue();
+    constRefRValueStillGetsStorage();
     nestedHelperAndLambdaInline();
     deeperMultiLevelHelperInline();
     overloadResolutionInline();
