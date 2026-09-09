@@ -3,6 +3,7 @@
 #include "backend/beir.hpp"
 #include "backend/rtlgen.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +28,8 @@ struct PipelineConfig {
     std::string top_function;
     std::vector<std::string> clang_args;
     int unroll_limit = 1024;
+    // Zero means no artificial S7 leaf-symbol limit.
+    std::size_t max_leaf_symbols = 0;
     std::vector<std::string> beopt_args;
     OutputKind output_kind = OutputKind::Rtl;
     RtlDebugOutputKind rtl_debug_output = RtlDebugOutputKind::None;

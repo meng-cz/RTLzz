@@ -194,10 +194,12 @@ done
 ### `src/s7flatten/S7Flatten.h`
 - 定义收窄后的 `FlattenedCFG` 与 `S7FlattenedProgram`。
 - 只保留 scalar leaf symbol、flattened op、flattened stmt、flattened terminator、port group metadata。
+- `FlattenOptions::max_leaf_symbols` 默认 `0`，表示不施加人为 leaf-symbol 数量上限；可为不可信输入显式设置资源上限。
 
 ### `src/s7flatten/S7Flatten.cpp`
 - 将 struct、array、aggregate init/copy、field access、array access、动态索引读写 lowering 为 scalar leaf、lookup 或 guarded write。
 - 聚合构造参数允许来自动态数组元素：先逐 leaf materialize lookup 临时值，再写入构造目标，保持完整的源求值先于目标写入。
+- leaf-symbol 计数使用无溢出的 `size_t` 边界判断；默认仅受地址空间与内部 `SymbolId` 表示范围约束。
 - 维护输入/输出端口的原始数组形态和展开后的 leaf signal 列表。
 
 ### `src/s7flatten/checklist.md`

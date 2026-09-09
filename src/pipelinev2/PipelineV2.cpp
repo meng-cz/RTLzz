@@ -445,7 +445,9 @@ PipelineResult compile(const PipelineConfig& config) {
         if (!s6.program) return errorResult("s6inline", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s6]() { return "latest successful stage: s6inline\n" + s6inline::debugPrint(*s6.program, s6.summaries); };
 
-        s7 = s7flatten::flattenProgram(*s6.program);
+        s7flatten::FlattenOptions flatten_options;
+        flatten_options.max_leaf_symbols = config.max_leaf_symbols;
+        s7 = s7flatten::flattenProgram(*s6.program, flatten_options);
         if (!s7.ok()) return errorResult("s7flatten", stageError(s7.error), stageContext(s7.error), current_debug_text);
         if (!s7.program) return errorResult("s7flatten", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s7]() { return "latest successful stage: s7flatten\n" + s7flatten::debugPrint(*s7.program, s7.summaries); };

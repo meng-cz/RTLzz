@@ -3,6 +3,7 @@
 #include "debug/RTLZZException.h"
 #include "s6inline/S6Inline.h"
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -215,7 +216,9 @@ struct FlattenError {
 
 struct FlattenOptions {
     bool debug_print = false;
-    int max_leaf_symbols = 4096;
+    // Zero leaves the symbol count limited only by address space and SymbolId.
+    // Callers that compile untrusted inputs may set an explicit resource cap.
+    std::size_t max_leaf_symbols = 0;
 };
 
 struct FlattenSummary {

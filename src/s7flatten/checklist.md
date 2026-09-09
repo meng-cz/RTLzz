@@ -91,7 +91,7 @@ Yes
 如果不完整应报错
 
 27. 大数组完全 flatten 可能造成大量 leaf symbol，是否需要 S7 options 中加入最大 leaf 数量限制？
-通过参数指定，暂定4096
+通过参数指定；默认值 0 表示不施加人为限制，调用方可为不可信输入显式设置资源上限
 
 ## 5. Dynamic index read
 

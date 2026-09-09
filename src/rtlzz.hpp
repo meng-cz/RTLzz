@@ -2,6 +2,7 @@
 
 #include "pipelinev2/PipelineV2.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <optional>
@@ -64,6 +65,9 @@ struct CompileOptions {
     std::string top_function;
     // Maximum static loop iterations accepted by the unroll stage.
     int unroll_limit = 1024;
+    // Maximum number of scalar symbols produced by S7 flatten. Zero means no
+    // artificial limit; memory and the internal SymbolId range remain bounds.
+    std::size_t max_leaf_symbols = 0;
     // Extra clang arguments passed through after rtlzz-managed arguments.
     std::vector<std::string> clang_args;
     // Additional include directories translated into clang -I arguments.
@@ -229,6 +233,7 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     config.top_function = options.top_function;
     config.clang_args = buildClangArgs(options);
     config.unroll_limit = options.unroll_limit;
+    config.max_leaf_symbols = options.max_leaf_symbols;
     config.beopt_args = options.beopt_args;
     switch (options.rtl_debug) {
     case RtlDebugMode::None:

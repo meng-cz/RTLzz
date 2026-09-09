@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@ static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <source.cpp> --top <function_name> [--format beir|rtl|portmeta]"
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
+              << " [--max-leaf-symbols N]"
               << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]"
               << " [--rtl-debug-file FILE] [--no-rtl-debug]\n";
     std::cerr << "Required: source.cpp and --top. Default format is rtl.\n";
@@ -20,6 +22,7 @@ static void printUsage(const char* prog) {
     std::cerr << "For rtl output, a debug report is emitted by default to <rtl-output>.dbg.\n";
     std::cerr << "Default --vullib is ./vullib from the current working directory.\n";
     std::cerr << "Default clang language mode is -std=c++20 unless --clang-arg already sets -std.\n";
+    std::cerr << "Default --max-leaf-symbols is 0 (no artificial S7 leaf-symbol limit).\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -107,6 +110,30 @@ static bool parseUnrollLimit(const std::string& text, int& value, std::string& e
     return true;
 }
 
+static bool parseLeafSymbolLimit(const std::string& text,
+                                 std::size_t& value,
+                                 std::string& error) {
+    if (text.empty()) {
+        error = "value is empty";
+        return false;
+    }
+    std::size_t parsed = 0;
+    for (char ch : text) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            error = "value must be a non-negative decimal integer";
+            return false;
+        }
+        const std::size_t digit = static_cast<std::size_t>(ch - '0');
+        if (parsed > (std::numeric_limits<std::size_t>::max() - digit) / 10) {
+            error = "value is too large";
+            return false;
+        }
+        parsed = parsed * 10 + digit;
+    }
+    value = parsed;
+    return true;
+}
+
 static bool writeLinesToFile(const std::string& output_file,
                              const std::vector<std::string>& lines,
                              std::string& error) {
@@ -159,6 +186,7 @@ static int runMain(int argc, char* argv[]) {
     std::string rtl_debug_file;
     std::string vullib_dir;
     int unroll_limit = 1024;
+    std::size_t max_leaf_symbols = 0;
     bool emit_rtl_debug = true;
     std::vector<std::string> clang_args;
     std::vector<std::string> beopt_args;
@@ -190,6 +218,14 @@ static int runMain(int argc, char* argv[]) {
             std::string value = argv[++i];
             if (!parseUnrollLimit(value, unroll_limit, error)) {
                 std::cerr << "Invalid --unroll-limit '" << value << "': " << error << "\n";
+                return 1;
+            }
+        } else if (arg == "--max-leaf-symbols" && i + 1 < argc) {
+            std::string error;
+            std::string value = argv[++i];
+            if (!parseLeafSymbolLimit(value, max_leaf_symbols, error)) {
+                std::cerr << "Invalid --max-leaf-symbols '" << value
+                          << "': " << error << "\n";
                 return 1;
             }
         } else if (arg == "--clang-arg" && i + 1 < argc) {
@@ -238,6 +274,7 @@ static int runMain(int argc, char* argv[]) {
     options.source_name = source_file;
     options.top_function = top_function;
     options.unroll_limit = unroll_limit;
+    options.max_leaf_symbols = max_leaf_symbols;
     options.clang_args = std::move(clang_args);
     options.beopt_args = std::move(beopt_args);
     options.vullib_dir = vullib_dir;

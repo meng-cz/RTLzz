@@ -282,6 +282,36 @@ static std::string flattenDebug(s6inline::InlinedCFGProgram program) {
     return result.debug_text;
 }
 
+static s6inline::InlinedCFGProgram makeLargeLeafProgram(int leaf_count) {
+    s6inline::InlinedCFGProgram program;
+    program.top.name = "large_leaf_top";
+    program.top.return_type = voidType();
+    program.top.entry = 0;
+    program.top.exit = 0;
+    program.top.symbols.push_back(symbol(0, "large", arrayOf(int8(), leaf_count)));
+    auto block = std::make_unique<s6inline::InlinedBasicBlock>();
+    block->id = 0;
+    block->terminator.kind = s4cfg::TermKind::Exit;
+    program.top.blocks.push_back(std::move(block));
+    return program;
+}
+
+static void leafSymbolLimitIsOptionalAndConfigurable() {
+    constexpr int kLeafCount = 5000;
+    auto unlimited = s7flatten::flattenProgram(makeLargeLeafProgram(kLeafCount));
+    CHECK(unlimited.ok());
+    CHECK(unlimited.program.has_value());
+    CHECK(unlimited.program->top.symbols.size() == kLeafCount);
+
+    s7flatten::FlattenOptions limited_options;
+    limited_options.max_leaf_symbols = 4096;
+    auto limited = s7flatten::flattenProgram(
+        makeLargeLeafProgram(kLeafCount), limited_options);
+    CHECK(!limited.ok());
+    CHECK(limited.error.has_value());
+    CHECK(limited.error->message.find("leaf symbol limit exceeded") != std::string::npos);
+}
+
 static FunctionAST parseFixture(const std::string& file) {
     std::vector<std::string> clang_args = {
         "-I.",
@@ -745,6 +775,7 @@ static void astPipelineFlattensAggregateLambdaCalls() {
 }
 
 int main() {
+    leafSymbolLimitIsOptionalAndConfigurable();
     fieldReadAndAggregateCopyFlatten();
     staticAndDynamicArrayAccessFlatten();
     nestedStructArrayAccessFlatten();

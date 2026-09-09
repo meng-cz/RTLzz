@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <unordered_set>
@@ -249,6 +250,18 @@ struct Context {
     int temp_counter = 0;
 };
 
+bool exceedsLeafSymbolLimit(const Context& ctx, std::size_t additional) {
+    const std::size_t symbol_capacity =
+        static_cast<std::size_t>(std::numeric_limits<SymbolId>::max()) + 1;
+    const std::size_t current = ctx.output.symbols.size();
+    if (current > symbol_capacity || additional > symbol_capacity - current) {
+        return true;
+    }
+    const std::size_t limit = ctx.options.max_leaf_symbols;
+    if (limit == 0) return false;
+    return current > limit || additional > limit - current;
+}
+
 const std::vector<StructFieldInfo>* findStructFields(
     const std::unordered_map<std::string, std::vector<StructFieldInfo>>& structs,
     const TypeInfo& type) {
@@ -318,8 +331,7 @@ std::vector<LeafInfo> createLeaves(Context& ctx, const SymbolInfo& source) {
     std::vector<std::string> path;
     buildLeafTemplates(ctx.struct_fields, source.type, path, templates, source.type.name.empty() ? DebugLoc{} : DebugLoc{});
     if (templates.empty()) fail("No leaves produced for symbol '" + source.name + "'");
-    if (static_cast<int>(ctx.output.symbols.size() + templates.size()) >
-        ctx.options.max_leaf_symbols) {
+    if (exceedsLeafSymbolLimit(ctx, templates.size())) {
         fail("S7 leaf symbol limit exceeded while flattening '" + source.name + "'");
     }
 
@@ -580,7 +592,7 @@ S7Stmt makeOp(const LeafInfo& leaf, S7Operation op, DebugLoc loc = {}) {
 }
 
 LeafInfo createTemp(Context& ctx, TypeInfo type, const std::string& hint, DebugLoc loc = {}) {
-    if (static_cast<int>(ctx.output.symbols.size() + 1) > ctx.options.max_leaf_symbols) {
+    if (exceedsLeafSymbolLimit(ctx, 1)) {
         fail("S7 leaf symbol limit exceeded while creating temporary");
     }
     S7Symbol symbol;
