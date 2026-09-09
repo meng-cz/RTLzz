@@ -2,6 +2,7 @@
 
 #include "backend/beir.hpp"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,10 @@ struct Options {
 };
 
 Options parseOptions(const std::vector<std::string>& values);
-Program optimizeProgram(Program program, const Options& options = Options{});
+using IterationCallback = std::function<void(int iteration)>;
+
+Program optimizeProgram(Program program,
+                        const Options& options = Options{},
+                        const IterationCallback& iteration_callback = {});
 
 } // namespace pred::beir::opt

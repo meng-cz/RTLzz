@@ -403,6 +403,12 @@ PipelineResult compile(const PipelineConfig& config) {
     s11beir::BEIRResult s11;
     beir::Program beir_program;
     try {
+        const auto report_frontend_stage = [&config](const char* stage) {
+            if (config.progress_callback) {
+                config.progress_callback(std::string("RTLzz frontend parsing: ") + stage);
+            }
+        };
+        report_frontend_stage("s0clang18");
         s0clang18::Clang18Options clang18_options;
         clang18_options.source_name = config.source_name;
         clang18_options.source_text = config.source_text;
@@ -415,19 +421,23 @@ PipelineResult compile(const PipelineConfig& config) {
             return "latest successful stage: s0clang18\n" +
                    s0ast::debugPrint(*s0.program);
         };
+        report_frontend_stage("s1apinorm");
         s1 = s1apinorm::normalizeAPIs(s0ast::surfaceAST(*s0.program));
         if (!s1.ok()) return errorResult("s1apinorm", stageError(s1.error), stageContext(s1.error), current_debug_text);
         if (!s1.function) return errorResult("s1apinorm", "stage produced no function", std::nullopt, current_debug_text);
         current_debug_text = [&s1]() { return "latest successful stage: s1apinorm\n" + s1apinorm::debugPrint(*s1.function, s1.summaries); };
 
+        report_frontend_stage("s2validate");
         s2 = s2validate::validateFunctionAST(*s1.function);
         if (!s2.ok()) return errorResult("s2validate", stageError(s2.error), stageContext(s2.error), current_debug_text);
 
+        report_frontend_stage("s3statementize");
         s3 = s3statementize::statementizeFunctionAST(*s1.function);
         if (!s3.ok()) return errorResult("s3statementize", stageError(s3.error), stageContext(s3.error), current_debug_text);
         if (!s3.program) return errorResult("s3statementize", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s3]() { return "latest successful stage: s3statementize\n" + s3statementize::debugPrint(*s3.program); };
 
+        report_frontend_stage("s4cfg");
         s4 = s4cfg::buildCFGProgram(*s3.program);
         if (!s4.ok()) return errorResult("s4cfg", stageError(s4.error), stageContext(s4.error), current_debug_text);
         if (!s4.program) return errorResult("s4cfg", "stage produced no program", std::nullopt, current_debug_text);
@@ -435,11 +445,13 @@ PipelineResult compile(const PipelineConfig& config) {
 
         s5unroll::UnrollOptions unroll_options;
         unroll_options.max_iterations_per_loop = config.unroll_limit;
+        report_frontend_stage("s5unroll");
         s5 = s5unroll::unrollCFGProgram(*s4.program, unroll_options);
         if (!s5.ok()) return errorResult("s5unroll", stageError(s5.error), stageContext(s5.error), current_debug_text);
         if (!s5.program) return errorResult("s5unroll", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s5]() { return "latest successful stage: s5unroll\n" + s5unroll::debugPrint(*s5.program, s5.summaries); };
 
+        report_frontend_stage("s6inline");
         s6 = s6inline::inlineCFGProgram(*s5.program);
         if (!s6.ok()) return errorResult("s6inline", stageError(s6.error), stageContext(s6.error), current_debug_text);
         if (!s6.program) return errorResult("s6inline", "stage produced no program", std::nullopt, current_debug_text);
@@ -447,6 +459,7 @@ PipelineResult compile(const PipelineConfig& config) {
 
         s7flatten::FlattenOptions flatten_options;
         flatten_options.max_leaf_symbols = config.max_leaf_symbols;
+        report_frontend_stage("s7flatten");
         s7 = s7flatten::flattenProgram(*s6.program, flatten_options);
         if (!s7.ok()) return errorResult("s7flatten", stageError(s7.error), stageContext(s7.error), current_debug_text);
         if (!s7.program) return errorResult("s7flatten", "stage produced no program", std::nullopt, current_debug_text);
@@ -458,16 +471,19 @@ PipelineResult compile(const PipelineConfig& config) {
             return result;
         }
 
+        report_frontend_stage("s8opnorm");
         s8 = s8opnorm::normalizeOperations(*s7.program);
         if (!s8.ok()) return errorResult("s8opnorm", stageError(s8.error), stageContext(s8.error), current_debug_text);
         if (!s8.program) return errorResult("s8opnorm", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s8]() { return "latest successful stage: s8opnorm\n" + s8opnorm::debugPrint(*s8.program, s8.summaries); };
 
+        report_frontend_stage("s9ssa");
         s9 = s9ssa::buildSSA(*s8.program);
         if (!s9.ok()) return errorResult("s9ssa", stageError(s9.error), stageContext(s9.error), current_debug_text);
         if (!s9.program) return errorResult("s9ssa", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s9]() { return "latest successful stage: s9ssa\n" + s9ssa::debugPrint(*s9.program, s9.summaries); };
 
+        report_frontend_stage("s10predicate");
         s10 = s10predicate::lowerPredicates(*s9.program);
         if (!s10.ok()) return errorResult("s10predicate", stageError(s10.error), stageContext(s10.error), current_debug_text);
         if (!s10.program) return errorResult("s10predicate", "stage produced no program", std::nullopt, current_debug_text);
@@ -475,6 +491,7 @@ PipelineResult compile(const PipelineConfig& config) {
 
         s11beir::BEIROptions beir_options;
         beir_options.optimize = false;
+        report_frontend_stage("s11beir");
         s11 = s11beir::buildBEIR(*s10.program, beir_options);
         if (!s11.ok()) return errorResult("s11beir", stageError(s11.error), stageContext(s11.error), current_debug_text);
         if (!s11.program) return errorResult("s11beir", "stage produced no program", std::nullopt, current_debug_text);
@@ -482,9 +499,19 @@ PipelineResult compile(const PipelineConfig& config) {
         current_debug_signals = [&s11]() { return rtlgen::collectDebugSignals(*s11.program, ""); };
 
         beir_program = *s11.program;
+        const beir::opt::Options optimization_options =
+            beir::opt::parseOptions(config.beopt_args);
         beir_program = beir::opt::optimizeProgram(
             std::move(beir_program),
-            beir::opt::parseOptions(config.beopt_args));
+            optimization_options,
+            [&config, &optimization_options](int iteration) {
+                if (config.progress_callback) {
+                    config.progress_callback(
+                        "RTLzz backend optimization: round " +
+                        std::to_string(iteration) + "/" +
+                        std::to_string(optimization_options.max_iterations));
+                }
+            });
         current_debug_text = [&beir_program]() {
             return "latest successful stage: beir-opt\n" + beir::emitText(beir_program);
         };

@@ -71,11 +71,15 @@ Options parseOptions(const std::vector<std::string>& values) {
     return options;
 }
 
-Program optimizeProgram(Program program, const Options& options) {
+Program optimizeProgram(Program program,
+                        const Options& options,
+                        const IterationCallback& iteration_callback) {
     MutableProgram graph(std::move(program));
     bool changed = true;
     int iteration = 0;
-    while (changed && iteration++ < options.max_iterations) {
+    while (changed && iteration < options.max_iterations) {
+        ++iteration;
+        if (iteration_callback) iteration_callback(iteration);
         changed = false;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.constant_folding) changed = foldConstants(graph) || changed;

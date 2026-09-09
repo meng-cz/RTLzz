@@ -39,6 +39,7 @@ done
 ### `src/rtlzz.hpp`
 - Header-only API facade。
 - 提供 `rtlzz::CompileOptions`、`rtlzz::CompileResult`。
+- `CompileOptions::progress_callback` 是可选状态回调，逐阶段报告 frontend、逐轮报告 backend optimizer；未设置时 API 保持静默。
 - 提供 `compileToRtl`、`compileToBeir`、`compileToPortMetadata`，内部全部调用 `pipelinev2`。
 
 ## Pipeline V2
@@ -46,9 +47,11 @@ done
 ### `src/pipelinev2/PipelineV2.h`
 - 声明 `PipelineConfig`、`PipelineResult`、`OutputKind` 和 `compile`。
 - `OutputKind` 当前为 `Rtl`、`Beir`、`PortMetadata`。
+- `PipelineConfig::progress_callback` 由嵌入工具提供，用于报告 frontend 当前阶段和 backend 当前优化轮次。
 
 ### `src/pipelinev2/PipelineV2.cpp`
 - 串接完整 V2 pipeline。
+- 在 S0 至 S11 每个 frontend 阶段开始前触发可选进度回调，并转发 BEIR optimizer 的实际轮次。
 - 在 S7 后可提前输出端口 metadata。
 - 在 S11 后调用 BEIR optimizer，再输出 BEIR 文本或 SystemVerilog。
 
@@ -264,10 +267,10 @@ done
 - BEIR text dump、validation、operation/type helpers、mutable builder 实现。
 
 ### `src/backend/beopt.hpp`
-- 声明 BEIR optimizer options 和 `optimizeProgram`。
+- 声明 BEIR optimizer options、可选逐轮回调和 `optimizeProgram`。
 
 ### `src/backend/beopt.cpp`
-- 串接 BEIR optimization passes。
+- 串接 BEIR optimization passes，并在固定点循环每轮开始时触发可选逐轮回调。
 
 ### `src/backend/beopt_constant.hpp`
 - 常量传播、常量折叠和 literal 简化。

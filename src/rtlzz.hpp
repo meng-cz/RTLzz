@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -75,6 +76,9 @@ struct CompileOptions {
     // BEIR optimization options. Empty means the default optimization pipeline;
     // use {"none"} to disable all BEIR optimization passes.
     std::vector<std::string> beopt_args;
+    // Optional progress hook used by embedding tools. It reports frontend
+    // stages and backend optimization iterations; standalone calls are silent.
+    std::function<void(const std::string&)> progress_callback;
     // Optional RTL debug data. None avoids building API debug payloads.
     RtlDebugMode rtl_debug = RtlDebugMode::None;
 };
@@ -235,6 +239,7 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     config.unroll_limit = options.unroll_limit;
     config.max_leaf_symbols = options.max_leaf_symbols;
     config.beopt_args = options.beopt_args;
+    config.progress_callback = options.progress_callback;
     switch (options.rtl_debug) {
     case RtlDebugMode::None:
         config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::None;

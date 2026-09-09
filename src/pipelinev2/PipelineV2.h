@@ -4,6 +4,7 @@
 #include "backend/rtlgen.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +32,9 @@ struct PipelineConfig {
     // Zero means no artificial S7 leaf-symbol limit.
     std::size_t max_leaf_symbols = 0;
     std::vector<std::string> beopt_args;
+    // Optional status hook. Called before each long-running frontend stage and
+    // backend optimization iteration; stages remain silent when it is absent.
+    std::function<void(const std::string&)> progress_callback;
     OutputKind output_kind = OutputKind::Rtl;
     RtlDebugOutputKind rtl_debug_output = RtlDebugOutputKind::None;
 };
