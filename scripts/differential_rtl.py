@@ -14,6 +14,7 @@ import argparse
 import json
 import re
 import random
+import signal
 import shutil
 import subprocess
 import sys
@@ -239,7 +240,83 @@ def cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
     return f"static_cast<unsigned long long>({expr})"
 
 
-def random_inputs(program: dict[str, Any], rng: random.Random) -> dict[str, int]:
+def parse_input_range(text: str) -> tuple[str, tuple[int, int]]:
+    match = re.fullmatch(r"([^=:\s]+)=([0-9]+):([0-9]+)", text)
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"invalid input range {text!r}; expected NAME=MIN:MAX with non-negative integers"
+        )
+    name = match.group(1)
+    minimum = int(match.group(2))
+    maximum = int(match.group(3))
+    if minimum > maximum:
+        raise argparse.ArgumentTypeError(
+            f"invalid input range {text!r}; MIN must not exceed MAX"
+        )
+    return name, (minimum, maximum)
+
+
+def manifest_input_ranges(config: Path | None, source: Path) -> dict[str, tuple[int, int]]:
+    if config is None:
+        return {}
+    data = json.loads(config.read_text())
+    fixtures = data.get("fixtures", {})
+    if not isinstance(fixtures, dict):
+        raise ValueError(f"'fixtures' must be an object in {config}")
+    fixture_root = (config.parent / "fixtures").resolve()
+    try:
+        relative = source.resolve().relative_to(fixture_root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            f"source {source} is not below manifest fixture root {fixture_root}"
+        ) from exc
+    entry = fixtures.get(relative, {})
+    if not isinstance(entry, dict):
+        raise ValueError(f"fixture entry {relative!r} must be an object in {config}")
+    encoded = entry.get("input_ranges", {})
+    if not isinstance(encoded, dict):
+        raise ValueError(f"input_ranges for {relative!r} must be an object in {config}")
+    ranges: dict[str, tuple[int, int]] = {}
+    for name, limits in encoded.items():
+        if (not isinstance(name, str) or not isinstance(limits, list) or
+                len(limits) != 2 or
+                not all(isinstance(value, int) and not isinstance(value, bool)
+                        for value in limits)):
+            raise ValueError(
+                f"input range for {relative}:{name} must be [MIN, MAX] integers"
+            )
+        minimum, maximum = limits
+        if minimum < 0 or minimum > maximum:
+            raise ValueError(
+                f"input range for {relative}:{name} must satisfy 0 <= MIN <= MAX"
+            )
+        ranges[name] = (minimum, maximum)
+    return ranges
+
+
+def validate_input_ranges(program: dict[str, Any],
+                          ranges: dict[str, tuple[int, int]]) -> None:
+    input_widths: dict[str, int] = {}
+    for port in program["ports"]:
+        if port["direction"] != "Input":
+            continue
+        width = type_width(port["type"])
+        for element in port["element_symbols"]:
+            input_widths[element] = width
+    for name, (minimum, maximum) in ranges.items():
+        if name not in input_widths:
+            raise ValueError(f"input range names no input element: {name!r}")
+        representable_max = mask(input_widths[name])
+        if minimum < 0 or maximum > representable_max:
+            raise ValueError(
+                f"input range for {name!r} [{minimum}, {maximum}] exceeds its "
+                f"{input_widths[name]}-bit raw input domain [0, {representable_max}]"
+            )
+
+
+def random_inputs(program: dict[str, Any], rng: random.Random,
+                  ranges: dict[str, tuple[int, int]] | None = None) -> dict[str, int]:
+    ranges = ranges or {}
     values: dict[str, int] = {}
     for port in program["ports"]:
         if port["direction"] != "Input":
@@ -247,7 +324,8 @@ def random_inputs(program: dict[str, Any], rng: random.Random) -> dict[str, int]
         width = type_width(port["type"])
         max_value = mask(width)
         for element in port["element_symbols"]:
-            values[element] = rng.randrange(max_value + 1)
+            minimum, maximum = ranges.get(element, (0, max_value))
+            values[element] = rng.randrange(minimum, maximum + 1)
     return values
 
 
@@ -550,6 +628,15 @@ def main() -> int:
     ap.add_argument("--verilator", default=shutil.which("verilator") or "verilator")
     ap.add_argument("--beopt", action="append", default=[],
                     help="BEIR optimization option to pass to predicate-expand, e.g. none")
+    ap.add_argument(
+        "--input-config", type=Path,
+        help="JSON fixture manifest containing optional per-input ranges",
+    )
+    ap.add_argument(
+        "--input-range", action="append", default=[], type=parse_input_range,
+        metavar="NAME=MIN:MAX",
+        help="constrain a raw input element; may be repeated and overrides the manifest",
+    )
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
 
@@ -572,6 +659,14 @@ def main() -> int:
         run(common_args + ["--format", "rtl", "-o", str(rtl)], cwd=ROOT)
         program = json.loads(portmeta.read_text())
         resolved_top = program.get("function", args.top)
+        try:
+            input_config = args.input_config.resolve() if args.input_config else None
+            input_ranges = manifest_input_ranges(input_config, source)
+            for name, limits in args.input_range:
+                input_ranges[name] = limits
+            validate_input_ranges(program, input_ranges)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            ap.error(str(exc))
 
         oracle_cpp = work / "oracle.cpp"
         oracle_input_order = generate_harness(source, resolved_top, program, oracle_cpp)
@@ -592,9 +687,29 @@ def main() -> int:
 
         rng = random.Random(args.seed)
         for case in range(args.cases):
-            inputs = random_inputs(program, rng)
+            inputs = random_inputs(program, rng, input_ranges)
             argv = [str(inputs[name]) for name in rtl_input_order]
-            expected = parse_key_values(run([str(oracle_exe)] + argv, cwd=ROOT).stdout)
+            try:
+                oracle_run = run([str(oracle_exe)] + argv, cwd=ROOT)
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode < 0:
+                    try:
+                        cause = signal.Signals(-exc.returncode).name
+                    except ValueError:
+                        cause = f"signal {-exc.returncode}"
+                else:
+                    cause = f"exit code {exc.returncode}"
+                print(
+                    f"C++ oracle failed before RTL comparison: case={case} cause={cause}",
+                    file=sys.stderr,
+                )
+                print(f"inputs={inputs}", file=sys.stderr)
+                if exc.stdout:
+                    print(exc.stdout, file=sys.stderr, end="")
+                if exc.stderr:
+                    print(exc.stderr, file=sys.stderr, end="")
+                return 1
+            expected = parse_key_values(oracle_run.stdout)
             actual = parse_key_values(run([str(rtl_exe)] + argv, cwd=ROOT).stdout)
             for name, exp in expected.items():
                 got = actual.get(name)

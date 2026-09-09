@@ -1046,8 +1046,18 @@ void lowerConstruct(Context& ctx,
     std::vector<S7Operand> values;
     for (const auto& arg : stmt.args) {
         Value v = flattenValue(ctx, arg, out);
-        if (v.dynamic) fail("Constructor argument may not be dynamic aggregate read", stmt.debug_loc);
-        values.insert(values.end(), v.operands.begin(), v.operands.end());
+        if (v.dynamic) {
+            const std::size_t width = selectionWidth(Selection{{}, v.dynamic});
+            for (std::size_t i = 0; i < width; ++i) {
+                // Materialize every source leaf before assigning any target
+                // leaf.  This preserves constructor evaluation order even if
+                // a future construct form permits source/target aliasing.
+                values.push_back(
+                    materializeDynamicRead(ctx, *v.dynamic, i, out, stmt.debug_loc));
+            }
+        } else {
+            values.insert(values.end(), v.operands.begin(), v.operands.end());
+        }
     }
     if (values.size() != target.leaves.size()) {
         fail("Aggregate construct leaf count mismatch for '" + stmt.callee + "'", stmt.debug_loc);

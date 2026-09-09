@@ -4,6 +4,7 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$ROOT_DIR/testv2/fixtures"
+INPUT_CONFIG="$ROOT_DIR/testv2/regression.json"
 BUILD_DIR="${RTLZZ_REGRESSION_BUILD_DIR:-/tmp/rtlzz-regression-build}"
 LOG_DIR="${RTLZZ_REGRESSION_LOG_DIR:-$ROOT_DIR/rtl_test_outputs_regression}"
 CASES="${RTLZZ_REGRESSION_CASES:-100}"
@@ -16,6 +17,7 @@ Usage: testv2/regression.sh [--cases N] [--seed N] [--build-dir DIR] [--log-dir 
 Runs every testv2/fixtures/**/*.logic.cpp through the C++/RTL differential
 harness.  Files named illegal_* or uninitialized_* are expected-negative tests:
 rejection is reported as XFAIL, while unexpectedly accepting one is XPASS.
+Per-fixture raw input ranges are read from testv2/regression.json.
 
 Environment equivalents:
   RTLZZ_REGRESSION_CASES
@@ -123,7 +125,10 @@ oracle_crash_reason() {
     local log="$1"
     local signal
 
-    signal="$(sed -n 's/.*died with <Signals\.\(SIG[A-Z]*\):.*/\1/p' "$log" | head -n 1)"
+    signal="$(sed -n \
+        -e 's/.*died with <Signals\.\(SIG[A-Z]*\):.*/\1/p' \
+        -e 's/^C++ oracle failed before RTL comparison:.*cause=\(SIG[A-Z]*\)$/\1/p' \
+        "$log" | head -n 1)"
     if [[ -z "$signal" ]]; then
         return 1
     fi
@@ -146,6 +151,7 @@ for fixture in "${FIXTURES[@]}"; do
         "$fixture" \
         --top hls_main \
         --build-dir "$BUILD_DIR" \
+        --input-config "$INPUT_CONFIG" \
         --cases "$CASES" \
         --seed "$SEED" >"$log" 2>&1; then
         if [[ $expected_failure -eq 1 ]]; then

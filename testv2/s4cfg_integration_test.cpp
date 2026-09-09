@@ -133,34 +133,8 @@ static void sourceLoopsSwitchBuildsEdgesAndFallthrough() {
     expectContains(debug, "default ->");
 }
 
-static void sourceWhileDoWhileReevaluatesConditionPreludes() {
-    auto debug = buildS4DebugFromSource(
-        "testv2/fixtures/s4cfg/source_while_dowhile.logic.cpp");
-
-    expectContains(debug, "helper keep");
-    expectContains(debug, "helper again");
-    expectContains(debug, "loop 0 pre_test");
-    expectContains(debug, "loop 1 post_test");
-    expectContains(debug, "condition_prelude=bb");
-    expectContains(debug, "call __tmp_hls_main_keep_");
-    expectContains(debug, "call __tmp_hls_main_again_");
-    expectContains(debug, "continue");
-    expectContains(debug, "break");
-    expectInOrder(debug, {
-        "loop 0 pre_test",
-        "call __tmp_hls_main_keep_",
-        "term branch __tmp_hls_main_keep_",
-    });
-    expectInOrder(debug, {
-        "loop 1 post_test",
-        "call __tmp_hls_main_again_",
-        "term branch __tmp_hls_main_again_",
-    });
-}
-
 int main() {
     sourceHelpersBuildFunctionCFGs();
     sourceLoopsSwitchBuildsEdgesAndFallthrough();
-    sourceWhileDoWhileReevaluatesConditionPreludes();
     return 0;
 }

@@ -17,6 +17,12 @@ Int<8> out;
 void hls_main() {
     Box box;
     Pair arr[2];
+    box.member.n = Int<8>(1);
+    box.member.m = Int<8>(2);
+    arr[0].n = Int<8>(3);
+    arr[0].m = Int<8>(4);
+    arr[1].n = Int<8>(5);
+    arr[1].m = Int<8>(6);
     Pair from_member = box.member;
     Pair from_index = arr[idx];
     out = from_member.n + from_index.m;

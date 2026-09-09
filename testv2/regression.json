@@ -1,0 +1,29 @@
+{
+  "fixtures": {
+    "s1apinorm/source_aggregate_decl_init.logic.cpp": {
+      "input_ranges": {
+        "idx": [0, 1]
+      }
+    },
+    "s1apinorm/source_pick.logic.cpp": {
+      "input_ranges": {
+        "idx": [0, 4]
+      }
+    },
+    "s7flatten/source_complex_aggregates.logic.cpp": {
+      "input_ranges": {
+        "idx": [0, 1]
+      }
+    },
+    "s7flatten/source_flatten.logic.cpp": {
+      "input_ranges": {
+        "idx": [0, 2]
+      }
+    },
+    "s9ssa/source_ssa.logic.cpp": {
+      "input_ranges": {
+        "idx": [0, 1]
+      }
+    }
+  }
+}

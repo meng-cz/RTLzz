@@ -197,6 +197,7 @@ done
 
 ### `src/s7flatten/S7Flatten.cpp`
 - 将 struct、array、aggregate init/copy、field access、array access、动态索引读写 lowering 为 scalar leaf、lookup 或 guarded write。
+- 聚合构造参数允许来自动态数组元素：先逐 leaf materialize lookup 临时值，再写入构造目标，保持完整的源求值先于目标写入。
 - 维护输入/输出端口的原始数组形态和展开后的 leaf signal 列表。
 
 ### `src/s7flatten/checklist.md`
@@ -356,11 +357,15 @@ done
 ## Scripts
 
 ### `testv2/regression.sh`
-- 一键递归运行 `testv2/fixtures/**/*.logic.cpp` 的 C++/RTL 随机差分；自动构建 `predicate-expand`，区分 `PASS`、预期负向测试 `XFAIL`、`FAIL` 与 `XPASS`，并保存逐项日志和 `summary.tsv`。
+- 一键递归运行 `testv2/fixtures/**/*.logic.cpp` 的 C++/RTL 随机差分；自动构建 `predicate-expand`，从 `testv2/regression.json` 读取输入域约束，区分 `PASS`、预期负向测试 `XFAIL`、`FAIL` 与 `XPASS`，并保存逐项日志和 `summary.tsv`。
+
+### `testv2/regression.json`
+- 全量差分的 fixture 配置清单；`input_ranges` 以 raw port value 的闭区间 `[MIN, MAX]` 限制随机输入，避免 C++ oracle 执行 fixture 前置条件之外的未定义行为。
 
 ### `scripts/differential_rtl.py`
 - V2 RTL differential harness。
 - 生成 port metadata、RTL、C++ oracle 和 Verilator testbench；oracle 直接写入源文件全局 input port、调用无参 top、读取全局 output port，并比较随机输入下的输出。
+- `--input-config` 加载 fixture manifest，重复的 `--input-range NAME=MIN:MAX` 可覆盖单个输入范围；配置会校验输入名、闭区间顺序和端口位宽。oracle 异常退出会报告 case、signal/exit code 与完整触发输入。
 
 ## Third Party And Docs
 

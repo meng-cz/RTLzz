@@ -692,6 +692,19 @@ static void sourcePipelineFlattensStructAndArray() {
           debug.find("lookupwrite [arr__idx_0, arr__idx_1, arr__idx_2]") != std::string::npos);
 }
 
+static void sourcePipelineFlattensDynamicAggregateConstruct() {
+    auto debug = runSourceToS7(
+        "testv2/fixtures/s1apinorm/source_aggregate_decl_init.logic.cpp");
+    CHECK(debug.find(" from_index__n\n") != std::string::npos);
+    CHECK(debug.find(" from_index__m\n") != std::string::npos);
+    CHECK(debug.find("lookup(idx, arr__idx_0__n, arr__idx_1__n)") !=
+          std::string::npos);
+    CHECK(debug.find("lookup(idx, arr__idx_0__m, arr__idx_1__m)") !=
+          std::string::npos);
+    CHECK(debug.find("assign from_index__n = __s7_flatten_lookup_") != std::string::npos);
+    CHECK(debug.find("assign from_index__m = __s7_flatten_lookup_") != std::string::npos);
+}
+
 static void sourcePipelineFlattensComplexAggregateCalls() {
     auto debug = runSourceToS7("testv2/fixtures/s7flatten/source_complex_aggregates.logic.cpp");
     CHECK(debug.find(" pkt__lanes__idx_0__n\n") != std::string::npos);
@@ -737,6 +750,7 @@ int main() {
     nestedStructArrayAccessFlatten();
     multiDynamicIndexReadAndWriteFlatten();
     sourcePipelineFlattensStructAndArray();
+    sourcePipelineFlattensDynamicAggregateConstruct();
     sourcePipelineFlattensComplexAggregateCalls();
     astPipelineFlattensAggregateLambdaCalls();
     return 0;
