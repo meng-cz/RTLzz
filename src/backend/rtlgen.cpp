@@ -190,8 +190,10 @@ public:
     std::string emit() {
         std::ostringstream os;
         os << "`timescale 1ns/1ps\n\n";
+        prepareConstantLookups();
         emitModuleHeader(os);
         emitSignalDecls(os);
+        emitConstantLookupFunctions(os);
         emitPortElementConnections(os);
         emitSignalAssignments(os);
         os << "endmodule\n";
@@ -250,6 +252,175 @@ public:
 private:
     const beir::Program& program_;
     std::unordered_map<std::string, NodeId> name_to_node_;
+
+    struct ConstantTable {
+        beir::ValueType element_type;
+        std::vector<beir::Operand::Constant> values;
+        std::size_t hash = 0;
+        std::string function_name;
+    };
+    std::vector<ConstantTable> constant_tables_;
+    std::unordered_map<std::size_t, std::vector<std::size_t>> table_hash_index_;
+    std::unordered_map<NodeId, std::size_t> constant_lookups_;
+    std::unordered_set<NodeId> omitted_arrays_;
+
+    static beir::Operand::Constant resizeConstant(beir::Operand::Constant value, int width) {
+        // Normalize unused bits and zero-extend exactly as the RTL wiring does.
+        const int old_width = std::max(value.width, 1);
+        value.limbs.resize(static_cast<std::size_t>((old_width + 63) / 64), 0);
+        if (old_width % 64) value.limbs.back() &= (uint64_t{1} << (old_width % 64)) - 1;
+        value.width = width;
+        value.signed_view = false;
+        value.limbs.resize(static_cast<std::size_t>((width + 63) / 64), 0);
+        if (width % 64) value.limbs.back() &= (uint64_t{1} << (width % 64)) - 1;
+        return value;
+    }
+
+    // Resolve constants independently of BEOPT and canonicalize their bit values,
+    // so different literal spellings and assignment chains share the same table.
+    std::optional<beir::Operand::Constant> constantValue(const beir::Operand& value,
+                                                       std::size_t depth = 0) const {
+        if (depth > program_.signals.size()) return std::nullopt;
+        if (value.kind == beir::OperandKind::Literal)
+            return resizeConstant(value.constant, widthOf(value.type));
+        if (value.kind != beir::OperandKind::Symbol) return std::nullopt;
+        const auto* source = program_.findSignal(value.node);
+        if (!source || !source->driver || source->type.isArray()) return std::nullopt;
+        const auto& op = *source->driver;
+        if (op.operands.size() != 1 ||
+            (op.kind != beir::OperationKind::Assign &&
+             op.kind != beir::OperationKind::Cast &&
+             op.kind != beir::OperationKind::ZExt &&
+             op.kind != beir::OperationKind::Trunc)) return std::nullopt;
+        if (op.signed_truncation) return std::nullopt;
+        auto result = constantValue(op.operands[0], depth + 1);
+        if (!result) return std::nullopt;
+        return resizeConstant(resizeConstant(*result, widthOf(op.type)), widthOf(source->type));
+    }
+
+    std::size_t internConstantTable(ConstantTable table) {
+        auto mix = [&](std::size_t value) {
+            table.hash ^= value + std::size_t{0x9e3779b9} + (table.hash << 6) + (table.hash >> 2);
+        };
+        mix(static_cast<std::size_t>(table.element_type.width));
+        mix(table.values.size());
+        for (const auto& value : table.values)
+            for (auto limb : value.limbs) mix(std::hash<uint64_t>{}(limb));
+        auto& bucket = table_hash_index_[table.hash];
+        for (auto id : bucket) {
+            const auto& existing = constant_tables_[id];
+            if (existing.element_type.width != table.element_type.width ||
+                existing.values.size() != table.values.size()) continue;
+            bool equal = true;
+            for (std::size_t i = 0; i < table.values.size(); ++i)
+                if (existing.values[i].limbs != table.values[i].limbs) { equal = false; break; }
+            if (equal) return id;
+        }
+        const auto id = constant_tables_.size();
+        table.function_name = "rtlzz_const_lookup_" + std::to_string(id);
+        auto collides = [&](const std::string& name) {
+            for (const auto& signal : program_.signals)
+                if (sanitizeIdentifier(signal.name) == name) return true;
+            for (const auto& port : program_.ports)
+                if (sanitizeIdentifier(port.name) == name) return true;
+            return sanitizeIdentifier(program_.function_name) == name;
+        };
+        while (collides(table.function_name)) table.function_name += "_";
+        bucket.push_back(id);
+        constant_tables_.push_back(std::move(table));
+        return id;
+    }
+
+    const beir::Operation* tableAggregate(beir::Operand value) const {
+        for (std::size_t depth = 0; depth <= program_.signals.size(); ++depth) {
+            if (value.kind != beir::OperandKind::Symbol) return nullptr;
+            const auto* source = program_.findSignal(value.node);
+            if (!source || !source->driver) return nullptr;
+            const auto& op = *source->driver;
+            if (op.kind == beir::OperationKind::Aggregate) return &op;
+            if (op.kind != beir::OperationKind::Assign || op.operands.size() != 1 ||
+                op.operands[0].type.width != source->type.width ||
+                op.operands[0].type.array_dims != source->type.array_dims)
+                return nullptr;
+            value = op.operands[0];
+        }
+        return nullptr;
+    }
+
+    void prepareConstantLookups() {
+        for (const auto& signal : program_.signals) {
+            if (!signal.driver) continue;
+            const auto& op = *signal.driver;
+            if ((op.kind != beir::OperationKind::Lookup &&
+                 op.kind != beir::OperationKind::ArrayAccess) ||
+                op.operands.size() != 2 || signal.type.isArray() ||
+                op.operands[0].type.array_dims.size() != 1) continue;
+            const auto* table = tableAggregate(op.operands[0]);
+            if (!table || table->operands.empty() ||
+                table->operands.size() != static_cast<std::size_t>(
+                    flattenedArraySize(op.operands[0].type))) continue;
+            ConstantTable entries;
+            entries.element_type.width = widthOf(table->type);
+            for (const auto& entry : table->operands) {
+                auto value = constantValue(entry);
+                if (!value) break;
+                entries.values.push_back(resizeConstant(*value, widthOf(table->type)));
+            }
+            if (entries.values.size() == table->operands.size())
+                constant_lookups_.emplace(signal.id, internConstantTable(std::move(entries)));
+        }
+        // Omit arrays only if no remaining emitted operation or port needs them.
+        std::unordered_set<NodeId> live;
+        std::vector<NodeId> pending;
+        for (const auto& signal : program_.signals) {
+            if (!signal.type.isArray() || !signal.port_name.empty())
+                pending.push_back(signal.id);
+        }
+        for (const auto& port : program_.ports)
+            for (NodeId id : port.element_nodes) pending.push_back(id);
+        while (!pending.empty()) {
+            NodeId id = pending.back();
+            pending.pop_back();
+            if (!live.insert(id).second) continue;
+            const auto* signal = program_.findSignal(id);
+            if (!signal || !signal->driver) continue;
+            const auto& operands = signal->driver->operands;
+            for (std::size_t i = 0; i < operands.size(); ++i) {
+                if (i == 0 && constant_lookups_.count(id)) continue;
+                if (operands[i].kind == beir::OperandKind::Symbol)
+                    pending.push_back(operands[i].node);
+            }
+        }
+        for (const auto& signal : program_.signals)
+            if (signal.type.isArray() && !live.count(signal.id))
+                omitted_arrays_.insert(signal.id);
+    }
+
+    void emitConstantLookupFunctions(std::ostream& os) const {
+        for (const auto& table : constant_tables_) {
+            const int index_width = indexWidthForCount(table.values.size());
+            os << "    function automatic " << logicType(table.element_type)
+               << table.function_name << "(input logic [" << index_width - 1 << ":0] index);\n"
+               << "        case (index)\n";
+            for (std::size_t i = 0; i < table.values.size(); ++i)
+                os << "            " << index_width << "'d" << i << ": "
+                   << table.function_name << " = " << constExpr(table.values[i]) << ";\n";
+            os << "            default: " << table.function_name << " = 'x;\n"
+               << "        endcase\n    endfunction\n\n";
+        }
+    }
+
+    void emitConstantLookup(std::ostream& os, const beir::Signal& signal,
+                            std::size_t table_id) const {
+        const auto& op = *signal.driver;
+        const auto& table = constant_tables_[table_id];
+        const auto call = table.function_name + "(" +
+                          arrayIndexExpr(op.operands[0], op.operands[1]) + ")";
+        os << "    assign " << sig(signal.id) << " = "
+           << resizeExpr(resizeExpr(call, widthOf(table.element_type), widthOf(op.type), false),
+                         widthOf(op.type), widthOf(signal.type), false)
+           << ";" << debugComment(op.debug) << "\n";
+    }
 
     std::vector<std::string> splitLines(const std::string& text) const {
         std::vector<std::string> lines;
@@ -466,7 +637,7 @@ private:
 
     void emitSignalDecls(std::ostream& os) const {
         for (const auto& signal : program_.signals) {
-            if (isDirectPortSignal(signal)) continue;
+            if (isDirectPortSignal(signal) || omitted_arrays_.count(signal.id)) continue;
             os << "    " << logicType(signal.type) << sanitizeIdentifier(signal.name)
                << unpackedDims(signal.type) << ";"
                << debugComment(signalDebug(signal)) << "\n";
@@ -525,6 +696,12 @@ private:
 
     void emitSignalAssignments(std::ostream& os) const {
         for (const auto& signal : program_.signals) {
+            if (omitted_arrays_.count(signal.id)) continue;
+            auto table = constant_lookups_.find(signal.id);
+            if (table != constant_lookups_.end()) {
+                emitConstantLookup(os, signal, table->second);
+                continue;
+            }
             if (signal.driver) {
                 if (signal.driver->kind == beir::OperationKind::PortRead &&
                     isDirectPortSignal(signal)) {

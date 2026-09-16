@@ -385,6 +385,66 @@ static void lookupLowersToBEIRArrayAccess() {
         }
     }
     CHECK(found_array);
+    // The BEIR representation stays unchanged; RTL emission specializes it.
+    for (bool optimize : {false, true}) {
+        auto lowered = lowerToBEIR(program, optimize);
+        auto rtl = rtlgen::emitSystemVerilog(lowered);
+        CHECK(rtl.find("case (") != std::string::npos);
+        CHECK(rtl.find("2'd2:") != std::string::npos);
+        CHECK(rtl.find("default:") != std::string::npos);
+        CHECK(rtl.find("= 'x;") != std::string::npos);
+        CHECK(rtl.find(" [0:2]") == std::string::npos);
+    }
+    // Independent equal aggregates share a function, even without BEOPT/CSE.
+    auto shared = lowerToBEIR(program, false);
+    beir::Signal table_copy, access_copy;
+    beir::NodeId next_id = 0;
+    for (const auto& signal : shared.signals) {
+        next_id = std::max(next_id, signal.id + 1);
+        if (signal.driver && signal.driver->kind == beir::OperationKind::Aggregate)
+            table_copy = signal;
+        if (signal.driver && signal.driver->kind == beir::OperationKind::ArrayAccess)
+            access_copy = signal;
+    }
+    table_copy.id = next_id++;
+    table_copy.name = "duplicate_table";
+    access_copy.id = next_id++;
+    access_copy.name = "duplicate_read";
+    access_copy.driver->operands[0] = beirSymbolOperand(table_copy.id, table_copy.type);
+    shared.signals.push_back(table_copy);
+    shared.signals.push_back(access_copy);
+    auto functionCount = [](const std::string& rtl) {
+        std::size_t count = 0, pos = 0;
+        while ((pos = rtl.find("function automatic", pos)) != std::string::npos) {
+            ++count;
+            ++pos;
+        }
+        return count;
+    };
+    auto shared_rtl = rtlgen::emitSystemVerilog(shared);
+    CHECK(functionCount(shared_rtl) == 1);
+    CHECK(shared_rtl.find("assign duplicate_read = rtlzz_const_lookup_0(") != std::string::npos);
+    // A single differing element must not alias the original table.
+    beir::Operand different;
+    different.kind = beir::OperandKind::Literal;
+    different.type = beirType(8);
+    different.constant.width = 8;
+    different.constant.limbs = {99};
+    shared.signals[shared.signals.size() - 2].driver->operands[0] = different;
+    CHECK(functionCount(rtlgen::emitSystemVerilog(shared)) == 2);
+    // Identical numbers with a different element type also need a new function.
+    table_copy.type.width = 16;
+    table_copy.driver->type.width = 16;
+    shared.signals[shared.signals.size() - 2] = table_copy;
+    shared.signals.back().driver->operands[0].type.width = 16;
+    CHECK(functionCount(rtlgen::emitSystemVerilog(shared)) == 2);
+
+    // A runtime table entry must retain the normal array access path.
+    block.stmts[0].lookup_elements[1] = var(0, intType(8));
+    auto dynamic_rtl = rtlgen::emitSystemVerilog(lowerToBEIR(program));
+    CHECK(dynamic_rtl.find("case (") == std::string::npos);
+    CHECK(dynamic_rtl.find(" [0:2]") != std::string::npos);
+
 }
 
 static void signedArithmeticShiftMapsToShrSignedView() {

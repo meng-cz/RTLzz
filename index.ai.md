@@ -300,6 +300,7 @@ done
 ### `src/backend/rtlgen.cpp`
 - 将 BEIR program emit 为 synthesizable SystemVerilog。
 - 支持 scalar/array ports、BEIR lookup、assign/operation lowering。
+- RTL emission 将全常量 Aggregate 的 Lookup/ArrayAccess 输出为组合 case 查表函数；按元素类型、表长及规范化常量位值建立哈希索引，以完整比较处理哈希冲突，同一模块内相同表复用函数；可追踪赋值及无符号宽度转换链，省略不再被使用的数组，运行时表项保持数组读取。
 
 ## Tests And Fixtures
 
@@ -344,6 +345,9 @@ done
 
 ### `testv2/fixtures/int_misc.logic.cpp`
 - End-to-end integer/fixint API fixture：arithmetic、bit op、shift、compare、slice、pick、cat/repeat/reduce、cast、enum、standard integer mixing。
+
+### `testv2/fixtures/constant_rom.logic.cpp`
+- AES SBOX 常量 ROM fixture，覆盖两个动态索引读取；用于 case 查表的 C++/RTL 差分验证。
 
 ### `testv2/fixtures/flatten_misc.logic.cpp`
 - End-to-end struct/array/aggregate/dynamic index/constant lookup fixture。
