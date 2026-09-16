@@ -241,6 +241,7 @@ done
 ### `src/s10predicate/S10Predicate.cpp`
 - 将 SSA control/data merge lowering 为 predicate/value dependencies。
 - 内部包含只读 verify/simplify 子阶段，检查 S10 输出结构一致性。
+- 只读校验中的布尔表达式通过稳定节点 ID 规范化 `And/Or`、hash-consing 复用节点；结构等价比较缓存节点对，蕴含缓存先于结构比较和 BDD 查询，以避免深层共享 guard DAG 的指数重复遍历。
 
 ### `src/s10predicate/checklist.md`
 - S10 语义确认记录。

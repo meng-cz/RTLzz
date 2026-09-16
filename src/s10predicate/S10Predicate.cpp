@@ -891,77 +891,163 @@ struct BoolExpr {
     };
 
     Kind kind = Kind::Const;
+    std::size_t id = 0;
     bool const_value = false;
     S10ValueId atom = -1;
     BoolExprPtr lhs;
     BoolExprPtr rhs;
 };
 
-BoolExprPtr boolConst(bool value) {
-    auto out = std::make_shared<BoolExpr>();
-    out->kind = BoolExpr::Kind::Const;
-    out->const_value = value;
-    return out;
-}
+struct BoolExprKey {
+    BoolExpr::Kind kind = BoolExpr::Kind::Const;
+    bool const_value = false;
+    S10ValueId atom = -1;
+    std::size_t lhs = 0;
+    std::size_t rhs = 0;
 
-BoolExprPtr boolAtom(S10ValueId value) {
-    auto out = std::make_shared<BoolExpr>();
-    out->kind = BoolExpr::Kind::Atom;
-    out->atom = value;
-    return out;
-}
+    bool operator==(const BoolExprKey& other) const {
+        return kind == other.kind && const_value == other.const_value &&
+               atom == other.atom && lhs == other.lhs && rhs == other.rhs;
+    }
+};
 
-bool boolExprEqual(const BoolExprPtr& lhs, const BoolExprPtr& rhs) {
+struct BoolExprKeyHash {
+    std::size_t operator()(const BoolExprKey& key) const {
+        std::size_t seed = std::hash<int>{}(static_cast<int>(key.kind));
+        auto combine = [&seed](std::size_t value) {
+            seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+        };
+        combine(std::hash<bool>{}(key.const_value));
+        combine(std::hash<int>{}(key.atom));
+        combine(std::hash<std::size_t>{}(key.lhs));
+        combine(std::hash<std::size_t>{}(key.rhs));
+        return seed;
+    }
+};
+
+class BoolExprFactory {
+public:
+    BoolExprPtr constant(bool value) {
+        return intern(BoolExprKey{BoolExpr::Kind::Const, value, -1, 0, 0}, {}, {});
+    }
+
+    BoolExprPtr atom(S10ValueId value) {
+        return intern(BoolExprKey{BoolExpr::Kind::Atom, false, value, 0, 0}, {}, {});
+    }
+
+    BoolExprPtr logicalNot(BoolExprPtr value) {
+        if (!value) return constant(false);
+        if (value->kind == BoolExpr::Kind::Const) return constant(!value->const_value);
+        if (value->kind == BoolExpr::Kind::Not) return value->lhs;
+        const std::size_t value_id = value->id;
+        return intern(BoolExprKey{BoolExpr::Kind::Not, false, -1, value_id, 0},
+                      std::move(value), {});
+    }
+
+    BoolExprPtr logicalAnd(BoolExprPtr lhs, BoolExprPtr rhs) {
+        if (!lhs || !rhs) return constant(false);
+        if (lhs->kind == BoolExpr::Kind::Const) return lhs->const_value ? rhs : lhs;
+        if (rhs->kind == BoolExpr::Kind::Const) return rhs->const_value ? lhs : rhs;
+        canonicalize(lhs, rhs);
+        if (lhs == rhs) return lhs;
+        const std::size_t lhs_id = lhs->id;
+        const std::size_t rhs_id = rhs->id;
+        return intern(BoolExprKey{BoolExpr::Kind::And, false, -1, lhs_id, rhs_id},
+                      std::move(lhs), std::move(rhs));
+    }
+
+    BoolExprPtr logicalOr(BoolExprPtr lhs, BoolExprPtr rhs) {
+        if (!lhs) return rhs;
+        if (!rhs) return lhs;
+        if (lhs->kind == BoolExpr::Kind::Const) return lhs->const_value ? lhs : rhs;
+        if (rhs->kind == BoolExpr::Kind::Const) return rhs->const_value ? rhs : lhs;
+        canonicalize(lhs, rhs);
+        if (lhs == rhs) return lhs;
+        const std::size_t lhs_id = lhs->id;
+        const std::size_t rhs_id = rhs->id;
+        return intern(BoolExprKey{BoolExpr::Kind::Or, false, -1, lhs_id, rhs_id},
+                      std::move(lhs), std::move(rhs));
+    }
+
+private:
+    static void canonicalize(BoolExprPtr& lhs, BoolExprPtr& rhs) {
+        // And/Or are commutative.  A stable operand order makes their
+        // structural key independent of the construction order.
+        if (lhs->id > rhs->id) std::swap(lhs, rhs);
+    }
+
+    BoolExprPtr intern(const BoolExprKey& key, BoolExprPtr lhs, BoolExprPtr rhs) {
+        auto found = nodes_.find(key);
+        if (found != nodes_.end()) return found->second;
+        auto out = std::make_shared<BoolExpr>();
+        out->kind = key.kind;
+        out->id = next_id_++;
+        out->const_value = key.const_value;
+        out->atom = key.atom;
+        out->lhs = std::move(lhs);
+        out->rhs = std::move(rhs);
+        nodes_.emplace(key, out);
+        return out;
+    }
+
+    std::size_t next_id_ = 1;
+    std::unordered_map<BoolExprKey, BoolExprPtr, BoolExprKeyHash> nodes_;
+};
+
+struct BoolExprPairKey {
+    const BoolExpr* lhs = nullptr;
+    const BoolExpr* rhs = nullptr;
+
+    bool operator==(const BoolExprPairKey& other) const {
+        return lhs == other.lhs && rhs == other.rhs;
+    }
+};
+
+struct BoolExprPairKeyHash {
+    std::size_t operator()(const BoolExprPairKey& key) const {
+        std::size_t seed = std::hash<const BoolExpr*>{}(key.lhs);
+        seed ^= std::hash<const BoolExpr*>{}(key.rhs) + 0x9e3779b97f4a7c15ULL +
+                (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
+
+using BoolExprEqualCache =
+    std::unordered_map<BoolExprPairKey, bool, BoolExprPairKeyHash>;
+
+// Retain commutative structural equality as a defensive fallback for nodes
+// from different construction paths, but memoize node pairs so shared DAGs
+// cannot trigger an exponential recursive comparison.
+bool boolExprEqual(const BoolExprPtr& lhs,
+                   const BoolExprPtr& rhs,
+                   BoolExprEqualCache& cache) {
     if (lhs == rhs) return true;
     if (!lhs || !rhs || lhs->kind != rhs->kind) return false;
+    const BoolExprPairKey key{lhs.get(), rhs.get()};
+    auto cached = cache.find(key);
+    if (cached != cache.end()) return cached->second;
+    bool equal = false;
     switch (lhs->kind) {
     case BoolExpr::Kind::Const:
-        return lhs->const_value == rhs->const_value;
+        equal = lhs->const_value == rhs->const_value;
+        break;
     case BoolExpr::Kind::Atom:
-        return lhs->atom == rhs->atom;
+        equal = lhs->atom == rhs->atom;
+        break;
     case BoolExpr::Kind::Not:
-        return boolExprEqual(lhs->lhs, rhs->lhs);
+        equal = boolExprEqual(lhs->lhs, rhs->lhs, cache);
+        break;
     case BoolExpr::Kind::And:
     case BoolExpr::Kind::Or:
-        return (boolExprEqual(lhs->lhs, rhs->lhs) && boolExprEqual(lhs->rhs, rhs->rhs)) ||
-               (boolExprEqual(lhs->lhs, rhs->rhs) && boolExprEqual(lhs->rhs, rhs->lhs));
+        equal = (boolExprEqual(lhs->lhs, rhs->lhs, cache) &&
+                 boolExprEqual(lhs->rhs, rhs->rhs, cache)) ||
+                (boolExprEqual(lhs->lhs, rhs->rhs, cache) &&
+                 boolExprEqual(lhs->rhs, rhs->lhs, cache));
+        break;
     }
-    return false;
-}
-
-BoolExprPtr boolNot(BoolExprPtr value) {
-    if (!value) return boolConst(false);
-    if (value->kind == BoolExpr::Kind::Const) return boolConst(!value->const_value);
-    if (value->kind == BoolExpr::Kind::Not) return value->lhs;
-    auto out = std::make_shared<BoolExpr>();
-    out->kind = BoolExpr::Kind::Not;
-    out->lhs = std::move(value);
-    return out;
-}
-
-BoolExprPtr boolAnd(BoolExprPtr lhs, BoolExprPtr rhs) {
-    if (!lhs || !rhs) return boolConst(false);
-    if (lhs->kind == BoolExpr::Kind::Const) return lhs->const_value ? rhs : lhs;
-    if (rhs->kind == BoolExpr::Kind::Const) return rhs->const_value ? lhs : rhs;
-    if (boolExprEqual(lhs, rhs)) return lhs;
-    auto out = std::make_shared<BoolExpr>();
-    out->kind = BoolExpr::Kind::And;
-    out->lhs = std::move(lhs);
-    out->rhs = std::move(rhs);
-    return out;
-}
-
-BoolExprPtr boolOr(BoolExprPtr lhs, BoolExprPtr rhs) {
-    if (!lhs) return rhs;
-    if (!rhs) return lhs;
-    if (lhs->kind == BoolExpr::Kind::Const) return lhs->const_value ? lhs : rhs;
-    if (rhs->kind == BoolExpr::Kind::Const) return rhs->const_value ? rhs : lhs;
-    if (boolExprEqual(lhs, rhs)) return lhs;
-    auto out = std::make_shared<BoolExpr>();
-    out->kind = BoolExpr::Kind::Or;
-    out->lhs = std::move(lhs);
-    out->rhs = std::move(rhs);
-    return out;
+    cache.emplace(key, equal);
+    cache.emplace(BoolExprPairKey{rhs.get(), lhs.get()}, equal);
+    return equal;
 }
 
 using DefinitionByValue = std::vector<const S10Definition*>;
@@ -1147,7 +1233,9 @@ struct ImplyKeyHash {
 struct ReadonlyContext {
     const S10PredicateProgram& program;
     const DefinitionByValue& defs;
+    mutable BoolExprFactory bool_expr_factory;
     mutable std::unordered_map<S10ValueId, BoolExprPtr> bool_expr_cache;
+    mutable BoolExprEqualCache bool_expr_equal_cache;
     mutable BoolBDDManager bdd;
     mutable std::unordered_map<ImplyKey, bool, ImplyKeyHash> implies_cache;
 };
@@ -1166,7 +1254,7 @@ BoolExprPtr boolExprForValue(const ReadonlyContext& ctx,
     }
     auto cached = ctx.bool_expr_cache.find(value);
     if (cached != ctx.bool_expr_cache.end()) return cached->second;
-    if (!expanding.insert(value).second) return boolAtom(value);
+    if (!expanding.insert(value).second) return ctx.bool_expr_factory.atom(value);
     const S10Definition* def = value >= 0 &&
         value < static_cast<S10ValueId>(ctx.defs.size()) ? ctx.defs[static_cast<std::size_t>(value)] : nullptr;
     auto finish = [&](BoolExprPtr out) {
@@ -1175,21 +1263,24 @@ BoolExprPtr boolExprForValue(const ReadonlyContext& ctx,
         return out;
     };
     if (!def) {
-        return finish(boolAtom(value));
+        return finish(ctx.bool_expr_factory.atom(value));
     }
 
-    BoolExprPtr out = boolAtom(value);
+    BoolExprPtr out = ctx.bool_expr_factory.atom(value);
     if (def->kind == S10DefKind::Assign) {
         out = boolExprForOperand(ctx, def->value, expanding);
     } else if (def->kind == S10DefKind::Op) {
         if (def->op.kind == S10OpKind::LogicalNot && def->op.operands.size() == 1) {
-            out = boolNot(boolExprForOperand(ctx, def->op.operands[0], expanding));
+            out = ctx.bool_expr_factory.logicalNot(
+                boolExprForOperand(ctx, def->op.operands[0], expanding));
         } else if (def->op.kind == S10OpKind::BoolAnd && def->op.operands.size() == 2) {
-            out = boolAnd(boolExprForOperand(ctx, def->op.operands[0], expanding),
-                          boolExprForOperand(ctx, def->op.operands[1], expanding));
+            out = ctx.bool_expr_factory.logicalAnd(
+                boolExprForOperand(ctx, def->op.operands[0], expanding),
+                boolExprForOperand(ctx, def->op.operands[1], expanding));
         } else if (def->op.kind == S10OpKind::BoolOr && def->op.operands.size() == 2) {
-            out = boolOr(boolExprForOperand(ctx, def->op.operands[0], expanding),
-                         boolExprForOperand(ctx, def->op.operands[1], expanding));
+            out = ctx.bool_expr_factory.logicalOr(
+                boolExprForOperand(ctx, def->op.operands[0], expanding),
+                boolExprForOperand(ctx, def->op.operands[1], expanding));
         }
     }
     return finish(out);
@@ -1206,7 +1297,7 @@ BoolExprPtr boolExprForOperand(const ReadonlyContext& ctx,
         if (!literalBool(operand, value)) {
             fail("S10 readonly check found malformed bool literal", operand.debug_loc);
         }
-        return boolConst(value);
+        return ctx.bool_expr_factory.constant(value);
     }
     return boolExprForValue(ctx, operand.value, expanding);
 }
@@ -1214,21 +1305,28 @@ BoolExprPtr boolExprForOperand(const ReadonlyContext& ctx,
 bool implies(const ReadonlyContext& ctx,
              const BoolExprPtr& premise,
              const BoolExprPtr& conclusion) {
-    if (boolExprEqual(premise, conclusion)) return true;
-    if (conclusion && conclusion->kind == BoolExpr::Kind::Const && conclusion->const_value) return true;
-    if (premise && premise->kind == BoolExpr::Kind::Const && !premise->const_value) return true;
-
     ImplyKey key{premise, conclusion};
+    // The factory makes equivalent requests pointer-stable, so consult this
+    // cache before any structural comparison or BDD construction.
     auto cached = ctx.implies_cache.find(key);
     if (cached != ctx.implies_cache.end()) return cached->second;
 
-    int premise_node = ctx.bdd.build(premise);
-    int conclusion_node = ctx.bdd.build(conclusion);
-    int counterexample = ctx.bdd.apply(BoolBDDManager::ApplyOp::And,
-                                       premise_node,
-                                       ctx.bdd.negate(conclusion_node));
-    bool result = counterexample == 0;
-    ctx.implies_cache.emplace(std::move(key), result);
+    bool result = false;
+    if (boolExprEqual(premise, conclusion, ctx.bool_expr_equal_cache) ||
+        (conclusion && conclusion->kind == BoolExpr::Kind::Const &&
+         conclusion->const_value) ||
+        (premise && premise->kind == BoolExpr::Kind::Const &&
+         !premise->const_value)) {
+        result = true;
+    } else {
+        int premise_node = ctx.bdd.build(premise);
+        int conclusion_node = ctx.bdd.build(conclusion);
+        int counterexample = ctx.bdd.apply(BoolBDDManager::ApplyOp::And,
+                                           premise_node,
+                                           ctx.bdd.negate(conclusion_node));
+        result = counterexample == 0;
+    }
+    ctx.implies_cache.emplace(key, result);
     return result;
 }
 
@@ -1239,7 +1337,7 @@ BoolExprPtr guardExpr(const ReadonlyContext& ctx, const S10Operand& guard) {
 
 BoolExprPtr availabilityExpr(const ReadonlyContext& ctx, S10ValueId value) {
     const auto& info = valueAt(ctx.program, value);
-    if (info.kind == S10ValueKind::Initial) return boolConst(true);
+    if (info.kind == S10ValueKind::Initial) return ctx.bool_expr_factory.constant(true);
     if (value < 0 || value >= static_cast<S10ValueId>(ctx.defs.size()) ||
         !ctx.defs[static_cast<std::size_t>(value)]) {
         fail("S10 readonly check found value without definition", {},
@@ -1272,7 +1370,8 @@ void readonlyCheckDefinition(const ReadonlyContext& ctx, const S10Definition& de
     BoolExprPtr def_guard = guardExpr(ctx, def.guard);
     const std::string target_note =
         " target=" + valueName(ctx.program, def.target);
-    checkOperandAvailable(ctx, def.guard, boolConst(true), "definition guard");
+    checkOperandAvailable(ctx, def.guard, ctx.bool_expr_factory.constant(true),
+                          "definition guard");
     switch (def.kind) {
     case S10DefKind::Assign:
         checkOperandAvailable(ctx, def.value, def_guard, "assign rhs");
@@ -1290,8 +1389,15 @@ void readonlyCheckDefinition(const ReadonlyContext& ctx, const S10Definition& de
             const auto& else_value = def.op.operands[2];
             checkOperandAvailable(ctx, cond, def_guard, "mux condition");
             BoolExprPtr cond_expr = guardExpr(ctx, cond);
-            checkOperandAvailable(ctx, then_value, boolAnd(def_guard, cond_expr), "mux then arm");
-            checkOperandAvailable(ctx, else_value, boolAnd(def_guard, boolNot(cond_expr)), "mux else arm");
+            checkOperandAvailable(
+                ctx, then_value,
+                ctx.bool_expr_factory.logicalAnd(def_guard, cond_expr),
+                "mux then arm");
+            checkOperandAvailable(
+                ctx, else_value,
+                ctx.bool_expr_factory.logicalAnd(
+                    def_guard, ctx.bool_expr_factory.logicalNot(cond_expr)),
+                "mux else arm");
             break;
         }
         if ((def.op.kind == S10OpKind::BoolAnd ||
@@ -1302,8 +1408,9 @@ void readonlyCheckDefinition(const ReadonlyContext& ctx, const S10Definition& de
             checkOperandAvailable(ctx, lhs, def_guard, "guard lhs");
             BoolExprPtr lhs_expr = guardExpr(ctx, lhs);
             BoolExprPtr rhs_guard = def.op.kind == S10OpKind::BoolAnd
-                ? boolAnd(def_guard, lhs_expr)
-                : boolAnd(def_guard, boolNot(lhs_expr));
+                ? ctx.bool_expr_factory.logicalAnd(def_guard, lhs_expr)
+                : ctx.bool_expr_factory.logicalAnd(
+                    def_guard, ctx.bool_expr_factory.logicalNot(lhs_expr));
             checkOperandAvailable(ctx, rhs, rhs_guard, "guard rhs");
             break;
         }
@@ -1320,17 +1427,20 @@ void readonlyPredicateCheck(const S10PredicateProgram& program,
     for (const auto& def : program.definitions) readonlyCheckDefinition(ctx, def);
     for (const auto& block_guard : program.block_guards) {
         if (block_guard.guard) {
-            checkOperandAvailable(ctx, block_guard.guard.value(), boolConst(true), "block guard");
+            checkOperandAvailable(ctx, block_guard.guard.value(),
+                                  ctx.bool_expr_factory.constant(true), "block guard");
         }
     }
     for (const auto& port : program.ports) {
         if (port.final_guard) {
-            checkOperandAvailable(ctx, port.final_guard.value(), boolConst(true), "port final guard");
+            checkOperandAvailable(ctx, port.final_guard.value(),
+                                  ctx.bool_expr_factory.constant(true),
+                                  "port final guard");
         }
         if (port.final_value) {
             BoolExprPtr final_guard = port.final_guard
                 ? guardExpr(ctx, port.final_guard.value())
-                : boolConst(true);
+                : ctx.bool_expr_factory.constant(true);
             checkValueUseAvailable(ctx, port.final_value.value(), final_guard, {},
                                    "port final binding");
         } else if (isOutputPort(port)) {
