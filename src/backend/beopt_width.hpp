@@ -988,6 +988,13 @@ inline bool normalizeOperationOperands(Operation& op, Program& program, const st
             normalize_operand(0, common);
             normalize_operand(1, common);
         }
+    } else if (op.kind == OperationKind::Concat) {
+        // Concatenation part widths encode bit positions, even when a source
+        // can be stored in fewer bits. Restore each part's original width.
+        for (std::size_t i = 0; i < op.operands.size(); ++i) {
+            const int part_width = widthOf(op.operands[i].type);
+            normalize_operand(i, part_width);
+        }
     } else if (op.kind == OperationKind::Unary &&
                (op.op == OpCode::BitNot || op.op == OpCode::Neg) &&
                !op.operands.empty()) {

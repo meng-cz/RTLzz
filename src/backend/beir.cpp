@@ -917,6 +917,19 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
     }
     if (op.kind == OperationKind::Slice) return operands.empty() ? factsUnknown(width) : factsSlice(operands[0], op.lo, width);
     if (op.kind == OperationKind::BitSelect) return operands.empty() ? factsUnknown(1) : factsBitSelect(operands[0], op.bit);
+    if (op.kind == OperationKind::Concat) {
+        ValueFacts out = factsUnknown(width);
+        int offset = 0;
+        for (auto it = operands.rbegin(); it != operands.rend(); ++it) {
+            if (it->width <= 0 || it->width > width - offset) return factsUnknown(width);
+            for (int bit = 0; bit < it->width; ++bit) {
+                if (factsGetBit(it->known_zero, bit)) factsSetBit(out.known_zero, offset + bit);
+                if (factsGetBit(it->known_one, bit)) factsSetBit(out.known_one, offset + bit);
+            }
+            offset += it->width;
+        }
+        return offset == width ? out : factsUnknown(width);
+    }
     if (op.kind == OperationKind::Unary) {
         if (auto folded = factsInferUnaryConstant(op, operands, width)) return *folded;
     }

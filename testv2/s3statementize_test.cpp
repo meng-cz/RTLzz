@@ -403,7 +403,25 @@ static void sourceTemplateCallArgumentBinaryOperatorIsRecovered() {
     expectContains(debug, "call write_value");
 }
 
+static void dynamicWritesUseIndexBeforeValue() {
+    auto top = baseTop();
+    top.params.push_back(param("base", int8()));
+    top.params.push_back(param("index", int8()));
+    top.params.push_back(param("value", int8()));
+    top.params.push_back(outputParam("out", int8()));
+    top.body.push_back(assign(make_var("out", int8()),
+        make_dynamic_write_slice(make_var("base", int8()),
+                                 make_var("index", int8()), make_var("value", int8()))));
+    top.body.push_back(assign(make_var("out", int8()),
+        make_dynamic_write_bit(make_var("base", int8()),
+                               make_var("index", int8()), make_var("value", int8()))));
+    auto debug = statementizeDebug(top);
+    expectContains(debug, "DynamicWriteSlice(base, index, value)");
+    expectContains(debug, "DynamicWriteBit(base, index, value)");
+}
+
 int main() {
+    dynamicWritesUseIndexBeforeValue();
     nestedCallsBecomeStatementLevel();
     returnIfHelperAndLambdaAreStatementized();
     complexLValueKeepsRhsBeforeLhs();

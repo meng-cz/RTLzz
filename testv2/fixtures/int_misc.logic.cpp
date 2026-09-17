@@ -142,6 +142,66 @@ bool wide_reduce_all;
 #pragma output_port wide_reduce_parity
 bool wide_reduce_parity;
 
+// Dynamic write and loop-unrolled slice regression inputs/outputs.
+#pragma input_port pick_data
+Int<128> pick_data;
+#pragma input_port pick_bit_index
+Int<7> pick_bit_index;
+#pragma input_port pick_bit_value
+Int<1> pick_bit_value;
+#pragma output_port pick_constant
+Int<128> pick_constant;
+#pragma output_port pick_static
+Int<128> pick_static;
+#pragma output_port pick_dynamic
+Int<128> pick_dynamic;
+#pragma output_port pick_bit
+Int<128> pick_bit;
+#pragma output_port pick_ordered
+Int<128> pick_ordered;
+#pragma output_port pick_overlap
+Int<128> pick_overlap;
+#pragma output_port pick_edges
+Int<128> pick_edges;
+#pragma output_port pick_full
+Int<128> pick_full;
+
+void test_pick_writes() {
+    // Exact constant-loop regression; all four writes should fold to one literal.
+    Int<128> x = 0;
+    for (int i = 0; i < 4; i++) x.pick<32>(i * 32) = Int<32>(i);
+    pick_constant = x;
+
+    // Runtime data keeps the static read/write slice path observable.
+    Int<128> slices = pick_data;
+    for (int i = 0; i < 4; ++i)
+        slices.pick<32>(i * 32) = Int<32>(pick_data.pick<32>(i * 32) + Int<32>(i));
+    pick_static = slices;
+
+    Int<128> dynamic = pick_data;
+    dynamic.pick<32>(dyn.to<unsigned>() * 32) = Int<32>(7);
+    pick_dynamic = dynamic;
+    Int<128> bits = pick_data;
+    bits.pick(pick_bit_index.to<unsigned>()) = pick_bit_value;
+    pick_bit = bits;
+
+    // Assignment evaluates RHS before the LHS index expression.
+    unsigned pick_i = 1;
+    Int<128> ordered = 0;
+    ordered.pick<32>((pick_i++) * 32) = Int<32>(pick_i++);
+    pick_ordered = ordered;
+
+    Int<128> overlap = pick_data;
+    for (int i = 0; i < 4; ++i) overlap.pick<32>(i * 4) = Int<32>(i);
+    pick_overlap = overlap;
+    Int<128> edges = pick_data;
+    edges.pick<32>(0) = Int<32>(7);
+    edges.pick<32>(96) = Int<32>(11);
+    pick_edges = edges;
+    edges.pick<128>(0) = pick_data;
+    pick_full = edges;
+}
+
 void hls_main() {
     constexpr int LOW_BITS = 8;
     constexpr int MID_LO = 8;
@@ -237,4 +297,6 @@ void hls_main() {
     wide_reduce_any = ReduceOr(wide_a);
     wide_reduce_all = ReduceAnd(wide_b);
     wide_reduce_parity = ReduceXor(wide_mix);
+
+    test_pick_writes();
 }

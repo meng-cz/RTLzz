@@ -345,6 +345,7 @@ done
 
 ### `testv2/fixtures/int_misc.logic.cpp`
 - End-to-end integer/fixint API fixture：arithmetic、bit op、shift、compare、slice、pick、cat/repeat/reduce、cast、enum、standard integer mixing。
+- 合并动态位段/单 bit 写入顺序、RHS/LHS 自增求值顺序、128 位常量循环、运行时数据静态切片、`i * 4` 重叠写入、首尾及整宽覆盖回归。
 
 ### `testv2/fixtures/constant_rom.logic.cpp`
 - AES SBOX 常量 ROM fixture，覆盖两个动态索引读取；用于 case 查表的 C++/RTL 差分验证。
@@ -390,3 +391,11 @@ done
 
 ### `roadmap.md`
 - V2 pipeline stage responsibilities and long-term compiler route。
+
+### `scripts/check_unrolled_pick.py`
+- 针对 `int_misc.logic.cpp` 的 `pick_*` 输出逐个遍历 BEIR 依赖，检查静态化、运行时索引对照及 RTL 中的 128 位常量折叠，再执行完整 int_misc 的 100 组 C++/RTL 差分。
+- `python3 scripts/check_unrolled_pick.py --build-dir <build>`；任一结构或数值检查失败均返回非零。
+
+### `src/backend/beopt_slices.hpp`
+- 常量传播后，将范围合法的常量索引 DynamicSlice/DynamicWriteSlice 静态化；静态 WriteSlice 转为高位切片、写入值、低位切片的 Concat，整宽写入转 Assign。
+- 由 width 优化开关控制；未知或越界索引保留原操作。beir 的 Concat 位值传播支持全常量折叠，位宽优化保持拼接项原始宽度。

@@ -1697,6 +1697,15 @@ private:
         append(expr->index);
         append(expr->cast_expr);
         for (const auto& part : expr->parts) append(part);
+        if (op.hardware_op == HardwareOp::DynamicWriteSlice ||
+            op.hardware_op == HardwareOp::DynamicWriteBit) {
+            // Preserve expression evaluation/prelude order above. Only reorder
+            // the resulting operands to the IR contract: base, index, value.
+            if (op.operands.size() != 3) {
+                fail(expr->debug_loc, "Dynamic write requires base, index and value");
+            }
+            std::swap(op.operands[1], op.operands[2]);
+        }
         result.operand = materializeOp(std::move(op), "hwop", expr->debug_loc, result.prelude);
         return result;
     }
@@ -1726,6 +1735,15 @@ private:
         append(expr->index);
         append(expr->cast_expr);
         for (const auto& part : expr->parts) append(part);
+        if (op.hardware_op == HardwareOp::DynamicWriteSlice ||
+            op.hardware_op == HardwareOp::DynamicWriteBit) {
+            // Preserve expression evaluation/prelude order above. Only reorder
+            // the resulting operands to the IR contract: base, index, value.
+            if (op.operands.size() != 3) {
+                fail(expr->debug_loc, "Dynamic write requires base, index and value");
+            }
+            std::swap(op.operands[1], op.operands[2]);
+        }
         result.operand = materializeOp(std::move(op), "hwop", expr->debug_loc, result.prelude);
         return result;
     }

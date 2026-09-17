@@ -7,6 +7,7 @@
 #include "backend/beopt_dce.hpp"
 #include "backend/beopt_predicate.hpp"
 #include "backend/beopt_width.hpp"
+#include "backend/beopt_slices.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -83,6 +84,7 @@ Program optimizeProgram(Program program,
         changed = false;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.constant_folding) changed = foldConstants(graph) || changed;
+        if (options.width_simplification) changed = specializeConstantSlices(graph) || changed;
         if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
         if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
