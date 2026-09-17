@@ -299,6 +299,7 @@ done
 
 ### `src/backend/rtlgen.cpp`
 - 将 BEIR program emit 为 synthesizable SystemVerilog。
+- 乘法分别按左右操作数的 signed view 扩展/截断到结果位宽，再以无符号位模式相乘并显式截断，保证混合符号语义不依赖 BEOPT。
 - 支持 scalar/array ports、BEIR lookup、assign/operation lowering。
 - RTL emission 将全常量 Aggregate 的 Lookup/ArrayAccess 输出为组合 case 查表函数；按元素类型、表长及规范化常量位值建立哈希索引，以完整比较处理哈希冲突，同一模块内相同表复用函数；可追踪赋值及无符号宽度转换链，省略不再被使用的数组，运行时表项保持数组读取。
 
@@ -344,7 +345,7 @@ done
 - S11 BEIR conversion、array port、lookup/operation mapping 测试。
 
 ### `testv2/fixtures/int_misc.logic.cpp`
-- End-to-end integer/fixint API fixture：arithmetic、bit op、shift、compare、slice、pick、cat/repeat/reduce、cast、enum、standard integer mixing。
+- End-to-end integer/fixint API fixture：arithmetic、bit op、shift、compare、slice、pick、cat/repeat/reduce、cast、enum、standard integer mixing；乘法覆盖左右混合符号、双有符号、不同位宽和结果截断。
 - 合并动态位段/单 bit 写入顺序、RHS/LHS 自增求值顺序、128 位常量循环、运行时数据静态切片、`i * 4` 重叠写入、首尾及整宽覆盖回归。
 
 ### `testv2/fixtures/constant_rom.logic.cpp`

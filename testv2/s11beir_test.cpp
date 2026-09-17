@@ -671,7 +671,39 @@ static void rtlgenMakesNarrowShiftsAndSignedTruncationExplicit() {
     CHECK(rtl.find("{wide[31], wide[3:0]}") != std::string::npos);
 }
 
+static void rtlgenMultipliesWithIndependentSignedViews() {
+    beir::Program program;
+    program.function_name = "multiply_views";
+    program.signals.push_back(beirSignal(0, "a", beirType(8)));
+    program.signals.push_back(beirSignal(1, "b", beirType(12)));
+    auto product = beirSignal(2, "product", beirType(16));
+    beir::Operation op;
+    op.kind = beir::OperationKind::Binary;
+    op.op = beir::OpCode::Mul;
+    op.type = beirType(16);
+    op.operands = {beirSymbolOperand(0, beirType(8)),
+                   beirSymbolOperand(1, beirType(12), true)};
+    product.driver = op;
+    program.signals.push_back(product);
+    auto rtl = rtlgen::emitSystemVerilog(program);
+    CHECK(rtl.find("16'(($unsigned(16'($unsigned(a))) * $unsigned(16'($signed(b)))))") != std::string::npos);
+    // Result narrowing is explicit even if the destination wire is wider.
+    program.signals.back().driver->type.width = 5;
+    rtl = rtlgen::emitSystemVerilog(program);
+    CHECK(rtl.find("5'(($unsigned(5'($unsigned(a))) * $unsigned(5'($signed(b)))))") != std::string::npos);
+    // Literal signed views also use casts, never a part-select on a literal.
+    auto& literal = program.signals.back().driver->operands[1];
+    literal.kind = beir::OperandKind::Literal;
+    literal.signed_view = false;
+    literal.constant.width = 12;
+    literal.constant.signed_view = true;
+    literal.constant.limbs = {0xfff};
+    rtl = rtlgen::emitSystemVerilog(program);
+    CHECK(rtl.find("$signed(12'hfff)") != std::string::npos);
+}
+
 int main() {
+    rtlgenMultipliesWithIndependentSignedViews();
     rtlgenConnectsScalarPortElementsWithoutArraySelect();
     straightLineBuildsPortsAndOutputAssign();
     lookupLowersToBEIRArrayAccess();

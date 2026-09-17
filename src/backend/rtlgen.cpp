@@ -879,6 +879,20 @@ private:
         case beir::OperationKind::Binary:
             need(2);
             {
+                if (op.op == beir::OpCode::Mul) {
+                    // Multiply modulo the BEIR result width. Extend each operand
+                    // using its own signed view before combining their bit patterns;
+                    // SV otherwise makes mixed signed/unsigned multiplication unsigned.
+                    const auto width = std::to_string(widthOf(op.type));
+                    auto multiplyOperand = [&](const beir::Operand& value) {
+                        const bool is_signed = value.signed_view || value.constant.signed_view;
+                        const auto view = std::string(is_signed ? "$signed(" : "$unsigned(") +
+                                          operand(value) + ")";
+                        return "$unsigned(" + width + "'(" + view + "))";
+                    };
+                    return width + "'((" + multiplyOperand(ops[0]) + " * " +
+                           multiplyOperand(ops[1]) + "))";
+                }
                 bool signed_context =
                     ops[0].signed_view || ops[1].signed_view ||
                     ops[0].constant.signed_view || ops[1].constant.signed_view;

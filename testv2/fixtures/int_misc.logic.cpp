@@ -41,6 +41,14 @@ Int<9> arith_add;
 Int<8> arith_sub_neg;
 #pragma output_port arith_mul
 Int<16> arith_mul;
+#pragma output_port mul_signed_left
+Int<16> mul_signed_left;
+#pragma output_port mul_signed_pair
+Int<16> mul_signed_pair;
+#pragma output_port mul_signed_wide
+Int<24> mul_signed_wide;
+#pragma output_port mul_signed_truncated
+Int<8> mul_signed_truncated;
 #pragma output_port bit_logic
 Int<8> bit_logic;
 #pragma output_port bit_not_mix
@@ -264,6 +272,10 @@ void hls_main() {
     stdmix_mul_u8 = a * std_u8;
     stdmix_mul_s8 = a * std_s8;
     stdmix_mul_sint_s8 = a.sint() * std_s8;
+    mul_signed_left = std_s8 * a;
+    mul_signed_pair = a.sint() * b.sint();
+    mul_signed_wide = word * std_s8;
+    mul_signed_truncated = Int<8>(a * std_s8);
     stdmix_cmp_u8 = a > std_u8;
     stdmix_cmp_s8 = b.sint() < std_s8;
     stdmix_assign_u8 = std_u8;
