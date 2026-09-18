@@ -16,7 +16,7 @@ static void printUsage(const char* prog) {
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
               << " [--max-leaf-symbols N]"
               << " [--beopt OPT ...] [--clang-arg ARG ...] [-o output_file]"
-              << " [--rtl-debug-file FILE] [--no-rtl-debug]\n";
+              << " [--release|-r] [--rtl-debug-file FILE] [--no-rtl-debug]\n";
     std::cerr << "Required: source.cpp and --top. Default format is rtl.\n";
     std::cerr << "Default output files append .sv, .beir, or .ptmt to the input file path; use -o - for stdout.\n";
     std::cerr << "For rtl output, a debug report is emitted by default to <rtl-output>.dbg.\n";
@@ -188,6 +188,7 @@ static int runMain(int argc, char* argv[]) {
     int unroll_limit = 1024;
     std::size_t max_leaf_symbols = 0;
     bool emit_rtl_debug = true;
+    bool release = false;
     std::vector<std::string> clang_args;
     std::vector<std::string> beopt_args;
 
@@ -211,6 +212,8 @@ static int runMain(int argc, char* argv[]) {
         } else if (arg == "--rtl-debug-file" && i + 1 < argc) {
             rtl_debug_file = argv[++i];
             emit_rtl_debug = true;
+        } else if (arg == "--release" || arg == "-r") {
+            release = true;
         } else if (arg == "--no-rtl-debug") {
             emit_rtl_debug = false;
         } else if (arg == "--unroll-limit" && i + 1 < argc) {
@@ -256,6 +259,13 @@ static int runMain(int argc, char* argv[]) {
     if (format != "portmeta" && format != "beir" && format != "rtl") {
         std::cerr << "Unknown format: " << format << "\n";
         return 1;
+    }
+    if (release) {
+        if (format != "rtl") {
+            std::cerr << "--release requires --format rtl\n";
+            return 1;
+        }
+        emit_rtl_debug = false;
     }
     if (output_file.empty()) output_file = defaultOutputFile(source_file, format);
     if (vullib_dir.empty()) {

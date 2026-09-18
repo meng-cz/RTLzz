@@ -33,6 +33,7 @@ done
 
 ### `main/main.cpp`
 - CLI 参数解析入口。
+- `--release` / `-r` 仅用于 RTL 输出，禁用调试文件及失败快照，优先于显式 debug 文件选项。
 - 读取输入源文件，组装 `rtlzz::CompileOptions`。
 - 支持 `--format rtl|beir|portmeta`，并转发 `--top`、`--vullib`、`--unroll-limit`、`--beopt`、`--clang-arg`。
 

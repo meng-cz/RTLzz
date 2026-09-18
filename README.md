@@ -46,3 +46,8 @@ python3 scripts/differential_rtl.py testv2/fixtures/flatten_misc.logic.cpp --top
 python3 scripts/differential_rtl.py testv2/fixtures/controlflow_misc.logic.cpp --top hls_main --cases 100
 python3 scripts/differential_rtl.py testv2/fixtures/inline_misc.logic.cpp --top hls_main --cases 100
 ```
+
+Use `--release` (or `-r`) with RTL output to suppress all debug sidecar files,
+including error snapshots. It takes precedence over `--rtl-debug-file`, regardless
+of argument order, and requires `--format rtl` (the default). Diagnostics still
+appear on stderr. Without this option, debug output behavior is unchanged.
