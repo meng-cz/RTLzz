@@ -9,6 +9,7 @@
 #include "backend/beopt_width.hpp"
 #include "backend/beopt_slices.hpp"
 #include "backend/beopt_structure.hpp"
+#include "backend/beopt_bit_updates.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -28,6 +29,7 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.predicate_sinking = true;
             options.exclusive_muxes = true;
             options.balance_trees = true;
+            options.bit_range_update_coalescing = true;
         } else if (value == "none") {
             options.fold_assign_chains = false;
             options.constant_folding = false;
@@ -38,6 +40,7 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.predicate_sinking = false;
             options.exclusive_muxes = false;
             options.balance_trees = false;
+            options.bit_range_update_coalescing = false;
         } else if (value == "assign" || value == "fold-assign") {
             options.fold_assign_chains = true;
         } else if (value == "no-assign" || value == "no-fold-assign") {
@@ -74,6 +77,10 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.balance_trees = true;
         } else if (value == "no-balance") {
             options.balance_trees = false;
+        } else if (value == "bit-updates" || value == "coalesce-bit-updates") {
+            options.bit_range_update_coalescing = true;
+        } else if (value == "no-bit-updates" || value == "no-coalesce-bit-updates") {
+            options.bit_range_update_coalescing = false;
         } else if (value == "dce") {
             options.dead_node_elimination = true;
         } else if (value == "no-dce") {
@@ -98,6 +105,11 @@ Program optimizeProgram(Program program,
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.constant_folding) changed = foldConstants(graph) || changed;
         if (options.width_simplification) changed = specializeConstantSlices(graph) || changed;
+        if (options.bit_range_update_coalescing) {
+            changed = coalesceBitRangeUpdates(graph,
+                                              options.max_bit_range_updates,
+                                              options.max_bit_compose_pieces) || changed;
+        }
         if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
         if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
@@ -113,8 +125,13 @@ Program optimizeProgram(Program program,
             if (options.algebraic_identities) progress = simplifyAlgebraicIdentities(graph) || progress;
             if (options.width_simplification) {
                 progress = specializeConstantSlices(graph) || progress;
-                progress = simplifyWidthOperations(graph) || progress;
             }
+            if (options.bit_range_update_coalescing) {
+                progress = coalesceBitRangeUpdates(graph,
+                                                   options.max_bit_range_updates,
+                                                   options.max_bit_compose_pieces) || progress;
+            }
+            if (options.width_simplification) progress = simplifyWidthOperations(graph) || progress;
             if (options.fold_assign_chains) progress = foldAssignChains(graph) || progress;
             if (options.common_subexpressions) progress = mergeCommonExpressions(graph) || progress;
             if (options.dead_node_elimination) progress = eliminateDeadNodes(graph) || progress;

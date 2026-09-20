@@ -274,7 +274,7 @@ done
 ### `src/backend/beopt.cpp`
 - 串接 BEIR optimization passes，并在固定点循环每轮开始时触发可选逐轮回调。
 - 谓词下沉后受限迭代常量、代数、位宽、Assign、CSE、DCE，默认最多 4 轮；随后单向执行互斥 mux 并行化及结合树平衡，避免结构变换振荡。
-- `Options` 暴露 max_predicate_iterations、max_mux_branches、max_tree_leaves；`--beopt mux/no-mux` 与 `balance/no-balance` 分别控制结构 pass，all/none 同时管理它们。
+- `Options` 暴露 max_predicate_iterations、max_mux_branches、max_tree_leaves、max_bit_range_updates、max_bit_compose_pieces；`--beopt mux/no-mux`、`balance/no-balance` 与 `bit-updates/no-bit-updates` 分别控制结构 pass，all/none 同时管理它们。
 
 ### `src/backend/beopt_constant.hpp`
 - 常量传播、常量折叠和 literal 简化。
@@ -403,8 +403,13 @@ done
 - `python3 scripts/check_unrolled_pick.py --build-dir <build>`；任一结构或数值检查失败均返回非零。
 
 ### `src/backend/beopt_slices.hpp`
-- 常量传播后，将范围合法的常量索引 DynamicSlice/DynamicWriteSlice 静态化；静态 WriteSlice 转为高位切片、写入值、低位切片的 Concat，整宽写入转 Assign。
-- 由 width 优化开关控制；未知或越界索引保留原操作。beir 的 Concat 位值传播支持全常量折叠，位宽优化保持拼接项原始宽度。
+- 常量传播后，将范围合法的常量索引 DynamicSlice/DynamicWriteSlice 静态化；静态 WriteSlice 保留范围元数据，交给 bit-range update pass 收集整条更新链。
+- 由 width 优化开关控制；未知或越界索引保留原操作。
+
+### `src/backend/beopt_bit_updates.hpp`
+- `BitRangeUpdateCoalescingPass` 从输出侧收集单活跃用户的静态 WriteSlice 链，穿透同类型 Assign 别名，并按位区间生成一次扁平 Assign/Concat。
+- 重叠区间使用最新写入值，空洞保留原值；共享中间结果、类型或范围不匹配时保守停止。默认最多收集 32 次更新和 64 个组合片段，并设有硬上限。
+- 用户计数仅覆盖可观察输出可达图，避免已折叠、尚未 DCE 的死别名阻止合并；变换后使 value facts 失效。
 
 ### `src/backend/beopt_structure.hpp`
 - `parallelizeExclusiveMuxes` 仅收集最多 8 个分支的等宽 Ite false-chain，单用户中间节点且条件两两证明互斥后转换为分支掩码 AND + 平衡 OR；默认分支使用 `!OR(conditions)` 掩码，未知关系/优先级链保持不变。
@@ -416,3 +421,9 @@ done
 
 ### `testv2/fixtures/backend_structure.logic.cpp`
 - 8/128 位互斥选择、优先级选择、结合运算及嵌套谓词的端到端 C++/RTL 差分回归。
+
+### `testv2/beopt_bit_updates_test.cpp`
+- 独立 BEIR 求值器验证相邻、重叠、稀疏和全覆盖写入；覆盖 Assign 别名穿透、共享中间节点边界、规模限制及选项解析。
+
+### `testv2/fixtures/bit_update_coalescing.logic.cpp`
+- 相邻、重叠和带空洞静态位段更新的端到端 C++/RTL 差分 fixture。

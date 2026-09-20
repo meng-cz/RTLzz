@@ -19,9 +19,12 @@ struct Options {
     int max_iterations = 16;
     bool exclusive_muxes = true;
     bool balance_trees = true;
+    bool bit_range_update_coalescing = true;
     int max_predicate_iterations = 4;
     unsigned max_mux_branches = 8;
     unsigned max_tree_leaves = 32;
+    unsigned max_bit_range_updates = 32;
+    unsigned max_bit_compose_pieces = 64;
 };
 
 Options parseOptions(const std::vector<std::string>& values);

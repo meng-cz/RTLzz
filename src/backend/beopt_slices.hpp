@@ -5,6 +5,9 @@
 namespace pred::beir::opt {
 
 // Run after constant propagation; leave unsupported/out-of-range accesses alone.
+// Static writes deliberately remain WriteSlice operations here.  Keeping their
+// range metadata intact lets BitRangeUpdateCoalescing see and combine a whole
+// update chain before it is lowered to slices and concatenation.
 inline bool specializeConstantSlices(MutableProgram& graph) {
     auto& program = graph.program();
     bool changed = false;
@@ -26,38 +29,8 @@ inline bool specializeConstantSlices(MutableProgram& graph) {
             op.hi = op.lo + width - 1;
             op.kind = write ? OperationKind::WriteSlice : OperationKind::Slice;
             op.operands.erase(op.operands.begin() + 1);
-        } else if (op.kind != OperationKind::WriteSlice) {
+        } else {
             continue;
-        }
-        if (op.kind == OperationKind::WriteSlice) {
-            if (op.operands.size() != 2 || op.type.width != base_width ||
-                op.lo < 0 || op.hi < op.lo || op.hi >= base_width) continue;
-            const int width = op.hi - op.lo + 1;
-            auto value = op.operands[1];
-            if (value.type.width != width) {
-                Operation cast;
-                cast.kind = OperationKind::Cast;
-                cast.operands = {value};
-                value = width_detail::appendTemp(program, ValueType{width, {}}, cast,
-                                                 "resize static slice write value");
-            }
-            std::vector<Operand> parts;
-            auto slice = [&](int lo, int hi) {
-                Operation part;
-                part.kind = OperationKind::Slice;
-                part.lo = lo;
-                part.hi = hi;
-                part.operands = {op.operands[0]};
-                part.debug = op.debug;
-                parts.push_back(width_detail::appendTemp(program, ValueType{hi - lo + 1, {}},
-                                                          part, "static slice write preserved bits"));
-            };
-            if (op.hi + 1 < base_width) slice(op.hi + 1, base_width - 1);
-            parts.push_back(value);
-            if (op.lo > 0) slice(0, op.lo - 1);
-            op.kind = parts.size() == 1 ? OperationKind::Assign : OperationKind::Concat;
-            op.operands = std::move(parts);
-            op.hi = op.lo = -1;
         }
         addDebugMessage(op.debug, "specialized constant-index slice access");
         program.signals[id].driver = std::move(op);

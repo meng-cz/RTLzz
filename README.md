@@ -54,13 +54,21 @@ appear on stderr. Without this option, debug output behavior is unchanged.
 
 Backend structural optimization is enabled by default. `--beopt no-mux` disables
 proven-exclusive mux parallelization; `--beopt no-balance` disables associative
-tree balancing. `--beopt none` disables both along with the existing passes.
+tree balancing; `--beopt no-bit-updates` disables static bit-range update
+coalescing. `--beopt none` disables them along with the existing passes.
 Mux rewriting retains the default branch and requires pairwise proven exclusive
 conditions (at most 8 branches). Tree balancing only expands single-user,
 equal-width unsigned AND/OR/XOR or modular-add nodes, and only rewrites when the
 estimated arrival depth improves. Predicate sinking and scalar cleanup iterate
 up to 4 rounds by default; the C++ `beir::opt::Options` exposes these bounds.
+Static `WriteSlice` chains are combined into one flat composition when their
+intermediate values have a single live user. Overlapping writes preserve
+last-write-wins behavior, uncovered ranges come from the original value, and
+the pass is bounded to 32 updates and 64 composed pieces by default.
 
 Run `build/testv2/beopt-structure-test` for structural and BEIR equivalence checks,
 and `scripts/differential_rtl.py testv2/fixtures/backend_structure.logic.cpp
 --top hls_main --cases 256` for RTL differential validation.
+Run `build/testv2/beopt-bit-updates-test` and use
+`testv2/fixtures/bit_update_coalescing.logic.cpp` for bit-update structural and
+RTL differential validation.
