@@ -17,6 +17,11 @@ struct Options {
     bool algebraic_identities = true;
     bool predicate_sinking = true;
     int max_iterations = 16;
+    bool exclusive_muxes = true;
+    bool balance_trees = true;
+    int max_predicate_iterations = 4;
+    unsigned max_mux_branches = 8;
+    unsigned max_tree_leaves = 32;
 };
 
 Options parseOptions(const std::vector<std::string>& values);

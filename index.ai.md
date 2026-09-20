@@ -266,19 +266,21 @@ done
 - 定义 BEIR program、signal、port、operand、operation、mutable program API。
 
 ### `src/backend/beir.cpp`
-- BEIR text dump、validation、operation/type helpers、mutable builder 实现。
+- BEIR text dump、validation、operation/type helpers、mutable builder 实现；Ite 位值分析按结果位宽合并分支已知位，支持下沉后的再次常量化。
 
 ### `src/backend/beopt.hpp`
 - 声明 BEIR optimizer options、可选逐轮回调和 `optimizeProgram`。
 
 ### `src/backend/beopt.cpp`
 - 串接 BEIR optimization passes，并在固定点循环每轮开始时触发可选逐轮回调。
+- 谓词下沉后受限迭代常量、代数、位宽、Assign、CSE、DCE，默认最多 4 轮；随后单向执行互斥 mux 并行化及结合树平衡，避免结构变换振荡。
+- `Options` 暴露 max_predicate_iterations、max_mux_branches、max_tree_leaves；`--beopt mux/no-mux` 与 `balance/no-balance` 分别控制结构 pass，all/none 同时管理它们。
 
 ### `src/backend/beopt_constant.hpp`
 - 常量传播、常量折叠和 literal 简化。
 
 ### `src/backend/beopt_algebraic.hpp`
-- 代数化简。
+- 代数化简；支持 Ite 的常量条件和等值分支折叠。
 
 ### `src/backend/beopt_assign_chains.hpp`
 - assignment chain 简化。
@@ -291,6 +293,8 @@ done
 
 ### `src/backend/beopt_predicate.hpp`
 - predicate/guard 相关 BEIR 优化。
+- `PredicateRelations::implies/isExclusive` 统一返回 Proven/Unknown：有界二值布尔分析支持同条件、NOT、AND/OR 和相同无符号操作数对不同等宽常量的 Eq；不确定或超预算时保守返回 Unknown。
+- branchContext 保留父路径事实；每条上下文最多 8 条事实，每个节点最多 16 个上下文，超限丢弃事实或降为无条件；关系查询最多 8 个原子、深度 24、约 256 个公式节点，无跨图修改缓存。
 
 ### `src/backend/beopt_width.hpp`
 - width 相关优化和裁剪；支持 operand signed view 影响的扩展语义。
@@ -401,3 +405,14 @@ done
 ### `src/backend/beopt_slices.hpp`
 - 常量传播后，将范围合法的常量索引 DynamicSlice/DynamicWriteSlice 静态化；静态 WriteSlice 转为高位切片、写入值、低位切片的 Concat，整宽写入转 Assign。
 - 由 width 优化开关控制；未知或越界索引保留原操作。beir 的 Concat 位值传播支持全常量折叠，位宽优化保持拼接项原始宽度。
+
+### `src/backend/beopt_structure.hpp`
+- `parallelizeExclusiveMuxes` 仅收集最多 8 个分支的等宽 Ite false-chain，单用户中间节点且条件两两证明互斥后转换为分支掩码 AND + 平衡 OR；默认分支使用 `!OR(conditions)` 掩码，未知关系/优先级链保持不变。
+- `balanceAssociativeTrees` 支持等宽无 signed-view 的 AND/OR/XOR/模加法；默认最多 32 叶（硬上限 64），只展开单用户同类节点，不穿越截断/扩展。按到达时间优先合并早到输入，且仅在估计延迟严格下降时重构。
+- 两个 pass 按可观察输出遍历活跃图，修改后使 value facts 失效。
+
+### `testv2/beopt_structure_test.cpp`
+- 独立 BEIR 求值器验证 mux 默认值、非互斥拒绝、8 输入结合树及模加法语义；覆盖父上下文、预算降级、查询失效、共享节点、位宽边界、晚到输入和下沉后再次简化。
+
+### `testv2/fixtures/backend_structure.logic.cpp`
+- 8/128 位互斥选择、优先级选择、结合运算及嵌套谓词的端到端 C++/RTL 差分回归。

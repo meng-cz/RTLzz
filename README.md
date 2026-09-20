@@ -51,3 +51,16 @@ Use `--release` (or `-r`) with RTL output to suppress all debug sidecar files,
 including error snapshots. It takes precedence over `--rtl-debug-file`, regardless
 of argument order, and requires `--format rtl` (the default). Diagnostics still
 appear on stderr. Without this option, debug output behavior is unchanged.
+
+Backend structural optimization is enabled by default. `--beopt no-mux` disables
+proven-exclusive mux parallelization; `--beopt no-balance` disables associative
+tree balancing. `--beopt none` disables both along with the existing passes.
+Mux rewriting retains the default branch and requires pairwise proven exclusive
+conditions (at most 8 branches). Tree balancing only expands single-user,
+equal-width unsigned AND/OR/XOR or modular-add nodes, and only rewrites when the
+estimated arrival depth improves. Predicate sinking and scalar cleanup iterate
+up to 4 rounds by default; the C++ `beir::opt::Options` exposes these bounds.
+
+Run `build/testv2/beopt-structure-test` for structural and BEIR equivalence checks,
+and `scripts/differential_rtl.py testv2/fixtures/backend_structure.logic.cpp
+--top hls_main --cases 256` for RTL differential validation.

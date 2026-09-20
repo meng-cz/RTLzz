@@ -930,6 +930,20 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
         }
         return offset == width ? out : factsUnknown(width);
     }
+    if (op.kind == OperationKind::Ite && operands.size() == 3) {
+        auto resize = [&](const ValueFacts& value) {
+            return value.width < width ? factsZExt(value, width) : factsTrunc(value, width);
+        };
+        auto yes = resize(operands[1]);
+        auto no = resize(operands[2]);
+        if (operands[0].constant) return operands[0].value.isZero() ? no : yes;
+        ValueFacts out = factsUnknown(width);
+        for (std::size_t i = 0; i < out.known_zero.size(); ++i) {
+            out.known_zero[i] = yes.known_zero[i] & no.known_zero[i];
+            out.known_one[i] = yes.known_one[i] & no.known_one[i];
+        }
+        return out;
+    }
     if (op.kind == OperationKind::Unary) {
         if (auto folded = factsInferUnaryConstant(op, operands, width)) return *folded;
     }

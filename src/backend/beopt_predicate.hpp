@@ -3,6 +3,7 @@
 #include "backend/beir.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -103,6 +104,7 @@ inline bool hasUnconditional(const std::vector<Context>& contexts) {
 
 inline bool appendContext(std::vector<Context>& contexts, Context context) {
     normalizeContext(context);
+    if (context.predicates.size() > 8) context.predicates.resize(8);
     if (isUnconditional(context)) {
         if (contexts.size() == 1 && isUnconditional(contexts.front())) return false;
         contexts.clear();
@@ -112,6 +114,10 @@ inline bool appendContext(std::vector<Context>& contexts, Context context) {
     if (hasUnconditional(contexts)) return false;
     for (const auto& existing : contexts) {
         if (sameContext(existing, context)) return false;
+    }
+    if (contexts.size() >= 16) {
+        contexts.assign(1, unconditionalContext());
+        return true;
     }
     contexts.push_back(std::move(context));
     return true;
@@ -126,8 +132,10 @@ inline bool appendPredicate(std::vector<Predicate>& predicates, Predicate predic
 }
 
 inline Context branchContext(const Context& parent, const Operand& guard, bool when_true) {
-    (void)parent;
-    return guardedContext(guard, when_true);
+    Context result = parent;
+    if (result.predicates.size() >= 8) result.predicates.erase(result.predicates.begin());
+    appendPredicate(result.predicates, Predicate{guard, when_true});
+    return result;
 }
 
 inline const Operation* symbolDriver(const Operand& operand, const Program& program) {
@@ -137,40 +145,121 @@ inline const Operation* symbolDriver(const Operand& operand, const Program& prog
     return &*signal->driver;
 }
 
-inline bool conditionTruthImplies(const Operand& condition,
-                                  bool condition_value,
-                                  const Operand& target,
-                                  bool target_value,
-                                  const Program& program,
-                                  int depth = 0) {
-    if (depth > 8) return false;
-    if (sameOperand(condition, target)) return condition_value == target_value;
+// Queries prove relations in a bounded Boolean abstraction. Unmodelled atoms
+// are independent; dropping their relationships cannot produce a false proof.
+// No analysis state survives a query, so graph mutations cannot stale a cache.
+enum class Proof { Unknown, Proven };
 
-    const Operation* driver = symbolDriver(condition, program);
-    if (!driver) return false;
+class PredicateRelations {
+    const Program& program_;
+    struct Formula { int kind; int a; int b; }; // constant, atom, not, and, or
+    struct Atom { Operand value; std::optional<Operand> selector, literal; };
+    std::vector<Formula> formulas_;
+    std::vector<Atom> atoms_;
+    bool exhausted_ = false;
 
-    if (driver->kind == OperationKind::Unary && driver->op == OpCode::LogicNot &&
-        driver->operands.size() == 1) {
-        return conditionTruthImplies(driver->operands[0], !condition_value,
-                                     target, target_value, program, depth + 1);
+    int add(int kind, int a = 0, int b = 0) {
+        formulas_.push_back({kind, a, b});
+        return static_cast<int>(formulas_.size() - 1);
     }
-
-    if (driver->kind == OperationKind::Binary && driver->operands.size() == 2) {
-        if (driver->op == OpCode::LogicAnd && condition_value) {
-            return conditionTruthImplies(driver->operands[0], true, target, target_value,
-                                         program, depth + 1) ||
-                   conditionTruthImplies(driver->operands[1], true, target, target_value,
-                                         program, depth + 1);
+    int build(const Operand& value, int depth = 0) {
+        if (depth > 24 || formulas_.size() >= 256) { exhausted_ = true; return 0; }
+        if (value.kind == OperandKind::Literal) return add(0, !value.constant.isZero());
+        const auto* op = symbolDriver(value, program_);
+        if (op && op->kind == OperationKind::Assign && op->operands.size() == 1 &&
+            sameValueType(op->type, op->operands[0].type))
+            return build(op->operands[0], depth + 1);
+        if (op && op->kind == OperationKind::Unary && op->op == OpCode::LogicNot &&
+            op->operands.size() == 1) return add(2, build(op->operands[0], depth + 1));
+        if (op && op->kind == OperationKind::Binary && op->operands.size() == 2 &&
+            (op->op == OpCode::LogicAnd || op->op == OpCode::LogicOr ||
+             (value.type.width == 1 && op->operands[0].type.width == 1 &&
+              op->operands[1].type.width == 1 &&
+              (op->op == OpCode::BitAnd || op->op == OpCode::BitOr)))) {
+            int left = build(op->operands[0], depth + 1);
+            int right = build(op->operands[1], depth + 1);
+            return add(op->op == OpCode::LogicAnd || op->op == OpCode::BitAnd ? 3 : 4, left, right);
         }
-        if (driver->op == OpCode::LogicOr && !condition_value) {
-            return conditionTruthImplies(driver->operands[0], false, target, target_value,
-                                         program, depth + 1) ||
-                   conditionTruthImplies(driver->operands[1], false, target, target_value,
-                                         program, depth + 1);
+        Atom atom{value, {}, {}};
+        if (op && op->kind == OperationKind::Binary && op->op == OpCode::Eq &&
+            op->operands.size() == 2) {
+            auto left = op->operands[0], right = op->operands[1];
+            if (left.kind == OperandKind::Literal) std::swap(left, right);
+            // Equal-width unsigned comparisons avoid extension/truncation ambiguity.
+            if (right.kind == OperandKind::Literal && !left.type.isArray() &&
+                sameValueType(left.type, right.type) && !left.signed_view &&
+                !right.signed_view && !right.constant.signed_view &&
+                right.constant.width == right.type.width && right.type.width > 0) {
+                right.constant.limbs.resize(static_cast<std::size_t>((right.type.width + 63) / 64), 0);
+                if (right.type.width % 64)
+                    right.constant.limbs.back() &= (std::uint64_t{1} << (right.type.width % 64)) - 1;
+                atom.selector = left;
+                atom.literal = right;
+            }
+        }
+        for (std::size_t i = 0; i < atoms_.size(); ++i) {
+            if (sameOperand(value, atoms_[i].value) ||
+                (atom.selector && atoms_[i].selector &&
+                 sameOperand(*atom.selector, *atoms_[i].selector) &&
+                 sameConstant(atom.literal->constant, atoms_[i].literal->constant)))
+                return add(1, static_cast<int>(i));
+        }
+        if (atoms_.size() >= 8) { exhausted_ = true; return 0; }
+        atoms_.push_back(std::move(atom));
+        return add(1, static_cast<int>(atoms_.size() - 1));
+    }
+    bool evaluate(int id, unsigned values) const {
+        const auto& f = formulas_[id];
+        switch (f.kind) {
+        case 0: return f.a;
+        case 1: return (values >> f.a) & 1;
+        case 2: return !evaluate(f.a, values);
+        case 3: return evaluate(f.a, values) && evaluate(f.b, values);
+        default: return evaluate(f.a, values) || evaluate(f.b, values);
         }
     }
+    bool admissible(unsigned values) const {
+        for (std::size_t i = 0; i < atoms_.size(); ++i) {
+            if (!(values & (1u << i)) || !atoms_[i].selector) continue;
+            for (std::size_t j = 0; j < i; ++j) {
+                if ((values & (1u << j)) && atoms_[j].selector &&
+                    sameOperand(*atoms_[i].selector, *atoms_[j].selector) &&
+                    !sameConstant(atoms_[i].literal->constant, atoms_[j].literal->constant))
+                    return false;
+            }
+        }
+        return true;
+    }
+public:
+    explicit PredicateRelations(const Program& program) : program_(program) {}
+    Proof implies(const Context& context, Predicate target) {
+        formulas_.clear(); atoms_.clear(); exhausted_ = false;
+        std::vector<std::pair<int, bool>> facts;
+        for (const auto& p : context.predicates) facts.push_back({build(p.guard), p.when_true});
+        const int goal = build(target.guard);
+        if (exhausted_) return Proof::Unknown;
+        for (unsigned values = 0; values < (1u << atoms_.size()); ++values) {
+            if (!admissible(values)) continue;
+            bool holds = true;
+            for (const auto& fact : facts)
+                if (evaluate(fact.first, values) != fact.second) { holds = false; break; }
+            if (holds && evaluate(goal, values) != target.when_true) return Proof::Unknown;
+        }
+        return Proof::Proven;
+    }
+    Proof implies(const Operand& a, const Operand& b) {
+        return implies(guardedContext(a, true), Predicate{b, true});
+    }
+    Proof isExclusive(const Operand& a, const Operand& b) {
+        return implies(guardedContext(a, true), Predicate{b, false});
+    }
+};
 
-    return false;
+inline bool conditionTruthImplies(const Operand& condition, bool condition_value,
+                                  const Operand& target, bool target_value,
+                                  const Program& program, int = 0) {
+    return PredicateRelations(program).implies(guardedContext(condition, condition_value),
+                                               Predicate{target, target_value}) == Proof::Proven;
 }
 
 inline bool isKnownZero(const Operand& operand, const Program& program) {
@@ -184,14 +273,7 @@ inline bool contextImpliesBranch(const Context& context,
                                  const Operand& guard,
                                  bool when_true,
                                  const Program& program) {
-    if (context.predicates.empty()) return false;
-    for (const auto& predicate : context.predicates) {
-        if (conditionTruthImplies(predicate.guard, predicate.when_true,
-                                  guard, when_true, program)) {
-            return true;
-        }
-    }
-    return false;
+    return PredicateRelations(program).implies(context, Predicate{guard, when_true}) == Proof::Proven;
 }
 
 inline bool onlyNeededInBranch(const std::vector<Context>& contexts,

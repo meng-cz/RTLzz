@@ -8,6 +8,7 @@
 #include "backend/beopt_predicate.hpp"
 #include "backend/beopt_width.hpp"
 #include "backend/beopt_slices.hpp"
+#include "backend/beopt_structure.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -25,6 +26,8 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.common_subexpressions = true;
             options.dead_node_elimination = true;
             options.predicate_sinking = true;
+            options.exclusive_muxes = true;
+            options.balance_trees = true;
         } else if (value == "none") {
             options.fold_assign_chains = false;
             options.constant_folding = false;
@@ -33,6 +36,8 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.common_subexpressions = false;
             options.dead_node_elimination = false;
             options.predicate_sinking = false;
+            options.exclusive_muxes = false;
+            options.balance_trees = false;
         } else if (value == "assign" || value == "fold-assign") {
             options.fold_assign_chains = true;
         } else if (value == "no-assign" || value == "no-fold-assign") {
@@ -61,6 +66,14 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.predicate_sinking = true;
         } else if (value == "no-predicate" || value == "no-predicate-sinking") {
             options.predicate_sinking = false;
+        } else if (value == "mux") {
+            options.exclusive_muxes = true;
+        } else if (value == "no-mux") {
+            options.exclusive_muxes = false;
+        } else if (value == "balance") {
+            options.balance_trees = true;
+        } else if (value == "no-balance") {
+            options.balance_trees = false;
         } else if (value == "dce") {
             options.dead_node_elimination = true;
         } else if (value == "no-dce") {
@@ -91,10 +104,31 @@ Program optimizeProgram(Program program,
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
     }
-    if (options.predicate_sinking && sinkPredicates(graph)) {
+    // Bounded post-sinking fixed point. Each pass invalidates its value facts;
+    // predicate queries are rebuilt from the current graph on every round.
+    if (options.predicate_sinking) {
+        for (int round = 0; round < options.max_predicate_iterations; ++round) {
+            bool progress = sinkPredicates(graph);
+            if (options.constant_folding) progress = foldConstants(graph) || progress;
+            if (options.algebraic_identities) progress = simplifyAlgebraicIdentities(graph) || progress;
+            if (options.width_simplification) {
+                progress = specializeConstantSlices(graph) || progress;
+                progress = simplifyWidthOperations(graph) || progress;
+            }
+            if (options.fold_assign_chains) progress = foldAssignChains(graph) || progress;
+            if (options.common_subexpressions) progress = mergeCommonExpressions(graph) || progress;
+            if (options.dead_node_elimination) progress = eliminateDeadNodes(graph) || progress;
+            if (!progress) break;
+        }
+    }
+    // Structural rewrites have one canonical direction and run only once after
+    // scalar normalization, so cleanup cannot oscillate between mux/tree forms.
+    if (options.exclusive_muxes) parallelizeExclusiveMuxes(graph, options.max_mux_branches);
+    if (options.balance_trees) balanceAssociativeTrees(graph, options.max_tree_leaves);
+    if (options.exclusive_muxes || options.balance_trees) {
+        if (options.constant_folding) foldConstants(graph);
         if (options.fold_assign_chains) foldAssignChains(graph);
         if (options.common_subexpressions) mergeCommonExpressions(graph);
-        if (options.fold_assign_chains) foldAssignChains(graph);
         if (options.dead_node_elimination) eliminateDeadNodes(graph);
     }
     return graph.finish();

@@ -393,6 +393,22 @@ inline bool rewriteUnary(Operation& op, const Program& program) {
     return false;
 }
 
+inline bool rewriteIte(Operation& op, const Program& program) {
+    if (op.kind != OperationKind::Ite || op.operands.size() != 3) return false;
+    const auto& a = op.operands[1];
+    const auto& b = op.operands[2];
+    if (a.type.width == b.type.width && a.type.array_dims == b.type.array_dims && sameOperand(a, b)) {
+        setAssign(op, a, op.type, "removed mux with identical branches", program);
+        return true;
+    }
+    if (const auto* condition = constantOf(op.operands[0], program)) {
+        Operand selected = op.operands[condition->isZero() ? 2 : 1];
+        setAssign(op, std::move(selected), op.type, "selected constant mux branch", program);
+        return true;
+    }
+    return false;
+}
+
 } // namespace algebraic_detail
 
 inline bool simplifyAlgebraicIdentities(MutableProgram& graph) {
@@ -401,6 +417,7 @@ inline bool simplifyAlgebraicIdentities(MutableProgram& graph) {
     for (auto& signal : graph.program().signals) {
         if (!signal.driver) continue;
         bool signal_changed =
+            algebraic_detail::rewriteIte(*signal.driver, graph.program()) ||
             algebraic_detail::rewriteBinary(*signal.driver, graph.program()) ||
             algebraic_detail::rewriteUnary(*signal.driver, graph.program());
         if (signal_changed) signal.debug = signal.driver->debug;
