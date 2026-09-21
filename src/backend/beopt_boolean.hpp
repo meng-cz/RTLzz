@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <optional>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace pred::beir::opt {
@@ -15,7 +18,42 @@ struct Literal {
     bool negated = false;
 };
 
-inline Operand resolveAssign(const Operand& value, const Program& program) {
+struct LiteralHash {
+    std::size_t operator()(const Literal& value) const {
+        std::uint64_t seed = static_cast<std::uint64_t>(value.base.kind);
+        hashCombine(seed, value.base.node);
+        hashCombine(seed, std::hash<std::string>{}(value.base.text));
+        hashCombine(seed, static_cast<std::uint64_t>(value.base.type.width));
+        for (int dim : value.base.type.array_dims) hashCombine(seed, static_cast<std::uint64_t>(dim));
+        hashCombine(seed, value.base.signed_view ? 1 : 0);
+        if (value.base.kind == OperandKind::Literal) {
+            hashCombine(seed, static_cast<std::uint64_t>(value.base.constant.width));
+            hashCombine(seed, value.base.constant.signed_view ? 1 : 0);
+            for (auto limb : value.base.constant.limbs) hashCombine(seed, limb);
+        }
+        hashCombine(seed, value.negated ? 1 : 0);
+        return static_cast<std::size_t>(seed);
+    }
+};
+
+struct LiteralEqual {
+    bool operator()(const Literal& lhs, const Literal& rhs) const {
+        return lhs.negated == rhs.negated &&
+               predicate_detail::sameOperand(lhs.base, rhs.base);
+    }
+};
+
+struct LiteralCache {
+    std::unordered_map<NodeId, Operand> resolved;
+    std::unordered_map<NodeId, Literal> literals;
+};
+
+inline Operand resolveAssign(const Operand& value, const Program& program,
+                             LiteralCache* cache = nullptr) {
+    if (cache && value.kind == OperandKind::Symbol) {
+        auto found = cache->resolved.find(value.node);
+        if (found != cache->resolved.end()) return found->second;
+    }
     Operand current = value;
     while (current.kind == OperandKind::Symbol) {
         const auto* driver = predicate_detail::symbolDriver(current, program);
@@ -24,20 +62,28 @@ inline Operand resolveAssign(const Operand& value, const Program& program) {
             !predicate_detail::sameValueType(driver->type, driver->operands[0].type)) break;
         current = driver->operands[0];
     }
+    if (cache && value.kind == OperandKind::Symbol) cache->resolved.emplace(value.node, current);
     return current;
 }
 
-inline Literal literalOf(Operand value, const Program& program) {
-    value = resolveAssign(value, program);
+inline Literal literalOf(Operand value, const Program& program, LiteralCache* cache = nullptr) {
+    if (cache && value.kind == OperandKind::Symbol) {
+        auto found = cache->literals.find(value.node);
+        if (found != cache->literals.end()) return found->second;
+    }
+    const NodeId original_node = value.kind == OperandKind::Symbol ? value.node : kInvalidNodeId;
+    value = resolveAssign(value, program, cache);
     bool negated = false;
     while (const auto* driver = predicate_detail::symbolDriver(value, program)) {
         if (driver->kind != OperationKind::Unary ||
             driver->op != OpCode::LogicNot || driver->operands.size() != 1 ||
             value.type.width != 1 || value.type.isArray()) break;
         negated = !negated;
-        value = resolveAssign(driver->operands[0], program);
+        value = resolveAssign(driver->operands[0], program, cache);
     }
-    return Literal{std::move(value), negated};
+    Literal result{std::move(value), negated};
+    if (cache && original_node != kInvalidNodeId) cache->literals.emplace(original_node, result);
+    return result;
 }
 
 inline bool sameLiteral(const Literal& lhs, const Literal& rhs) {
@@ -98,8 +144,9 @@ inline Operand materialize(Program& program,
 inline void collectBoolean(const Operand& value,
                            bool conjunction,
                            const Program& program,
-                           std::vector<Operand>& leaves) {
-    const Operand resolved = resolveAssign(value, program);
+                           std::vector<Operand>& leaves,
+                           LiteralCache* cache = nullptr) {
+    const Operand resolved = resolveAssign(value, program, cache);
     const auto* driver = predicate_detail::symbolDriver(resolved, program);
     const bool matches = driver && driver->kind == OperationKind::Binary &&
         driver->type.width == 1 && !driver->type.isArray() &&
@@ -108,8 +155,8 @@ inline void collectBoolean(const Operand& value,
              ? (driver->op == OpCode::BitAnd || driver->op == OpCode::LogicAnd)
              : (driver->op == OpCode::BitOr || driver->op == OpCode::LogicOr));
     if (matches) {
-        collectBoolean(driver->operands[0], conjunction, program, leaves);
-        collectBoolean(driver->operands[1], conjunction, program, leaves);
+        collectBoolean(driver->operands[0], conjunction, program, leaves, cache);
+        collectBoolean(driver->operands[1], conjunction, program, leaves, cache);
     } else {
         leaves.push_back(resolved);
     }
@@ -150,12 +197,13 @@ inline void setAssign(Program& program,
 
 inline std::vector<Literal> termFactors(const Operand& term,
                                         bool conjunction,
-                                        const Program& program) {
+                                        const Program& program,
+                                        LiteralCache* cache = nullptr) {
     std::vector<Operand> operands;
-    collectBoolean(term, conjunction, program, operands);
+    collectBoolean(term, conjunction, program, operands, cache);
     std::vector<Literal> result;
     result.reserve(operands.size());
-    for (auto& operand : operands) result.push_back(literalOf(std::move(operand), program));
+    for (auto& operand : operands) result.push_back(literalOf(std::move(operand), program, cache));
     std::sort(result.begin(), result.end(), literalLess);
     result.erase(std::unique(result.begin(), result.end(), sameLiteral), result.end());
     return result;
@@ -195,15 +243,16 @@ inline bool simplifyAssociative(Program& program, NodeId id) {
     const bool conjunction = original.op == OpCode::BitAnd || original.op == OpCode::LogicAnd;
     const OpCode outer = conjunction ? OpCode::BitAnd : OpCode::BitOr;
     const OpCode inner = conjunction ? OpCode::BitOr : OpCode::BitAnd;
+    LiteralCache cache;
     std::vector<Operand> terms;
-    collectBoolean(original.operands[0], conjunction, program, terms);
-    collectBoolean(original.operands[1], conjunction, program, terms);
+    collectBoolean(original.operands[0], conjunction, program, terms, &cache);
+    collectBoolean(original.operands[1], conjunction, program, terms, &cache);
 
     bool changed = original.op != outer;
     std::vector<Operand> filtered;
-    std::vector<Literal> literals;
+    std::unordered_set<Literal, LiteralHash, LiteralEqual> seen;
     for (auto& term : terms) {
-        if (auto value = boolConstant(term, program)) {
+        if (auto value = boolConstant(resolveAssign(term, program, &cache), program)) {
             if (*value != conjunction) {
                 setAssign(program, id, constant(*value), original.debug,
                           "folded dominating Boolean constant");
@@ -212,27 +261,28 @@ inline bool simplifyAssociative(Program& program, NodeId id) {
             changed = true;
             continue;
         }
-        Literal literal = literalOf(term, program);
-        bool duplicate = false;
-        for (const auto& existing : literals) {
-            if (sameLiteral(existing, literal)) { duplicate = true; changed = true; break; }
-            if (complementary(existing, literal)) {
+        Literal literal = literalOf(term, program, &cache);
+        Literal complement = literal;
+        complement.negated = !complement.negated;
+        bool duplicate = !seen.insert(literal).second;
+        if (duplicate) {
+            changed = true;
+        } else if (seen.count(complement)) {
                 setAssign(program, id, constant(!conjunction), original.debug,
                           "folded complementary Boolean operands");
                 return true;
-            }
         }
         if (!duplicate) {
-            literals.push_back(literal);
-            filtered.push_back(resolveAssign(term, program));
+            filtered.push_back(resolveAssign(term, program, &cache));
         }
     }
     terms = std::move(filtered);
 
     // Absorption: X | (X & Y) = X, with the dual rule for conjunction.
     std::vector<std::vector<Literal>> factors;
+    factors.reserve(terms.size());
     for (const auto& term : terms)
-        factors.push_back(termFactors(term, !conjunction, program));
+        factors.push_back(termFactors(term, !conjunction, program, &cache));
     bool absorbed = true;
     while (absorbed) {
         absorbed = false;
@@ -280,9 +330,10 @@ inline bool normalizeIte(Program& program, NodeId id) {
     const Operation original = *program.signal(id).driver;
     if (original.kind != OperationKind::Ite || original.operands.size() != 3 ||
         original.type.width != 1 || original.type.isArray()) return false;
-    Operand condition = resolveAssign(original.operands[0], program);
-    Operand when_true = resolveAssign(original.operands[1], program);
-    Operand when_false = resolveAssign(original.operands[2], program);
+    LiteralCache cache;
+    Operand condition = resolveAssign(original.operands[0], program, &cache);
+    Operand when_true = resolveAssign(original.operands[1], program, &cache);
+    Operand when_false = resolveAssign(original.operands[2], program, &cache);
     const auto true_constant = boolConstant(when_true, program);
     const auto false_constant = boolConstant(when_false, program);
     auto unary = [&](Operand value) {
@@ -296,9 +347,9 @@ inline bool normalizeIte(Program& program, NodeId id) {
     };
     Operand result;
     bool matched = true;
-    const Literal condition_literal = literalOf(condition, program);
-    const Literal true_literal = literalOf(when_true, program);
-    const Literal false_literal = literalOf(when_false, program);
+    const Literal condition_literal = literalOf(condition, program, &cache);
+    const Literal true_literal = literalOf(when_true, program, &cache);
+    const Literal false_literal = literalOf(when_false, program, &cache);
     if (sameLiteral(true_literal, condition_literal)) {
         // C ? C : F == C | F
         result = binary(OpCode::BitOr, condition, when_false);
@@ -325,11 +376,11 @@ inline bool normalizeIte(Program& program, NodeId id) {
         result = binary(OpCode::BitOr, unary(condition), when_true);
     } else {
         matched = false;
-        const Literal fallback = literalOf(when_false, program);
+        const Literal fallback = literalOf(when_false, program, &cache);
         std::vector<Operand> factors;
-        collectBoolean(condition, true, program, factors);
+        collectBoolean(condition, true, program, factors, &cache);
         for (std::size_t i = 0; i < factors.size(); ++i) {
-            const Literal factor = literalOf(factors[i], program);
+            const Literal factor = literalOf(factors[i], program, &cache);
             if (!sameLiteral(factor, fallback) && !complementary(factor, fallback)) continue;
             std::vector<Operand> residual_factors;
             for (std::size_t j = 0; j < factors.size(); ++j)
@@ -359,11 +410,38 @@ inline bool normalizeBooleanControl(MutableProgram& graph) {
     Program& program = graph.program();
     const std::size_t original_count = program.signals.size();
     const auto order = width_detail::topologicalOrder(program);
-    bool changed = false;
+    std::vector<std::vector<NodeId>> users(original_count);
+    for (const auto& signal : program.signals) {
+        if (signal.id >= original_count || !signal.driver) continue;
+        for (const auto& operand : signal.driver->operands) {
+            if (operand.kind == OperandKind::Symbol && operand.node < original_count)
+                users[operand.node].push_back(signal.id);
+        }
+    }
+    std::vector<bool> queued(original_count, false);
+    std::queue<NodeId> work;
     for (NodeId id : order) {
+        if (id < original_count) {
+            work.push(id);
+            queued[id] = true;
+        }
+    }
+    bool changed = false;
+    while (!work.empty()) {
+        const NodeId id = work.front();
+        work.pop();
+        queued[id] = false;
         if (id >= original_count || !program.signal(id).driver) continue;
-        if (boolean_detail::normalizeIte(program, id)) changed = true;
-        else if (boolean_detail::simplifyAssociative(program, id)) changed = true;
+        const bool node_changed = boolean_detail::normalizeIte(program, id) ||
+                                  boolean_detail::simplifyAssociative(program, id);
+        if (!node_changed) continue;
+        changed = true;
+        for (NodeId user : users[id]) {
+            if (!queued[user]) {
+                work.push(user);
+                queued[user] = true;
+            }
+        }
     }
     if (changed) graph.markValueFactsDirty();
     return changed;

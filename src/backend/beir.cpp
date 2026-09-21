@@ -1392,6 +1392,9 @@ void MutableProgram::compact(const std::unordered_set<NodeId>& live) {
         for (auto& operand : signal.driver->operands) remapOperand(operand, remap);
     }
     program_.signals = std::move(compacted);
+    program_.temp_names_initialized = false;
+    program_.temp_names.clear();
+    program_.next_temp_name = 0;
     markValueFactsDirty();
     rebuildObservableIds();
 }

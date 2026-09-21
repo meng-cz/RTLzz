@@ -105,10 +105,12 @@ Program optimizeProgram(Program program,
     MutableProgram graph(std::move(program));
     bool changed = true;
     int iteration = 0;
+    int predicate_iterations = 0;
     while (changed && iteration < options.max_iterations) {
         ++iteration;
         if (iteration_callback) iteration_callback(iteration);
         changed = false;
+        if (options.predicate_sinking) changed = sinkPredicates(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.constant_folding) changed = foldConstants(graph) || changed;
         if (options.width_simplification) changed = specializeConstantSlices(graph) || changed;
@@ -124,30 +126,6 @@ Program optimizeProgram(Program program,
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
-    }
-    // Bounded post-sinking fixed point. Each pass invalidates its value facts;
-    // predicate queries are rebuilt from the current graph on every round.
-    if (options.predicate_sinking) {
-        for (int round = 0; round < options.max_predicate_iterations; ++round) {
-            bool progress = sinkPredicates(graph);
-            if (options.constant_folding) progress = foldConstants(graph) || progress;
-            if (options.algebraic_identities) progress = simplifyAlgebraicIdentities(graph) || progress;
-            if (options.boolean_control_normalization)
-                progress = normalizeBooleanControl(graph) || progress;
-            if (options.width_simplification) {
-                progress = specializeConstantSlices(graph) || progress;
-            }
-            if (options.bit_range_update_coalescing) {
-                progress = coalesceBitRangeUpdates(graph,
-                                                   options.max_bit_range_updates,
-                                                   options.max_bit_compose_pieces) || progress;
-            }
-            if (options.width_simplification) progress = simplifyWidthOperations(graph) || progress;
-            if (options.fold_assign_chains) progress = foldAssignChains(graph) || progress;
-            if (options.common_subexpressions) progress = mergeCommonExpressions(graph) || progress;
-            if (options.dead_node_elimination) progress = eliminateDeadNodes(graph) || progress;
-            if (!progress) break;
-        }
     }
     // Structural rewrites have one canonical direction and run only once after
     // scalar normalization, so cleanup cannot oscillate between mux/tree forms.

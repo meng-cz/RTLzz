@@ -289,11 +289,14 @@ inline bool selectedRange(const Operation& op, int& lo, int& width) {
 }
 
 inline std::string makeTempName(const Program& program) {
-    std::unordered_set<std::string> names;
-    for (const auto& signal : program.signals) names.insert(signal.name);
-    for (std::size_t i = program.signals.size();; ++i) {
-        std::string name = "__beopt_width_" + std::to_string(i);
-        if (!names.count(name)) return name;
+    if (!program.temp_names_initialized) {
+        for (const auto& signal : program.signals) program.temp_names.insert(signal.name);
+        program.next_temp_name = program.signals.size();
+        program.temp_names_initialized = true;
+    }
+    for (;;) {
+        std::string name = "__beopt_width_" + std::to_string(program.next_temp_name++);
+        if (program.temp_names.insert(name).second) return name;
     }
 }
 

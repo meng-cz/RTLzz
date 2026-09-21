@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -191,6 +192,12 @@ struct Program {
     std::vector<std::string> outputs;
     std::vector<Port> ports;
     std::vector<Signal> signals;
+
+    // Backend-generated signal names are allocated lazily by appendTemp.  The
+    // cache avoids rebuilding a full name set for every temporary signal.
+    mutable bool temp_names_initialized = false;
+    mutable std::uint64_t next_temp_name = 0;
+    mutable std::unordered_set<std::string> temp_names;
 
     Signal* findSignal(NodeId id);
     const Signal* findSignal(NodeId id) const;
