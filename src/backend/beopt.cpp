@@ -125,7 +125,10 @@ Program optimizeProgram(Program program,
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
-        if (options.predicate_sinking && iteration == iter_before_predicate_sinking) changed = sinkPredicates(graph) || changed;
+        if (options.predicate_sinking && iteration == iter_before_predicate_sinking) {
+            changed = sinkPredicates(graph, {options.max_predicate_formulas,
+                                             options.max_predicate_atoms}) || changed;
+        }
     }
     // Structural rewrites have one canonical direction and run only once after
     // scalar normalization, so cleanup cannot oscillate between mux/tree forms.

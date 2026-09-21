@@ -274,7 +274,7 @@ done
 ### `src/backend/beopt.cpp`
 - 串接 BEIR optimization passes，并在固定点循环每轮开始时触发可选逐轮回调。
 - 布尔归一化参与主固定点和谓词下沉后的受限清理；随后单向执行互斥 mux 到 Case 的展平、再次布尔归一化及结合树平衡，并对新结构重新执行常量、代数、位宽、Assign、CSE、DCE 清理。
-- `Options` 暴露 max_predicate_iterations、max_mux_branches、max_tree_leaves、max_bit_range_updates、max_bit_compose_pieces；`--beopt mux/no-mux`、`balance/no-balance`、`bit-updates/no-bit-updates` 与 `boolean/no-boolean` 分别控制结构 pass，all/none 同时管理它们。
+- `Options` 暴露 max_predicate_iterations、max_predicate_formulas、max_predicate_atoms、max_mux_branches、max_tree_leaves、max_bit_range_updates、max_bit_compose_pieces；谓词证明默认每次查询最多使用 1024 个可达公式、64 个原子。`--beopt mux/no-mux`、`balance/no-balance`、`bit-updates/no-bit-updates` 与 `boolean/no-boolean` 分别控制结构 pass，all/none 同时管理它们。
 
 ### `src/backend/beopt_constant.hpp`
 - 常量传播、常量折叠和 literal 简化。
@@ -297,8 +297,8 @@ done
 
 ### `src/backend/beopt_predicate.hpp`
 - predicate/guard 相关 BEIR 优化。
-- `PredicateRelations::implies/isExclusive` 统一返回 Proven/Unknown：二值布尔分析支持同条件、NOT、AND/OR 和相同无符号操作数对不同等宽常量的 Eq；使用动态赋值向量精确枚举当前抽象，不再限制原子数、递归深度或公式节点数。
-- branchContext 保留全部父路径事实，demand-context 分析保留所有不同上下文，不再按事实数或上下文数截断；Case 的条件、分支值和默认值按有序剩余路径传播上下文。查询无跨图修改缓存。精确枚举的最坏时间随独立原子数指数增长。
+- `PredicateRelations::implies/isExclusive` 对调用者统一返回 Proven/Unknown；详细查询另区分 Proven、Counterexample 和 ResourceLimit。SAT/DPLL 证明按单次查询实际可达的公式和原子数限制资源，超限只使该查询返回 Unknown，不停止后续节点或更小子树的证明。
+- branchContext 保留全部父路径事实；下沉前先排除存在无条件使用路径的 Ite，只向可能到达候选 Ite 的信号传播 demand-context，并以 guard/路径条件的布尔原子或比较选择变量交集廉价筛选 SAT 查询。对保留的路径不按事实数或上下文数截断；Case 条件、分支值和默认值按有序剩余路径传播上下文。同一图快照复用查询结果，图修改后不复用。
 
 ### `src/backend/beopt_width.hpp`
 - width 相关优化和裁剪；支持 operand signed view 影响的扩展语义；Case 的结果宽度取所有分支值与默认值的合并需求，条件保持一位，结果需求反向传播到每个值分支。

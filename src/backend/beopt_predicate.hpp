@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <unordered_map>
 #include <optional>
 #include <string>
@@ -168,6 +169,21 @@ inline const Operation* symbolDriver(const Operand& operand, const Program& prog
 // treated as mutually exclusive. Standalone queries reset their cache; the
 // predicate-sinking pass reuses it only while the BEIR graph is unchanged.
 enum class Proof { Unknown, Proven };
+enum class ProofOutcome { Proven, Counterexample, ResourceLimit };
+
+struct PredicateLimits {
+    // These apply to each query's reachable cone, not the snapshot cache.
+    // Predicate sinking is deliberately conservative by default. Rules 1-6
+    // handle cheap proofs; SAT is only attempted for small residual queries.
+    std::size_t max_formulas = 64;
+    std::size_t max_atoms = 8;
+    std::size_t max_candidate_ites = 128;
+    std::size_t max_contexts_per_candidate = 64;
+};
+
+inline Proof asProof(ProofOutcome outcome) {
+    return outcome == ProofOutcome::Proven ? Proof::Proven : Proof::Unknown;
+}
 
 class PredicateRelations {
     const Program& program_;
@@ -219,6 +235,7 @@ class PredicateRelations {
     std::unordered_map<Operand, std::size_t, OperandHash, OperandEqual> atom_cache_;
     std::unordered_map<SelectorKey, std::size_t, SelectorHash, SelectorEqual> selector_cache_;
     bool snapshot_ = false;
+    PredicateLimits limits_;
 
     int add(int kind, int a = 0, int b = 0) {
         formulas_.push_back({kind, a, b});
@@ -310,6 +327,7 @@ class PredicateRelations {
         std::size_t propagation_cursor_ = 0;
         std::unordered_map<int, int> formula_var_;
         int atom_base_ = 0;
+        bool limit_exceeded_ = false;
 
         void clause(std::initializer_list<int> literals) {
             clauses_.emplace_back(literals);
@@ -393,7 +411,8 @@ class PredicateRelations {
         }
     public:
         SatSolver(const std::vector<Formula>& formulas, const std::vector<Atom>& atoms,
-                  const std::vector<std::pair<int, bool>>& facts, int goal) {
+                  const std::vector<std::pair<int, bool>>& facts, int goal,
+                  PredicateLimits limits) {
             // Snapshot formula caches may contain other queries. Encode only
             // nodes reachable from this query's assumptions and goal.
             std::unordered_set<int> seen;
@@ -402,6 +421,10 @@ class PredicateRelations {
             while (!pending.empty()) {
                 const int id = pending.back(); pending.pop_back();
                 if (!seen.insert(id).second) continue;
+                if (seen.size() > limits.max_formulas) {
+                    limit_exceeded_ = true;
+                    return;
+                }
                 const Formula& f = formulas[static_cast<std::size_t>(id)];
                 if (f.kind == 2 || f.kind == 3 || f.kind == 4) pending.push_back(f.a);
                 if (f.kind == 3 || f.kind == 4) pending.push_back(f.b);
@@ -420,6 +443,10 @@ class PredicateRelations {
             std::sort(selected_atoms.begin(), selected_atoms.end());
             selected_atoms.erase(std::unique(selected_atoms.begin(), selected_atoms.end()),
                                  selected_atoms.end());
+            if (selected_atoms.size() > limits.max_atoms) {
+                limit_exceeded_ = true;
+                return;
+            }
             std::unordered_map<std::size_t, int> atom_var;
             atom_var.reserve(selected_atoms.size());
             for (std::size_t i = 0; i < selected_atoms.size(); ++i)
@@ -471,7 +498,9 @@ class PredicateRelations {
                 }
             }
         }
-        bool satisfiable(const std::vector<std::pair<int, bool>>& facts, int goal, bool goal_value) {
+        std::optional<bool> satisfiable(const std::vector<std::pair<int, bool>>& facts,
+                                        int goal, bool goal_value) {
+            if (limit_exceeded_) return std::nullopt;
             for (int literal : unit_literals_)
                 if (!assign(literal)) { undo(0); return false; }
             for (const auto& fact : facts)
@@ -499,20 +528,34 @@ class PredicateRelations {
         return {std::move(facts), build(guard)};
     }
 public:
-    explicit PredicateRelations(const Program& program, bool snapshot = false)
-        : program_(program), snapshot_(snapshot) {}
-    Proof implies(const Context& context, Predicate target) {
+    explicit PredicateRelations(const Program& program, bool snapshot = false,
+                                PredicateLimits limits = {})
+        : program_(program), snapshot_(snapshot), limits_(limits) {}
+    ProofOutcome impliesDetailed(const Context& context, Predicate target) {
         auto [facts, goal] = buildQuery(context, target.guard);
-        SatSolver solver(formulas_, atoms_, facts, goal);
-        return solver.satisfiable(facts, goal, !target.when_true) ? Proof::Unknown : Proof::Proven;
+        SatSolver solver(formulas_, atoms_, facts, goal, limits_);
+        const auto counterexample = solver.satisfiable(facts, goal, !target.when_true);
+        if (!counterexample) return ProofOutcome::ResourceLimit;
+        return *counterexample ? ProofOutcome::Counterexample : ProofOutcome::Proven;
+    }
+    Proof implies(const Context& context, Predicate target) {
+        return asProof(impliesDetailed(context, std::move(target)));
+    }
+    std::pair<ProofOutcome, ProofOutcome> classifyDetailed(const Context& context,
+                                                           const Operand& guard) {
+        auto [facts, goal] = buildQuery(context, guard);
+        SatSolver solver(formulas_, atoms_, facts, goal, limits_);
+        const auto can_be_false = solver.satisfiable(facts, goal, false);
+        const auto can_be_true = solver.satisfiable(facts, goal, true);
+        auto outcome = [](std::optional<bool> satisfiable) {
+            if (!satisfiable) return ProofOutcome::ResourceLimit;
+            return *satisfiable ? ProofOutcome::Counterexample : ProofOutcome::Proven;
+        };
+        return {outcome(can_be_false), outcome(can_be_true)};
     }
     std::pair<Proof, Proof> classify(const Context& context, const Operand& guard) {
-        auto [facts, goal] = buildQuery(context, guard);
-        SatSolver solver(formulas_, atoms_, facts, goal);
-        const bool can_be_false = solver.satisfiable(facts, goal, false);
-        const bool can_be_true = solver.satisfiable(facts, goal, true);
-        return {can_be_false ? Proof::Unknown : Proof::Proven,
-                can_be_true ? Proof::Unknown : Proof::Proven};
+        const auto [when_true, when_false] = classifyDetailed(context, guard);
+        return {asProof(when_true), asProof(when_false)};
     }
     Proof implies(const Operand& a, const Operand& b) {
         return implies(guardedContext(a, true), Predicate{b, true});
@@ -594,48 +637,119 @@ inline void setAssign(Operation& op,
 inline void pushSymbolContext(const Operand& operand,
                               const Context& context,
                               std::vector<std::vector<Context>>& contexts,
-                              std::vector<NodeId>& worklist) {
+                              std::vector<NodeId>& worklist,
+                              const std::vector<bool>* relevant) {
     if (operand.kind != OperandKind::Symbol) return;
     if (operand.node == kInvalidNodeId || operand.node >= contexts.size()) return;
+    if (relevant && !(*relevant)[operand.node]) return;
     if (appendContext(contexts[operand.node], context)) worklist.push_back(operand.node);
+}
+
+inline bool needsContext(const Operand& operand, const std::vector<bool>* relevant) {
+    return operand.kind == OperandKind::Symbol &&
+           (!relevant || (operand.node < relevant->size() && (*relevant)[operand.node]));
 }
 
 inline void propagateOperandContexts(const Operation& op,
                                      const Context& context,
                                      std::vector<std::vector<Context>>& contexts,
-                                     std::vector<NodeId>& worklist) {
+                                     std::vector<NodeId>& worklist,
+                                     const std::vector<bool>* relevant) {
     if (op.kind == OperationKind::Ite && op.operands.size() == 3) {
-        pushSymbolContext(op.operands[0], context, contexts, worklist);
-        pushSymbolContext(op.operands[1], branchContext(context, op.operands[0], true),
-                          contexts, worklist);
-        pushSymbolContext(op.operands[2], branchContext(context, op.operands[0], false),
-                          contexts, worklist);
+        pushSymbolContext(op.operands[0], context, contexts, worklist, relevant);
+        if (needsContext(op.operands[1], relevant))
+            pushSymbolContext(op.operands[1], branchContext(context, op.operands[0], true),
+                              contexts, worklist, relevant);
+        if (needsContext(op.operands[2], relevant))
+            pushSymbolContext(op.operands[2], branchContext(context, op.operands[0], false),
+                              contexts, worklist, relevant);
         return;
     }
     if (op.kind == OperationKind::Case && hasValidCaseShape(op)) {
         Context remaining = context;
         for (std::size_t branch = 0; branch < caseBranchCount(op); ++branch) {
             const Operand& condition = op.operands[branch * 2];
-            pushSymbolContext(condition, remaining, contexts, worklist);
-            pushSymbolContext(op.operands[branch * 2 + 1],
-                              branchContext(remaining, condition, true),
-                              contexts, worklist);
+            pushSymbolContext(condition, remaining, contexts, worklist, relevant);
+            if (needsContext(op.operands[branch * 2 + 1], relevant))
+                pushSymbolContext(op.operands[branch * 2 + 1],
+                                  branchContext(remaining, condition, true),
+                                  contexts, worklist, relevant);
             remaining = branchContext(remaining, condition, false);
         }
-        pushSymbolContext(op.operands.back(), remaining, contexts, worklist);
+        pushSymbolContext(op.operands.back(), remaining, contexts, worklist, relevant);
         return;
     }
     for (const auto& operand : op.operands) {
-        pushSymbolContext(operand, context, contexts, worklist);
+        pushSymbolContext(operand, context, contexts, worklist, relevant);
     }
 }
 
-inline std::vector<std::vector<Context>> analyzeDemandContexts(const MutableProgram& graph) {
+// An Ite with an unconditional use cannot have one branch selected for every
+// use. Find those uses without constructing any predicate contexts.
+inline std::vector<bool> unconditionallyReachable(const MutableProgram& graph) {
+    const Program& program = graph.program();
+    std::vector<bool> reachable(program.signals.size(), false);
+    std::vector<NodeId> worklist;
+    auto enqueue = [&](const Operand& operand) {
+        if (operand.kind != OperandKind::Symbol || operand.node >= reachable.size() ||
+            reachable[operand.node]) return;
+        reachable[operand.node] = true;
+        worklist.push_back(operand.node);
+    };
+    for (const auto& signal : program.signals) {
+        if (!graph.isObservable(signal)) continue;
+        if (!reachable[signal.id]) {
+            reachable[signal.id] = true;
+            worklist.push_back(signal.id);
+        }
+    }
+    for (std::size_t cursor = 0; cursor < worklist.size(); ++cursor) {
+        const Signal* signal = program.findSignal(worklist[cursor]);
+        if (!signal || !signal->driver) continue;
+        const Operation& op = *signal->driver;
+        if (op.kind == OperationKind::Ite && op.operands.size() == 3) {
+            enqueue(op.operands[0]);
+        } else if (op.kind == OperationKind::Case && hasValidCaseShape(op)) {
+            enqueue(op.operands[0]);
+        } else {
+            for (const auto& operand : op.operands) enqueue(operand);
+        }
+    }
+    return reachable;
+}
+
+// Only users on a path from an output to a candidate need demand contexts.
+inline std::vector<bool> relevantToCandidates(const Program& program,
+                                              const std::vector<bool>& candidates) {
+    std::vector<std::vector<NodeId>> users(program.signals.size());
+    for (const auto& signal : program.signals) {
+        if (!signal.driver) continue;
+        for (const auto& operand : signal.driver->operands) {
+            if (operand.kind == OperandKind::Symbol && operand.node < users.size())
+                users[operand.node].push_back(signal.id);
+        }
+    }
+    std::vector<bool> relevant = candidates;
+    std::vector<NodeId> worklist;
+    for (const auto& signal : program.signals)
+        if (candidates[signal.id]) worklist.push_back(signal.id);
+    for (std::size_t cursor = 0; cursor < worklist.size(); ++cursor) {
+        for (NodeId user : users[worklist[cursor]]) {
+            if (relevant[user]) continue;
+            relevant[user] = true;
+            worklist.push_back(user);
+        }
+    }
+    return relevant;
+}
+
+inline std::vector<std::vector<Context>> analyzeDemandContexts(
+    const MutableProgram& graph, const std::vector<bool>* relevant = nullptr) {
     const Program& program = graph.program();
     std::vector<std::vector<Context>> contexts(program.signals.size());
     std::vector<NodeId> worklist;
     for (const auto& signal : program.signals) {
-        if (graph.isObservable(signal) &&
+        if (graph.isObservable(signal) && (!relevant || (*relevant)[signal.id]) &&
             appendContext(contexts[signal.id], unconditionalContext())) {
             worklist.push_back(signal.id);
         }
@@ -647,10 +761,138 @@ inline std::vector<std::vector<Context>> analyzeDemandContexts(const MutableProg
         const Signal* signal = program.findSignal(id);
         if (!signal || !signal->driver) continue;
         for (const auto& context : contexts[id]) {
-            propagateOperandContexts(*signal->driver, context, contexts, worklist);
+            propagateOperandContexts(*signal->driver, context, contexts, worklist, relevant);
         }
     }
     return contexts;
+}
+
+// This mirrors the proof's Boolean decomposition. Hash collisions only admit
+// extra SAT queries; they cannot authorize a rewrite.
+class PredicateSupport {
+    const Program& program_;
+    std::map<Operand, std::vector<std::size_t>, decltype(&operandLess)> cache_{&operandLess};
+
+    void collect(const Operand& value, std::unordered_set<NodeId>& visited,
+                 std::unordered_set<std::size_t>& support) {
+        if (value.kind == OperandKind::Literal) return;
+        if (value.kind == OperandKind::Symbol && !visited.insert(value.node).second) return;
+        if (const auto found = cache_.find(value); found != cache_.end()) {
+            support.insert(found->second.begin(), found->second.end());
+            return;
+        }
+        const Operation* op = symbolDriver(value, program_);
+        if (op && op->kind == OperationKind::Assign && op->operands.size() == 1 &&
+            sameValueType(op->type, op->operands[0].type)) {
+            const auto& child = of(op->operands[0]);
+            support.insert(child.begin(), child.end());
+        } else if (op && op->kind == OperationKind::Unary && op->op == OpCode::LogicNot &&
+                   op->operands.size() == 1) {
+            const auto& child = of(op->operands[0]);
+            support.insert(child.begin(), child.end());
+        } else if (op && op->kind == OperationKind::Binary && op->operands.size() == 2 &&
+                   (op->op == OpCode::LogicAnd || op->op == OpCode::LogicOr ||
+                    (value.type.width == 1 && op->operands[0].type.width == 1 &&
+                     op->operands[1].type.width == 1 &&
+                     (op->op == OpCode::BitAnd || op->op == OpCode::BitOr)))) {
+            for (const auto& operand : op->operands) {
+                const auto& child = of(operand);
+                support.insert(child.begin(), child.end());
+            }
+        } else {
+            support.insert(predicateHash(Predicate{value, true}));
+            if (op && op->kind == OperationKind::Binary && op->op == OpCode::Eq &&
+                op->operands.size() == 2) {
+                for (const auto& operand : op->operands)
+                    if (operand.kind != OperandKind::Literal)
+                        support.insert(predicateHash(Predicate{operand, true}));
+            }
+        }
+    }
+public:
+    explicit PredicateSupport(const Program& program) : program_(program) {}
+
+    const std::vector<std::size_t>& of(const Operand& value) {
+        if (const auto found = cache_.find(value); found != cache_.end()) return found->second;
+        std::unordered_set<NodeId> visited;
+        std::unordered_set<std::size_t> support;
+        collect(value, visited, support);
+        auto [found, inserted] = cache_.emplace(value, std::vector<std::size_t>(support.begin(), support.end()));
+        return found->second;
+    }
+};
+
+class PredicateDemandIndex {
+    std::vector<bool> eligible_;
+public:
+    PredicateDemandIndex(const Program& program,
+                         const std::vector<std::vector<Context>>& contexts,
+                         const std::vector<NodeId>& candidates,
+                         PredicateSupport& support, std::size_t max_contexts)
+        : eligible_(program.signals.size(), false) {
+        struct Posting { NodeId candidate; std::size_t context; };
+        std::unordered_map<std::size_t, std::vector<Posting>> inverted;
+        std::vector<std::vector<bool>> covered(program.signals.size());
+        std::vector<std::size_t> counts(program.signals.size(), 0);
+        for (NodeId id : candidates) {
+            const auto& demands = contexts[id];
+            if (demands.empty() || demands.size() > max_contexts || hasUnconditional(demands))
+                continue;
+            covered[id].resize(demands.size(), false);
+            for (std::size_t i = 0; i < demands.size(); ++i) {
+                std::unordered_set<std::size_t> atoms;
+                for (const auto& predicate : demands[i].predicates) {
+                    const auto& keys = support.of(predicate.guard);
+                    atoms.insert(keys.begin(), keys.end());
+                }
+                for (auto atom : atoms) inverted[atom].push_back({id, i});
+            }
+        }
+        // Join each atom's demand postings with the candidates using that atom.
+        std::unordered_map<std::size_t, std::unordered_set<NodeId>> guards;
+        for (NodeId id : candidates) {
+            if (covered[id].empty()) continue;
+            for (auto atom : support.of(program.signal(id).driver->operands[0]))
+                guards[atom].insert(id);
+        }
+        for (const auto& [atom, postings] : inverted) {
+            const auto found = guards.find(atom);
+            if (found == guards.end()) continue;
+            for (const auto& posting : postings) {
+                if (!found->second.count(posting.candidate)) continue;
+                if (!covered[posting.candidate][posting.context]) {
+                    covered[posting.candidate][posting.context] = true;
+                    ++counts[posting.candidate];
+                }
+            }
+        }
+        for (NodeId id : candidates)
+            eligible_[id] = !covered[id].empty() && counts[id] == covered[id].size();
+    }
+
+    bool mayBenefitFromProof(NodeId candidate) const {
+        return candidate < eligible_.size() && eligible_[candidate];
+    }
+};
+
+// Compatibility helper for callers that analyze one guard outside the sink
+// pass. sinkPredicates uses PredicateDemandIndex to avoid rebuilding this map.
+inline bool mayBenefitFromProof(const Operand& guard, const std::vector<Context>& contexts,
+                                PredicateSupport& support) {
+    if (contexts.empty()) return false;
+    const auto& guard_atoms = support.of(guard);
+    std::unordered_set<std::size_t> keys(guard_atoms.begin(), guard_atoms.end());
+    for (const auto& context : contexts) {
+        if (isUnconditional(context)) return false;
+        bool overlap = false;
+        for (const auto& predicate : context.predicates) {
+            const auto& atoms = support.of(predicate.guard);
+            for (auto atom : atoms) if (keys.count(atom)) { overlap = true; break; }
+            if (overlap) break;
+        }
+        if (!overlap) return false;
+    }
+    return !guard_atoms.empty();
 }
 
 class SnapshotPredicateRelations {
@@ -671,13 +913,113 @@ class SnapshotPredicateRelations {
         }
     };
     PredicateRelations relations_;
-    std::unordered_map<Key, std::pair<Proof, Proof>, KeyHash, KeyEqual> cache_;
+    const Program& program_;
+    PredicateLimits limits_;
+    std::unordered_map<Key, std::pair<ProofOutcome, ProofOutcome>, KeyHash, KeyEqual> cache_;
+    mutable std::unordered_map<std::size_t,
+                               std::unordered_map<std::size_t, std::vector<Predicate>>> context_index_;
+    mutable std::unordered_map<std::uint64_t, std::int8_t> structural_memo_;
+
+    static std::uint64_t memoKey(std::size_t fingerprint, NodeId node) {
+        std::uint64_t key = static_cast<std::uint64_t>(fingerprint);
+        hashCombine(key, node);
+        return key;
+    }
+
+    const auto& contextIndex(const Context& context) const {
+        auto found = context_index_.find(context.fingerprint);
+        if (found != context_index_.end()) return found->second;
+        std::unordered_map<std::size_t, std::vector<Predicate>> index;
+        for (const auto& predicate : context.predicates)
+            index[predicateHash(Predicate{predicate.guard, true})].push_back(predicate);
+        return context_index_.emplace(context.fingerprint, std::move(index)).first->second;
+    }
+
+    static std::optional<bool> constantTruth(const Operand& value) {
+        if (value.kind != OperandKind::Literal || value.type.width != 1 || value.type.isArray())
+            return std::nullopt;
+        return !value.constant.isZero();
+    }
+
+    std::optional<bool> indexedContextTruth(const Context& context, const Operand& value) const {
+        const auto& index = contextIndex(context);
+        const auto found = index.find(predicateHash(Predicate{value, true}));
+        if (found == index.end()) return std::nullopt;
+        std::optional<bool> result;
+        for (const auto& predicate : found->second) {
+            // Cheap identity check first; sameOperand is the collision-safe fallback.
+            if (predicate.guard.kind != value.kind || predicate.guard.node != value.node ||
+                predicate.guard.text != value.text || !sameOperand(predicate.guard, value))
+                continue;
+            if (result && *result != predicate.when_true) return std::nullopt;
+            result = predicate.when_true;
+        }
+        return result;
+    }
+
+    std::optional<bool> structuralTruth(const Context& context, const Operand& value,
+                                        unsigned depth = 0) const {
+        if (depth > 64) return std::nullopt;
+        if (value.kind == OperandKind::Symbol) {
+            const auto key = memoKey(context.fingerprint, value.node);
+            const auto found = structural_memo_.find(key);
+            if (found != structural_memo_.end()) {
+                if (found->second < 0) return std::nullopt;
+                return found->second != 0;
+            }
+        }
+        std::optional<bool> result;
+        if (const auto constant = constantTruth(value)) return constant;
+        if (const auto exact = indexedContextTruth(context, value)) result = exact;
+        if (result) {
+            if (value.kind == OperandKind::Symbol)
+                structural_memo_[memoKey(context.fingerprint, value.node)] = *result ? 1 : 0;
+            return result;
+        }
+        const Operation* driver = symbolDriver(value, program_);
+        if (!driver) result = std::nullopt;
+        else if (driver->kind == OperationKind::Assign && driver->operands.size() == 1 &&
+                 sameValueType(driver->type, driver->operands[0].type))
+            result = structuralTruth(context, driver->operands[0], depth + 1);
+        else if (driver->kind == OperationKind::Unary && driver->op == OpCode::LogicNot &&
+                 driver->operands.size() == 1) {
+            if (const auto nested = structuralTruth(context, driver->operands[0], depth + 1))
+                result = !*nested;
+        } else if (!driver || driver->kind != OperationKind::Binary || driver->operands.size() != 2) {
+            result = std::nullopt;
+        } else {
+            const bool is_and = driver->op == OpCode::LogicAnd || driver->op == OpCode::BitAnd;
+            const bool is_or = driver->op == OpCode::LogicOr || driver->op == OpCode::BitOr;
+            if (is_and || is_or) {
+                const auto lhs = structuralTruth(context, driver->operands[0], depth + 1);
+                const auto rhs = structuralTruth(context, driver->operands[1], depth + 1);
+                if (is_and) {
+                    if ((lhs && !*lhs) || (rhs && !*rhs)) result = false;
+                    else if (lhs && rhs && *lhs && *rhs) result = true;
+                } else {
+                    if ((lhs && *lhs) || (rhs && *rhs)) result = true;
+                    else if (lhs && rhs && !*lhs && !*rhs) result = false;
+                }
+            }
+        }
+        if (value.kind == OperandKind::Symbol)
+            structural_memo_[memoKey(context.fingerprint, value.node)] = result ? (*result ? 1 : 0) : -1;
+        return result;
+    }
 public:
-    explicit SnapshotPredicateRelations(const Program& program) : relations_(program, true) {}
-    std::pair<Proof, Proof> classify(const Context& context, const Operand& guard) {
+    explicit SnapshotPredicateRelations(const Program& program, PredicateLimits limits = {})
+        : relations_(program, true, limits), program_(program), limits_(limits) {}
+    std::pair<ProofOutcome, ProofOutcome> classify(const Context& context, const Operand& guard) {
+        // Layers 1-5: conservative identity, constant, literal-set and structural proofs.
+        if (const auto truth = structuralTruth(context, guard)) {
+            return {*truth ? ProofOutcome::Counterexample : ProofOutcome::Proven,
+                    *truth ? ProofOutcome::Proven : ProofOutcome::Counterexample};
+        }
         Key key{context, guard};
         if (const auto found = cache_.find(key); found != cache_.end()) return found->second;
-        auto result = relations_.classify(context, guard);
+        if (context.predicates.size() > limits_.max_formulas)
+            return {ProofOutcome::ResourceLimit, ProofOutcome::ResourceLimit};
+        auto result = relations_.classifyDetailed(context, guard);
         cache_.emplace(std::move(key), result);
         return result;
     }
@@ -691,8 +1033,8 @@ inline std::optional<bool> guardedDefaultSelection(const Operation& op,
     bool always_true = true, always_false = true;
     for (const auto& context : contexts) {
         const auto [proves_true, proves_false] = relations.classify(context, op.operands[0]);
-        always_true &= proves_true == Proof::Proven;
-        always_false &= proves_false == Proof::Proven;
+        always_true &= proves_true == ProofOutcome::Proven;
+        always_false &= proves_false == ProofOutcome::Proven;
         if (!always_true && !always_false) return std::nullopt;
     }
     if (always_true) return true;
@@ -702,14 +1044,47 @@ inline std::optional<bool> guardedDefaultSelection(const Operation& op,
 
 } // namespace predicate_detail
 
-inline bool sinkPredicates(MutableProgram& graph) {
-    const auto contexts = predicate_detail::analyzeDemandContexts(graph);
+inline bool sinkPredicates(MutableProgram& graph,
+                           predicate_detail::PredicateLimits limits = {}) {
     Program& program = graph.program();
-    predicate_detail::SnapshotPredicateRelations relations(program);
+    const auto unconditional = predicate_detail::unconditionallyReachable(graph);
+    std::vector<bool> candidates(program.signals.size(), false);
+    bool any_candidate = false;
+    for (const auto& signal : program.signals) {
+        if (!graph.isObservable(signal) && signal.driver &&
+            signal.driver->kind == OperationKind::Ite && signal.driver->operands.size() == 3 &&
+            !unconditional[signal.id]) {
+            candidates[signal.id] = true;
+            any_candidate = true;
+        }
+    }
+    if (!any_candidate) return false;
+    const auto relevant = predicate_detail::relevantToCandidates(program, candidates);
+    const auto contexts = predicate_detail::analyzeDemandContexts(graph, &relevant);
+    predicate_detail::PredicateSupport support(program);
+    std::vector<NodeId> ranked_candidates;
+    for (const auto& signal : program.signals)
+        if (candidates[signal.id]) ranked_candidates.push_back(signal.id);
+    for (NodeId id : ranked_candidates) support.of(program.signal(id).driver->operands[0]);
+    std::sort(ranked_candidates.begin(), ranked_candidates.end(),
+              [&](NodeId lhs, NodeId rhs) {
+                  return support.of(program.signal(lhs).driver->operands[0]).size() >
+                         support.of(program.signal(rhs).driver->operands[0]).size();
+              });
+    if (ranked_candidates.size() > limits.max_candidate_ites)
+        ranked_candidates.resize(limits.max_candidate_ites);
+    std::vector<bool> selected_candidates(program.signals.size(), false);
+    for (NodeId id : ranked_candidates) selected_candidates[id] = true;
+    const predicate_detail::PredicateDemandIndex demand_index(
+        program, contexts, ranked_candidates, support, limits.max_contexts_per_candidate);
+    predicate_detail::SnapshotPredicateRelations relations(program, limits);
     std::vector<std::pair<NodeId, bool>> rewrites;
     for (const auto& signal : program.signals) {
-        if (graph.isObservable(signal) || !signal.driver || contexts[signal.id].empty() ||
-            signal.driver->kind != OperationKind::Ite) continue;
+        if (!selected_candidates[signal.id] ||
+            contexts[signal.id].size() > limits.max_contexts_per_candidate) {
+            continue;
+        }
+        if (!demand_index.mayBenefitFromProof(signal.id)) continue;
         const auto selected = predicate_detail::guardedDefaultSelection(
             *signal.driver, contexts[signal.id], relations);
         if (selected) rewrites.emplace_back(signal.id, *selected);
