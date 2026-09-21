@@ -105,12 +105,11 @@ Program optimizeProgram(Program program,
     MutableProgram graph(std::move(program));
     bool changed = true;
     int iteration = 0;
-    int predicate_iterations = 0;
-    while (changed && iteration < options.max_iterations) {
+    int iter_before_predicate_sinking = options.max_iterations > 8 ? 4 : std::max(1, options.max_iterations/2);
+    while ((changed || iteration <= iter_before_predicate_sinking) && iteration < options.max_iterations) {
         ++iteration;
         if (iteration_callback) iteration_callback(iteration);
         changed = false;
-        if (options.predicate_sinking) changed = sinkPredicates(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.constant_folding) changed = foldConstants(graph) || changed;
         if (options.width_simplification) changed = specializeConstantSlices(graph) || changed;
@@ -126,6 +125,7 @@ Program optimizeProgram(Program program,
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
+        if (options.predicate_sinking && iteration == iter_before_predicate_sinking) changed = sinkPredicates(graph) || changed;
     }
     // Structural rewrites have one canonical direction and run only once after
     // scalar normalization, so cleanup cannot oscillate between mux/tree forms.

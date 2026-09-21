@@ -1180,7 +1180,6 @@ bool MutableProgram::isObservable(const Signal& signal) const {
 
 void MutableProgram::markValueFactsDirty() {
     value_facts_dirty_ = true;
-    for (auto& signal : program_.signals) signal.value = ValueFacts{};
 }
 
 void MutableProgram::ensureValueFacts() {

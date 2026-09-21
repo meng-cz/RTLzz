@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <functional>
+#include <unordered_map>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -19,7 +21,23 @@ struct Predicate {
 
 struct Context {
     std::vector<Predicate> predicates;
+    std::size_t fingerprint = 0;
 };
+
+inline std::size_t predicateHash(const Predicate& predicate) {
+    std::uint64_t seed = predicate.when_true ? 1 : 0;
+    hashCombine(seed, predicate.guard.node);
+    hashCombine(seed, static_cast<std::uint64_t>(predicate.guard.kind));
+    hashCombine(seed, std::hash<std::string>{}(predicate.guard.text));
+    hashCombine(seed, static_cast<std::uint64_t>(predicate.guard.type.width));
+    hashCombine(seed, predicate.guard.signed_view ? 1 : 0);
+    if (predicate.guard.kind == OperandKind::Literal) {
+        hashCombine(seed, static_cast<std::uint64_t>(predicate.guard.constant.width));
+        hashCombine(seed, predicate.guard.constant.signed_view ? 1 : 0);
+        for (auto limb : predicate.guard.constant.limbs) hashCombine(seed, limb);
+    }
+    return static_cast<std::size_t>(seed);
+}
 
 inline Context unconditionalContext() {
     return Context{};
@@ -82,9 +100,14 @@ inline void normalizeContext(Context& context) {
     context.predicates.erase(
         std::unique(context.predicates.begin(), context.predicates.end(), samePredicate),
         context.predicates.end());
+    std::uint64_t fingerprint = 0;
+    for (const auto& predicate : context.predicates)
+        hashCombine(fingerprint, predicateHash(predicate));
+    context.fingerprint = static_cast<std::size_t>(fingerprint);
 }
 
 inline bool sameContext(const Context& lhs, const Context& rhs) {
+    if (lhs.fingerprint != rhs.fingerprint) return false;
     if (lhs.predicates.size() != rhs.predicates.size()) return false;
     for (std::size_t i = 0; i < lhs.predicates.size(); ++i) {
         if (!samePredicate(lhs.predicates[i], rhs.predicates[i])) return false;
@@ -142,8 +165,8 @@ inline const Operation* symbolDriver(const Operand& operand, const Program& prog
 
 // Queries prove relations in an exact Boolean abstraction. Unmodelled atoms
 // are independent, while equalities of one selector to different constants are
-// treated as mutually exclusive. No analysis state survives a query, so graph
-// mutations cannot stale a cache.
+// treated as mutually exclusive. Standalone queries reset their cache; the
+// predicate-sinking pass reuses it only while the BEIR graph is unchanged.
 enum class Proof { Unknown, Proven };
 
 class PredicateRelations {
@@ -152,19 +175,77 @@ class PredicateRelations {
     struct Atom { Operand value; std::optional<Operand> selector, literal; };
     std::vector<Formula> formulas_;
     std::vector<Atom> atoms_;
+    struct OperandHash {
+        std::size_t operator()(const Operand& value) const {
+            std::uint64_t seed = static_cast<std::uint64_t>(value.kind);
+            hashCombine(seed, value.node);
+            hashCombine(seed, std::hash<std::string>{}(value.text));
+            hashCombine(seed, static_cast<std::uint64_t>(value.type.width));
+            hashCombine(seed, value.signed_view ? 1 : 0);
+            if (value.kind == OperandKind::Literal) {
+                hashCombine(seed, static_cast<std::uint64_t>(value.constant.width));
+                hashCombine(seed, value.constant.signed_view ? 1 : 0);
+                for (auto limb : value.constant.limbs) hashCombine(seed, limb);
+            }
+            return static_cast<std::size_t>(seed);
+        }
+    };
+    struct OperandEqual {
+        bool operator()(const Operand& lhs, const Operand& rhs) const {
+            return sameOperand(lhs, rhs);
+        }
+    };
+    struct SelectorKey {
+        Operand selector;
+        Operand::Constant literal;
+    };
+    struct SelectorHash {
+        std::size_t operator()(const SelectorKey& key) const {
+            OperandHash operand_hash;
+            std::uint64_t seed = operand_hash(key.selector);
+            hashCombine(seed, static_cast<std::uint64_t>(key.literal.width));
+            hashCombine(seed, key.literal.signed_view ? 1 : 0);
+            for (auto limb : key.literal.limbs) hashCombine(seed, limb);
+            return static_cast<std::size_t>(seed);
+        }
+    };
+    struct SelectorEqual {
+        bool operator()(const SelectorKey& lhs, const SelectorKey& rhs) const {
+            return sameOperand(lhs.selector, rhs.selector) &&
+                   sameConstant(lhs.literal, rhs.literal);
+        }
+    };
+    std::unordered_map<Operand, int, OperandHash, OperandEqual> formula_cache_;
+    std::unordered_map<Operand, std::size_t, OperandHash, OperandEqual> atom_cache_;
+    std::unordered_map<SelectorKey, std::size_t, SelectorHash, SelectorEqual> selector_cache_;
+    bool snapshot_ = false;
 
     int add(int kind, int a = 0, int b = 0) {
         formulas_.push_back({kind, a, b});
         return static_cast<int>(formulas_.size() - 1);
     }
     int build(const Operand& value) {
-        if (value.kind == OperandKind::Literal) return add(0, !value.constant.isZero());
+        if (auto found = formula_cache_.find(value); found != formula_cache_.end())
+            return found->second;
+        int formula = -1;
+        if (value.kind == OperandKind::Literal) {
+            formula = add(0, !value.constant.isZero());
+            formula_cache_.emplace(value, formula);
+            return formula;
+        }
         const auto* op = symbolDriver(value, program_);
         if (op && op->kind == OperationKind::Assign && op->operands.size() == 1 &&
-            sameValueType(op->type, op->operands[0].type))
-            return build(op->operands[0]);
+            sameValueType(op->type, op->operands[0].type)) {
+            formula = build(op->operands[0]);
+            formula_cache_.emplace(value, formula);
+            return formula;
+        }
         if (op && op->kind == OperationKind::Unary && op->op == OpCode::LogicNot &&
-            op->operands.size() == 1) return add(2, build(op->operands[0]));
+            op->operands.size() == 1) {
+            formula = add(2, build(op->operands[0]));
+            formula_cache_.emplace(value, formula);
+            return formula;
+        }
         if (op && op->kind == OperationKind::Binary && op->operands.size() == 2 &&
             (op->op == OpCode::LogicAnd || op->op == OpCode::LogicOr ||
              (value.type.width == 1 && op->operands[0].type.width == 1 &&
@@ -172,7 +253,9 @@ class PredicateRelations {
               (op->op == OpCode::BitAnd || op->op == OpCode::BitOr)))) {
             int left = build(op->operands[0]);
             int right = build(op->operands[1]);
-            return add(op->op == OpCode::LogicAnd || op->op == OpCode::BitAnd ? 3 : 4, left, right);
+            formula = add(op->op == OpCode::LogicAnd || op->op == OpCode::BitAnd ? 3 : 4, left, right);
+            formula_cache_.emplace(value, formula);
+            return formula;
         }
         Atom atom{value, {}, {}};
         if (op && op->kind == OperationKind::Binary && op->op == OpCode::Eq &&
@@ -191,59 +274,245 @@ class PredicateRelations {
                 atom.literal = right;
             }
         }
-        for (std::size_t i = 0; i < atoms_.size(); ++i) {
-            if (sameOperand(value, atoms_[i].value) ||
-                (atom.selector && atoms_[i].selector &&
-                 sameOperand(*atom.selector, *atoms_[i].selector) &&
-                 sameConstant(atom.literal->constant, atoms_[i].literal->constant)))
-                return add(1, static_cast<int>(i));
+        auto found = atom_cache_.find(value);
+        if (found != atom_cache_.end()) {
+            formula = add(1, static_cast<int>(found->second));
+            formula_cache_.emplace(value, formula);
+            return formula;
+        }
+        if (atom.selector) {
+            SelectorKey key{*atom.selector, atom.literal->constant};
+            auto selector_found = selector_cache_.find(key);
+            if (selector_found != selector_cache_.end()) {
+                atom_cache_.emplace(value, selector_found->second);
+                formula = add(1, static_cast<int>(selector_found->second));
+                formula_cache_.emplace(value, formula);
+                return formula;
+            }
         }
         atoms_.push_back(std::move(atom));
-        return add(1, static_cast<int>(atoms_.size() - 1));
-    }
-    bool evaluate(int id, const std::vector<bool>& values) const {
-        const auto& f = formulas_[id];
-        switch (f.kind) {
-        case 0: return f.a;
-        case 1: return values.at(static_cast<std::size_t>(f.a));
-        case 2: return !evaluate(f.a, values);
-        case 3: return evaluate(f.a, values) && evaluate(f.b, values);
-        default: return evaluate(f.a, values) || evaluate(f.b, values);
+        const std::size_t atom_id = atoms_.size() - 1;
+        atom_cache_.emplace(value, atom_id);
+        if (atoms_.back().selector) {
+            selector_cache_.emplace(
+                SelectorKey{*atoms_.back().selector, atoms_.back().literal->constant}, atom_id);
         }
+        formula = add(1, static_cast<int>(atom_id));
+        formula_cache_.emplace(value, formula);
+        return formula;
     }
-    bool admissible(const std::vector<bool>& values) const {
-        for (std::size_t i = 0; i < atoms_.size(); ++i) {
-            if (!values[i] || !atoms_[i].selector) continue;
-            for (std::size_t j = 0; j < i; ++j) {
-                if (values[j] && atoms_[j].selector &&
-                    sameOperand(*atoms_[i].selector, *atoms_[j].selector) &&
-                    !sameConstant(atoms_[i].literal->constant, atoms_[j].literal->constant))
-                    return false;
+    class SatSolver {
+        std::vector<std::vector<int>> clauses_;
+        std::vector<std::vector<std::size_t>> occurrences_;
+        std::vector<int> unit_literals_;
+        std::vector<int8_t> assigned_;
+        std::vector<int> trail_;
+        std::size_t propagation_cursor_ = 0;
+        std::unordered_map<int, int> formula_var_;
+        int atom_base_ = 0;
+
+        void clause(std::initializer_list<int> literals) {
+            clauses_.emplace_back(literals);
+            if (literals.size() == 1) unit_literals_.push_back(*literals.begin());
+            const std::size_t clause_id = clauses_.size() - 1;
+            for (int literal : literals)
+                occurrences_[static_cast<std::size_t>(literal > 0 ? literal : -literal)]
+                    .push_back(clause_id);
+        }
+        bool assign(int literal) {
+            const auto variable = static_cast<std::size_t>(literal > 0 ? literal : -literal);
+            const int8_t value = literal > 0 ? 1 : 0;
+            if (assigned_[variable] != -1) return assigned_[variable] == value;
+            assigned_[variable] = value;
+            trail_.push_back(literal);
+            return true;
+        }
+        void undo(std::size_t mark) {
+            while (trail_.size() > mark) {
+                const int literal = trail_.back();
+                assigned_[static_cast<std::size_t>(literal > 0 ? literal : -literal)] = -1;
+                trail_.pop_back();
+            }
+            propagation_cursor_ = mark;
+        }
+        bool propagate() {
+            while (propagation_cursor_ < trail_.size()) {
+                const int assigned_literal = trail_[propagation_cursor_++];
+                const auto variable = static_cast<std::size_t>(assigned_literal > 0
+                                                                    ? assigned_literal : -assigned_literal);
+                for (std::size_t clause_id : occurrences_[variable]) {
+                    const auto& clause = clauses_[clause_id];
+                    bool satisfied = false;
+                    int unassigned = 0;
+                    int last = 0;
+                    for (int literal : clause) {
+                        const int8_t value = assigned_[static_cast<std::size_t>(literal > 0 ? literal : -literal)];
+                        if (value == -1) { ++unassigned; last = literal; }
+                        else if ((value == 1) == (literal > 0)) { satisfied = true; break; }
+                    }
+                    if (satisfied) continue;
+                    if (!unassigned) return false;
+                    if (unassigned == 1) {
+                        if (!assign(last)) return false;
+                    }
+                }
+            }
+            return true;
+        }
+        bool search() {
+            if (!propagate()) return false;
+            int choice = 0;
+            std::size_t shortest = static_cast<std::size_t>(-1);
+            for (const auto& clause : clauses_) {
+                bool satisfied = false;
+                std::size_t remaining = 0;
+                int candidate = 0;
+                for (int literal : clause) {
+                    const int variable = literal > 0 ? literal : -literal;
+                    const int8_t value = assigned_[static_cast<std::size_t>(variable)];
+                    if (value == -1) {
+                        ++remaining;
+                        if (!candidate || variable > atom_base_) candidate = variable;
+                    } else if ((value == 1) == (literal > 0)) {
+                        satisfied = true;
+                        break;
+                    }
+                }
+                if (!satisfied && remaining < shortest) {
+                    shortest = remaining;
+                    choice = candidate;
+                }
+            }
+            if (!choice) return true;
+            const std::size_t mark = trail_.size();
+            if (assign(choice) && search()) return true;
+            undo(mark);
+            if (assign(-choice) && search()) return true;
+            undo(mark);
+            return false;
+        }
+    public:
+        SatSolver(const std::vector<Formula>& formulas, const std::vector<Atom>& atoms,
+                  const std::vector<std::pair<int, bool>>& facts, int goal) {
+            // Snapshot formula caches may contain other queries. Encode only
+            // nodes reachable from this query's assumptions and goal.
+            std::unordered_set<int> seen;
+            std::vector<int> pending{goal};
+            for (const auto& fact : facts) pending.push_back(fact.first);
+            while (!pending.empty()) {
+                const int id = pending.back(); pending.pop_back();
+                if (!seen.insert(id).second) continue;
+                const Formula& f = formulas[static_cast<std::size_t>(id)];
+                if (f.kind == 2 || f.kind == 3 || f.kind == 4) pending.push_back(f.a);
+                if (f.kind == 3 || f.kind == 4) pending.push_back(f.b);
+            }
+            std::vector<int> selected(seen.begin(), seen.end());
+            std::sort(selected.begin(), selected.end());
+            formula_var_.reserve(selected.size());
+            for (std::size_t i = 0; i < selected.size(); ++i)
+                formula_var_.emplace(selected[i], static_cast<int>(i + 1));
+            atom_base_ = static_cast<int>(selected.size());
+            std::vector<std::size_t> selected_atoms;
+            for (int id : selected) {
+                const Formula& f = formulas[static_cast<std::size_t>(id)];
+                if (f.kind == 1) selected_atoms.push_back(static_cast<std::size_t>(f.a));
+            }
+            std::sort(selected_atoms.begin(), selected_atoms.end());
+            selected_atoms.erase(std::unique(selected_atoms.begin(), selected_atoms.end()),
+                                 selected_atoms.end());
+            std::unordered_map<std::size_t, int> atom_var;
+            atom_var.reserve(selected_atoms.size());
+            for (std::size_t i = 0; i < selected_atoms.size(); ++i)
+                atom_var.emplace(selected_atoms[i], atom_base_ + static_cast<int>(i) + 1);
+            assigned_.assign(selected.size() + selected_atoms.size() + 1, -1);
+            occurrences_.resize(assigned_.size());
+            for (int id : selected) {
+                const int variable = formula_var_.at(id);
+                const Formula& f = formulas[static_cast<std::size_t>(id)];
+                switch (f.kind) {
+                case 0: clause({f.a ? variable : -variable}); break;
+                case 1: {
+                    const int atom = atom_var.at(static_cast<std::size_t>(f.a));
+                    clause({-variable, atom});
+                    clause({variable, -atom});
+                    break;
+                }
+                case 2: {
+                    const int child = formula_var_.at(f.a);
+                    clause({-variable, -child});
+                    clause({variable, child});
+                    break;
+                }
+                case 3: {
+                    const int left = formula_var_.at(f.a), right = formula_var_.at(f.b);
+                    clause({-variable, left});
+                    clause({-variable, right});
+                    clause({variable, -left, -right});
+                    break;
+                }
+                default: {
+                    const int left = formula_var_.at(f.a), right = formula_var_.at(f.b);
+                    clause({variable, -left});
+                    clause({variable, -right});
+                    clause({-variable, left, right});
+                    break;
+                }
+                }
+            }
+            for (std::size_t i = 0; i < selected_atoms.size(); ++i) {
+                const Atom& current = atoms[selected_atoms[i]];
+                if (!current.selector) continue;
+                for (std::size_t j = 0; j < i; ++j) {
+                    const Atom& previous = atoms[selected_atoms[j]];
+                    if (previous.selector &&
+                        sameOperand(*current.selector, *previous.selector) &&
+                        !sameConstant(current.literal->constant, previous.literal->constant))
+                        clause({-atom_var.at(selected_atoms[i]), -atom_var.at(selected_atoms[j])});
+                }
             }
         }
-        return true;
+        bool satisfiable(const std::vector<std::pair<int, bool>>& facts, int goal, bool goal_value) {
+            for (int literal : unit_literals_)
+                if (!assign(literal)) { undo(0); return false; }
+            for (const auto& fact : facts)
+                if (!assign(fact.second ? formula_var_.at(fact.first) : -formula_var_.at(fact.first))) {
+                    undo(0); return false;
+                }
+            if (!assign(goal_value ? formula_var_.at(goal) : -formula_var_.at(goal))) {
+                undo(0); return false;
+            }
+            const bool result = search();
+            undo(0);
+            return result;
+        }
+    };
+    void resetQuery() {
+        formulas_.clear(); atoms_.clear(); formula_cache_.clear();
+        atom_cache_.clear(); selector_cache_.clear();
+    }
+    std::pair<std::vector<std::pair<int, bool>>, int> buildQuery(const Context& context,
+                                                                  const Operand& guard) {
+        if (!snapshot_) resetQuery();
+        std::vector<std::pair<int, bool>> facts;
+        facts.reserve(context.predicates.size());
+        for (const auto& p : context.predicates) facts.push_back({build(p.guard), p.when_true});
+        return {std::move(facts), build(guard)};
     }
 public:
-    explicit PredicateRelations(const Program& program) : program_(program) {}
+    explicit PredicateRelations(const Program& program, bool snapshot = false)
+        : program_(program), snapshot_(snapshot) {}
     Proof implies(const Context& context, Predicate target) {
-        formulas_.clear(); atoms_.clear();
-        std::vector<std::pair<int, bool>> facts;
-        for (const auto& p : context.predicates) facts.push_back({build(p.guard), p.when_true});
-        const int goal = build(target.guard);
-        std::vector<bool> values(atoms_.size(), false);
-        std::function<bool(std::size_t)> has_counterexample = [&](std::size_t index) {
-            if (index != values.size()) {
-                values[index] = false;
-                if (has_counterexample(index + 1)) return true;
-                values[index] = true;
-                return has_counterexample(index + 1);
-            }
-            if (!admissible(values)) return false;
-            for (const auto& fact : facts)
-                if (evaluate(fact.first, values) != fact.second) return false;
-            return evaluate(goal, values) != target.when_true;
-        };
-        return has_counterexample(0) ? Proof::Unknown : Proof::Proven;
+        auto [facts, goal] = buildQuery(context, target.guard);
+        SatSolver solver(formulas_, atoms_, facts, goal);
+        return solver.satisfiable(facts, goal, !target.when_true) ? Proof::Unknown : Proof::Proven;
+    }
+    std::pair<Proof, Proof> classify(const Context& context, const Operand& guard) {
+        auto [facts, goal] = buildQuery(context, guard);
+        SatSolver solver(formulas_, atoms_, facts, goal);
+        const bool can_be_false = solver.satisfiable(facts, goal, false);
+        const bool can_be_true = solver.satisfiable(facts, goal, true);
+        return {can_be_false ? Proof::Unknown : Proof::Proven,
+                can_be_true ? Proof::Unknown : Proof::Proven};
     }
     Proof implies(const Operand& a, const Operand& b) {
         return implies(guardedContext(a, true), Predicate{b, true});
@@ -384,41 +653,81 @@ inline std::vector<std::vector<Context>> analyzeDemandContexts(const MutableProg
     return contexts;
 }
 
-inline bool rewriteGuardedDefault(Operation& op,
-                                  const std::vector<Context>& contexts,
-                                  const Program& program) {
-    if (op.kind != OperationKind::Ite || op.operands.size() != 3) return false;
-    const Operand& guard = op.operands[0];
-    const ValueType type = op.type;
-    if (onlyNeededInBranch(contexts, guard, true, program)) {
-        setAssign(op, op.operands[1], type,
-                  "sank predicate guard and omitted unreachable false branch", program);
-        return true;
+class SnapshotPredicateRelations {
+    struct Key {
+        Context context;
+        Operand guard;
+    };
+    struct KeyHash {
+        std::size_t operator()(const Key& key) const {
+            std::uint64_t seed = key.context.fingerprint;
+            hashCombine(seed, predicateHash(Predicate{key.guard, true}));
+            return static_cast<std::size_t>(seed);
+        }
+    };
+    struct KeyEqual {
+        bool operator()(const Key& lhs, const Key& rhs) const {
+            return sameContext(lhs.context, rhs.context) && sameOperand(lhs.guard, rhs.guard);
+        }
+    };
+    PredicateRelations relations_;
+    std::unordered_map<Key, std::pair<Proof, Proof>, KeyHash, KeyEqual> cache_;
+public:
+    explicit SnapshotPredicateRelations(const Program& program) : relations_(program, true) {}
+    std::pair<Proof, Proof> classify(const Context& context, const Operand& guard) {
+        Key key{context, guard};
+        if (const auto found = cache_.find(key); found != cache_.end()) return found->second;
+        auto result = relations_.classify(context, guard);
+        cache_.emplace(std::move(key), result);
+        return result;
     }
-    if (onlyNeededInBranch(contexts, guard, false, program)) {
-        setAssign(op, op.operands[2], type,
-                  "sank predicate guard and omitted unreachable true branch", program);
-        return true;
+};
+
+inline std::optional<bool> guardedDefaultSelection(const Operation& op,
+                                                    const std::vector<Context>& contexts,
+                                                    SnapshotPredicateRelations& relations) {
+    if (op.kind != OperationKind::Ite || op.operands.size() != 3 || contexts.empty())
+        return std::nullopt;
+    bool always_true = true, always_false = true;
+    for (const auto& context : contexts) {
+        const auto [proves_true, proves_false] = relations.classify(context, op.operands[0]);
+        always_true &= proves_true == Proof::Proven;
+        always_false &= proves_false == Proof::Proven;
+        if (!always_true && !always_false) return std::nullopt;
     }
-    return false;
+    if (always_true) return true;
+    if (always_false) return false;
+    return std::nullopt;
 }
 
 } // namespace predicate_detail
 
 inline bool sinkPredicates(MutableProgram& graph) {
-    graph.ensureValueFacts();
     const auto contexts = predicate_detail::analyzeDemandContexts(graph);
-    bool changed = false;
     Program& program = graph.program();
-    for (auto& signal : program.signals) {
-        if (graph.isObservable(signal) || !signal.driver) continue;
-        bool signal_changed = predicate_detail::rewriteGuardedDefault(
-            *signal.driver, contexts[signal.id], program);
-        if (signal_changed) signal.debug = signal.driver->debug;
-        changed = signal_changed || changed;
+    predicate_detail::SnapshotPredicateRelations relations(program);
+    std::vector<std::pair<NodeId, bool>> rewrites;
+    for (const auto& signal : program.signals) {
+        if (graph.isObservable(signal) || !signal.driver || contexts[signal.id].empty() ||
+            signal.driver->kind != OperationKind::Ite) continue;
+        const auto selected = predicate_detail::guardedDefaultSelection(
+            *signal.driver, contexts[signal.id], relations);
+        if (selected) rewrites.emplace_back(signal.id, *selected);
     }
-    if (changed) graph.markValueFactsDirty();
-    return changed;
+    for (const auto& [id, take_true] : rewrites) {
+        Signal& signal = program.signal(id);
+        Operation& op = *signal.driver;
+        const ValueType type = op.type;
+        Operand value = op.operands[take_true ? 1 : 2];
+        predicate_detail::setAssign(op, std::move(value), type,
+                                    take_true
+                                        ? "sank predicate guard and omitted unreachable false branch"
+                                        : "sank predicate guard and omitted unreachable true branch",
+                                    program);
+        signal.debug = op.debug;
+    }
+    if (!rewrites.empty()) graph.markValueFactsDirty();
+    return !rewrites.empty();
 }
 
 } // namespace pred::beir::opt
