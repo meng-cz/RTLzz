@@ -20,6 +20,7 @@ struct Options {
     bool exclusive_muxes = true;
     bool balance_trees = true;
     bool bit_range_update_coalescing = true;
+    bool boolean_control_normalization = true;
     int max_predicate_iterations = 4;
     unsigned max_mux_branches = 8;
     unsigned max_tree_leaves = 32;

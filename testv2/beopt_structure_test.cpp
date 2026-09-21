@@ -47,6 +47,17 @@ static uint64_t eval(const Program& p, std::string output, const std::map<std::s
             case OperationKind::Assign: case OperationKind::ZExt: case OperationKind::Trunc:
             case OperationKind::Cast: result = a(0); break;
             case OperationKind::Ite: result = a(0) ? a(1) : a(2); break;
+            case OperationKind::Case: {
+                CHECK(hasValidCaseShape(op));
+                result = a(static_cast<int>(op.operands.size() - 1));
+                for (std::size_t branch = 0; branch < caseBranchCount(op); ++branch) {
+                    if (a(static_cast<int>(branch * 2))) {
+                        result = a(static_cast<int>(branch * 2 + 1));
+                        break;
+                    }
+                }
+                break;
+            }
             case OperationKind::Unary: result = op.op == OpCode::LogicNot ? !a(0) : ~a(0); break;
             case OperationKind::Repeat:
                 for (int i = 0; i < op.times; ++i) result = (result << op.operands[0].type.width) | a(0);
@@ -117,15 +128,15 @@ static void relations() {
     p.signal(eq1.node).driver->operands[1] = literal(0, 2);
     CHECK(q.isExclusive(eq0, eq1) == Proof::Unknown);
     for (int i = 0; i < 20; ++i) context = branchContext(context, node(p, "g" + std::to_string(i), 1), true);
-    CHECK(context.predicates.size() <= 8);
-    CHECK(q.implies(context, {a, true}) == Proof::Unknown);
+    CHECK(context.predicates.size() == 22);
+    CHECK(q.implies(context, {a, true}) == Proof::Proven);
     auto many = a;
     for (int i = 0; i < 10; ++i) many = binary(p, OpCode::LogicOr, many, node(p, "u"+std::to_string(i), 1), 1);
-    CHECK(q.implies(a, many) == Proof::Unknown); // budget exhaustion is conservative
+    CHECK(q.implies(a, many) == Proof::Proven);
     std::vector<Context> contexts;
     for (int i = 0; i < 20; ++i)
         appendContext(contexts, guardedContext(node(p, "ctx" + std::to_string(i), 1), true));
-    CHECK(contexts.size() == 1 && isUnconditional(contexts[0]));
+    CHECK(contexts.size() == 20);
     // Different limb padding must not manufacture exclusivity of equal constants.
     auto padded = literal(0, 2); padded.constant.limbs.push_back(0);
     auto equal_again = binary(p, OpCode::Eq, select, padded, 1);
@@ -147,6 +158,9 @@ static void muxes() {
     for (bool exclusive : {false, true}) {
         auto p = muxProgram(exclusive); MutableProgram g(p);
         CHECK(parallelizeExclusiveMuxes(g) == exclusive);
+        const auto& root = g.program().signal(g.program().signals.size() - 1);
+        CHECK(root.driver->kind == (exclusive ? OperationKind::Case : OperationKind::Ite));
+        if (exclusive) CHECK(caseBranchCount(*root.driver) == 3);
         for (unsigned sel = 0; sel < 4; ++sel)
             for (unsigned a = 0; a < 256; ++a) {
                 std::map<std::string,uint64_t> in{{"sel",sel},{"a",a},{"b",255-a}};
@@ -218,6 +232,9 @@ static void postSinkingCleanup() {
         CHECK(eval(p,p.outputs[0],in)==eval(result,p.outputs[0],in));
     }
     auto none = parseOptions({"none"});
-    CHECK(!none.exclusive_muxes && !none.balance_trees && !none.predicate_sinking);
+    CHECK(!none.exclusive_muxes && !none.balance_trees && !none.predicate_sinking &&
+          !none.boolean_control_normalization);
+    auto boolean_only = parseOptions({"none", "boolean"});
+    CHECK(boolean_only.boolean_control_normalization);
 }
 int main() { relations(); muxes(); trees(); postSinkingCleanup(); }

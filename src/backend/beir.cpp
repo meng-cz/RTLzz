@@ -301,6 +301,7 @@ static const char* operationKindText(OperationKind kind) {
     case OperationKind::Call: return "call";
     case OperationKind::Cast: return "cast";
     case OperationKind::Ite: return "ite";
+    case OperationKind::Case: return "case";
     case OperationKind::ZExt: return "zext";
     case OperationKind::SExt: return "sext";
     case OperationKind::Trunc: return "trunc";
@@ -941,6 +942,42 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
         for (std::size_t i = 0; i < out.known_zero.size(); ++i) {
             out.known_zero[i] = yes.known_zero[i] & no.known_zero[i];
             out.known_one[i] = yes.known_one[i] & no.known_one[i];
+        }
+        return out;
+    }
+    if (op.kind == OperationKind::Case && hasValidCaseShape(op)) {
+        auto resize = [&](const ValueFacts& value) {
+            return value.width < width ? factsZExt(value, width) : factsTrunc(value, width);
+        };
+        auto merge = [&](ValueFacts& out, const ValueFacts& value) {
+            ValueFacts resized = resize(value);
+            for (std::size_t limb = 0; limb < out.known_zero.size(); ++limb) {
+                out.known_zero[limb] &= resized.known_zero[limb];
+                out.known_one[limb] &= resized.known_one[limb];
+            }
+        };
+
+        std::vector<ValueFacts> possible;
+        possible.reserve(caseBranchCount(op) + 1);
+        bool default_reachable = true;
+        for (std::size_t branch = 0; branch < caseBranchCount(op); ++branch) {
+            const ValueFacts& condition = operands[branch * 2];
+            if (condition.constant && condition.value.isZero()) continue;
+            possible.push_back(operands[branch * 2 + 1]);
+            if (condition.constant) {
+                default_reachable = false;
+                break;
+            }
+        }
+        if (default_reachable) possible.push_back(operands.back());
+        if (possible.empty()) return factsUnknown(width);
+        ValueFacts out = resize(possible.front());
+        if (possible.size() > 1) {
+            out.constant = false;
+            out.value = Operand::Constant{};
+        }
+        for (std::size_t index = 1; index < possible.size(); ++index) {
+            merge(out, possible[index]);
         }
         return out;
     }

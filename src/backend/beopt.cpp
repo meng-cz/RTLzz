@@ -10,6 +10,7 @@
 #include "backend/beopt_slices.hpp"
 #include "backend/beopt_structure.hpp"
 #include "backend/beopt_bit_updates.hpp"
+#include "backend/beopt_boolean.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -30,6 +31,7 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.exclusive_muxes = true;
             options.balance_trees = true;
             options.bit_range_update_coalescing = true;
+            options.boolean_control_normalization = true;
         } else if (value == "none") {
             options.fold_assign_chains = false;
             options.constant_folding = false;
@@ -41,6 +43,7 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.exclusive_muxes = false;
             options.balance_trees = false;
             options.bit_range_update_coalescing = false;
+            options.boolean_control_normalization = false;
         } else if (value == "assign" || value == "fold-assign") {
             options.fold_assign_chains = true;
         } else if (value == "no-assign" || value == "no-fold-assign") {
@@ -81,6 +84,10 @@ Options parseOptions(const std::vector<std::string>& values) {
             options.bit_range_update_coalescing = true;
         } else if (value == "no-bit-updates" || value == "no-coalesce-bit-updates") {
             options.bit_range_update_coalescing = false;
+        } else if (value == "boolean" || value == "boolean-control") {
+            options.boolean_control_normalization = true;
+        } else if (value == "no-boolean" || value == "no-boolean-control") {
+            options.boolean_control_normalization = false;
         } else if (value == "dce") {
             options.dead_node_elimination = true;
         } else if (value == "no-dce") {
@@ -111,6 +118,8 @@ Program optimizeProgram(Program program,
                                               options.max_bit_compose_pieces) || changed;
         }
         if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
+        if (options.boolean_control_normalization)
+            changed = normalizeBooleanControl(graph) || changed;
         if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
@@ -123,6 +132,8 @@ Program optimizeProgram(Program program,
             bool progress = sinkPredicates(graph);
             if (options.constant_folding) progress = foldConstants(graph) || progress;
             if (options.algebraic_identities) progress = simplifyAlgebraicIdentities(graph) || progress;
+            if (options.boolean_control_normalization)
+                progress = normalizeBooleanControl(graph) || progress;
             if (options.width_simplification) {
                 progress = specializeConstantSlices(graph) || progress;
             }
@@ -140,10 +151,22 @@ Program optimizeProgram(Program program,
     }
     // Structural rewrites have one canonical direction and run only once after
     // scalar normalization, so cleanup cannot oscillate between mux/tree forms.
-    if (options.exclusive_muxes) parallelizeExclusiveMuxes(graph, options.max_mux_branches);
-    if (options.balance_trees) balanceAssociativeTrees(graph, options.max_tree_leaves);
-    if (options.exclusive_muxes || options.balance_trees) {
+    bool structural_changed = false;
+    if (options.exclusive_muxes) {
+        structural_changed = parallelizeExclusiveMuxes(graph, options.max_mux_branches) ||
+                             structural_changed;
+    }
+    if (options.boolean_control_normalization) {
+        structural_changed = normalizeBooleanControl(graph) || structural_changed;
+    }
+    if (options.balance_trees) {
+        structural_changed = balanceAssociativeTrees(graph, options.max_tree_leaves) ||
+                             structural_changed;
+    }
+    if (structural_changed) {
         if (options.constant_folding) foldConstants(graph);
+        if (options.algebraic_identities) simplifyAlgebraicIdentities(graph);
+        if (options.width_simplification) simplifyWidthOperations(graph);
         if (options.fold_assign_chains) foldAssignChains(graph);
         if (options.common_subexpressions) mergeCommonExpressions(graph);
         if (options.dead_node_elimination) eliminateDeadNodes(graph);

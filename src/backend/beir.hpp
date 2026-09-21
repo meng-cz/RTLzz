@@ -29,6 +29,10 @@ enum class OperationKind {
     Call,
     Cast,
     Ite,
+    // Ordered multi-way selection. Operands are
+    // [condition0, value0, condition1, value1, ..., default_value].
+    // The first true condition wins.
+    Case,
     ZExt,
     SExt,
     Trunc,
@@ -153,6 +157,15 @@ struct Operation {
     std::vector<DebugLoc> source_locs;
     DebugInfo debug;
 };
+
+inline bool hasValidCaseShape(const Operation& op) {
+    return op.kind == OperationKind::Case && op.operands.size() >= 3 &&
+           (op.operands.size() % 2) == 1;
+}
+
+inline std::size_t caseBranchCount(const Operation& op) {
+    return hasValidCaseShape(op) ? (op.operands.size() - 1) / 2 : 0;
+}
 
 struct Signal {
     NodeId id = kInvalidNodeId;

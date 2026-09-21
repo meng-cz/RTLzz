@@ -105,21 +105,18 @@ inline bool parallelizeExclusiveMuxes(MutableProgram& graph, unsigned max_branch
                     valid = false; break;
                 }
         if (!valid) continue;
-        addDebugMessage(debug, "parallelized proven-exclusive mux chain");
-        const ValueType boolean{1, {}};
-        auto any = balanced(program, conditions, OpCode::BitOr, boolean, debug);
-        auto otherwise = emit(program, OperationKind::Unary, OpCode::LogicNot, boolean, {any}, debug);
-        conditions.push_back(otherwise); data.push_back(fallback);
-        std::vector<Operand> terms;
+        addDebugMessage(debug, "flattened proven-exclusive mux chain into case");
+        Operation case_op;
+        case_op.kind = OperationKind::Case;
+        case_op.type = type;
+        case_op.debug = debug;
+        case_op.operands.reserve(conditions.size() * 2 + 1);
         for (std::size_t i = 0; i < conditions.size(); ++i) {
-            Operation mask;
-            mask.kind = OperationKind::Repeat; mask.type = type;
-            mask.times = type.width; mask.operands = {conditions[i]}; mask.debug = debug;
-            auto bits = width_detail::appendTemp(program, type, std::move(mask), "mux branch mask");
-            terms.push_back(emit(program, OperationKind::Binary, OpCode::BitAnd, type, {bits, data[i]}, debug));
+            case_op.operands.push_back(conditions[i]);
+            case_op.operands.push_back(data[i]);
         }
-        auto result = balanced(program, std::move(terms), OpCode::BitOr, type, debug);
-        assign(program, root, result, debug);
+        case_op.operands.push_back(fallback);
+        program.signal(root).driver = std::move(case_op);
         consumed.insert(chain.begin(), chain.end());
         changed = true;
     }

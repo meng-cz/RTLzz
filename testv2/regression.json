@@ -1,5 +1,10 @@
 {
   "fixtures": {
+    "branch_decision.logic.cpp": {
+      "input_ranges": {
+        "branch_op": [0, 7]
+      }
+    },
     "s1apinorm/source_aggregate_decl_init.logic.cpp": {
       "input_ranges": {
         "idx": [0, 1]

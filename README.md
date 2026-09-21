@@ -55,9 +55,12 @@ appear on stderr. Without this option, debug output behavior is unchanged.
 Backend structural optimization is enabled by default. `--beopt no-mux` disables
 proven-exclusive mux parallelization; `--beopt no-balance` disables associative
 tree balancing; `--beopt no-bit-updates` disables static bit-range update
-coalescing. `--beopt none` disables them along with the existing passes.
+coalescing; `--beopt no-boolean` disables Boolean control normalization.
+`--beopt none` disables them along with the existing passes.
 Mux rewriting retains the default branch and requires pairwise proven exclusive
-conditions (at most 8 branches). Tree balancing only expands single-user,
+conditions (at most 8 branches). It emits one ordered BEIR `Case` node whose
+operands alternate condition and value, followed by the default value; RTL uses
+an `always_comb case (1'b1)` block. Tree balancing only expands single-user,
 equal-width unsigned AND/OR/XOR or modular-add nodes, and only rewrites when the
 estimated arrival depth improves. Predicate sinking and scalar cleanup iterate
 up to 4 rounds by default; the C++ `beir::opt::Options` exposes these bounds.
@@ -65,6 +68,12 @@ Static `WriteSlice` chains are combined into one flat composition when their
 intermediate values have a single live user. Overlapping writes preserve
 last-write-wins behavior, uncovered ranges come from the original value, and
 the pass is bounded to 32 updates and 64 composed pieces by default.
+Boolean control normalization rewrites side-effect-free one-bit `Ite` nodes
+created by short-circuit and Boolean phi lowering into AND/OR/NOT form. It then
+flattens and balances Boolean trees and applies constant, idempotence,
+complement, absorption, and one-complement consensus identities. General
+priority muxes whose branches cannot be represented by these identities remain
+as `Ite` nodes.
 
 Run `build/testv2/beopt-structure-test` for structural and BEIR equivalence checks,
 and `scripts/differential_rtl.py testv2/fixtures/backend_structure.logic.cpp
@@ -72,3 +81,7 @@ and `scripts/differential_rtl.py testv2/fixtures/backend_structure.logic.cpp
 Run `build/testv2/beopt-bit-updates-test` and use
 `testv2/fixtures/bit_update_coalescing.logic.cpp` for bit-update structural and
 RTL differential validation.
+Run `build/testv2/beopt-boolean-test` for exhaustive small-network equivalence
+checks of Boolean normalization.
+Run `build/testv2/beir-case-test` for Case value-fact, constant-folding, width,
+algebraic, text-IR, and RTL-emission checks.

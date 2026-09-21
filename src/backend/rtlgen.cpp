@@ -715,6 +715,10 @@ private:
                     emitAggregateAssignment(os, signal, *signal.driver);
                     continue;
                 }
+                if (signal.driver->kind == beir::OperationKind::Case) {
+                    emitCaseAssignment(os, signal, *signal.driver);
+                    continue;
+                }
                 if (isDynamicWrite(*signal.driver)) {
                     emitDynamicWriteAssignment(os, signal, *signal.driver);
                     continue;
@@ -746,6 +750,34 @@ private:
                    << debugComment(debug) << "\n";
             }
         }
+    }
+
+    void emitCaseAssignment(std::ostream& os, const beir::Signal& signal,
+                            const beir::Operation& op) const {
+        if (!beir::hasValidCaseShape(op)) {
+            throw std::runtime_error("rtlgen malformed BEIR case operation");
+        }
+        if (signal.type.isArray() || op.type.isArray()) {
+            throw std::runtime_error("rtlgen does not support array-valued BEIR case operation");
+        }
+        os << "    always_comb begin" << debugComment(op.debug) << "\n"
+           << "        case (1'b1)\n";
+        for (std::size_t branch = 0; branch < beir::caseBranchCount(op); ++branch) {
+            const auto& condition = op.operands[branch * 2];
+            const auto& value = op.operands[branch * 2 + 1];
+            if (condition.type.isArray() || widthOf(condition.type) != 1) {
+                throw std::runtime_error("rtlgen BEIR case condition must be one bit");
+            }
+            os << "            " << operand(condition) << ": " << sig(signal.id)
+               << " = " << resizeExpr(operand(value), widthOf(value.type),
+                                      widthOf(signal.type), false) << ";\n";
+        }
+        const auto& fallback = op.operands.back();
+        os << "            default: " << sig(signal.id) << " = "
+           << resizeExpr(operand(fallback), widthOf(fallback.type),
+                         widthOf(signal.type), false) << ";\n"
+           << "        endcase\n"
+           << "    end\n";
     }
 
     void emitAggregateAssignment(std::ostream& os, const beir::Signal& signal, const beir::Operation& op) const {
@@ -956,6 +988,8 @@ private:
                    " : " +
                    resizeExpr(operand(ops[2]), widthOf(ops[2].type), widthOf(op.type), false) +
                    ")";
+        case beir::OperationKind::Case:
+            throw std::runtime_error("rtlgen case operation must be emitted as an always_comb block");
         case beir::OperationKind::Slice:
             need(1);
             return partSelectExpr(operand(ops[0]), op.hi, op.lo);

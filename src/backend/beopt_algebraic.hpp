@@ -409,6 +409,55 @@ inline bool rewriteIte(Operation& op, const Program& program) {
     return false;
 }
 
+inline bool rewriteCase(Operation& op, const Program& program) {
+    if (!hasValidCaseShape(op)) return false;
+    const ValueType type = op.type;
+    std::vector<Operand> operands;
+    operands.reserve(op.operands.size());
+    bool changed = false;
+    bool terminated = false;
+    for (std::size_t branch = 0; branch < caseBranchCount(op); ++branch) {
+        Operand condition = op.operands[branch * 2];
+        Operand value = op.operands[branch * 2 + 1];
+        if (const auto* known = constantOf(condition, program)) {
+            changed = true;
+            if (known->isZero()) continue;
+            operands.push_back(std::move(value));
+            terminated = true;
+            break;
+        }
+        operands.push_back(std::move(condition));
+        operands.push_back(std::move(value));
+    }
+    if (!terminated) operands.push_back(op.operands.back());
+
+    if (operands.size() == 1) {
+        setAssign(op, std::move(operands.front()), type,
+                  "selected statically reachable case branch", program);
+        return true;
+    }
+
+    const Operand& first_value = operands[1];
+    bool identical = true;
+    for (std::size_t index = 3; index < operands.size(); index += 2) {
+        if (!sameOperand(first_value, operands[index])) {
+            identical = false;
+            break;
+        }
+    }
+    if (identical && sameOperand(first_value, operands.back())) {
+        setAssign(op, first_value, type, "removed case with identical results", program);
+        return true;
+    }
+    if (!changed) return false;
+    op.operands = std::move(operands);
+    addDebugMessage(op.debug, "removed unreachable constant case branches");
+    op.debug.reason = "removed unreachable constant case branches";
+    addOperandDebugLocs(op.debug, program, op.operands);
+    op.source_locs = op.debug.source_locs;
+    return true;
+}
+
 } // namespace algebraic_detail
 
 inline bool simplifyAlgebraicIdentities(MutableProgram& graph) {
@@ -417,6 +466,7 @@ inline bool simplifyAlgebraicIdentities(MutableProgram& graph) {
     for (auto& signal : graph.program().signals) {
         if (!signal.driver) continue;
         bool signal_changed =
+            algebraic_detail::rewriteCase(*signal.driver, graph.program()) ||
             algebraic_detail::rewriteIte(*signal.driver, graph.program()) ||
             algebraic_detail::rewriteBinary(*signal.driver, graph.program()) ||
             algebraic_detail::rewriteUnary(*signal.driver, graph.program());

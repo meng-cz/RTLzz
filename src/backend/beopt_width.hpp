@@ -582,6 +582,7 @@ inline bool narrowableOperation(const Operation& op) {
     case OperationKind::Trunc:
     case OperationKind::Slice:
     case OperationKind::Ite:
+    case OperationKind::Case:
         return true;
     case OperationKind::Unary:
         return op.op == OpCode::BitNot || op.op == OpCode::Neg;
@@ -710,6 +711,13 @@ inline int assignedWidthFromOperation(const Program& program, const Operation& o
     case OperationKind::Ite:
         computed = std::max(operand_width(1), operand_width(2));
         break;
+    case OperationKind::Case:
+        if (!hasValidCaseShape(op)) break;
+        computed = operand_width(op.operands.size() - 1);
+        for (std::size_t branch = 0; branch < caseBranchCount(op); ++branch) {
+            computed = std::max(computed, operand_width(branch * 2 + 1));
+        }
+        break;
     case OperationKind::Unary:
         if (op.op == OpCode::LogicNot) computed = 1;
         else computed = out_width;
@@ -824,6 +832,17 @@ inline void propagateDemand(const Program& program,
         full(0);
         low(1, need);
         low(2, need);
+        return;
+    case OperationKind::Case:
+        if (!hasValidCaseShape(op)) {
+            for (std::size_t index = 0; index < op.operands.size(); ++index) full(index);
+            return;
+        }
+        for (std::size_t branch = 0; branch < caseBranchCount(op); ++branch) {
+            full(branch * 2);
+            low(branch * 2 + 1, need);
+        }
+        low(op.operands.size() - 1, need);
         return;
     case OperationKind::Unary:
         if (op.op == OpCode::BitNot || op.op == OpCode::Neg) low(0, need);
@@ -988,6 +1007,12 @@ inline bool normalizeOperationOperands(Operation& op, Program& program, const st
             normalize_operand(0, common);
             normalize_operand(1, common);
         }
+    } else if (op.kind == OperationKind::Case && hasValidCaseShape(op)) {
+        for (std::size_t branch = 0; branch < caseBranchCount(op); ++branch) {
+            normalize_operand(branch * 2, 1);
+            normalize_operand(branch * 2 + 1, out_width);
+        }
+        normalize_operand(op.operands.size() - 1, out_width);
     } else if (op.kind == OperationKind::Concat) {
         // Concatenation part widths encode bit positions, even when a source
         // can be stored in fewer bits. Restore each part's original width.

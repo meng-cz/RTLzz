@@ -263,24 +263,28 @@ done
 ## Backend BEIR And RTL
 
 ### `src/backend/beir.hpp`
-- 定义 BEIR program、signal、port、operand、operation、mutable program API。
+- 定义 BEIR program、signal、port、operand、operation、mutable program API；`OperationKind::Case` 使用 `[condition, value, ..., default]` 布局并采用首个真条件优先语义。
 
 ### `src/backend/beir.cpp`
-- BEIR text dump、validation、operation/type helpers、mutable builder 实现；Ite 位值分析按结果位宽合并分支已知位，支持下沉后的再次常量化。
+- BEIR text dump、validation、operation/type helpers、mutable builder 实现；Ite/Case 位值分析按结果位宽合并所有可达分支的已知位，常量条件可裁掉不可达结果并继续常量化。
 
 ### `src/backend/beopt.hpp`
 - 声明 BEIR optimizer options、可选逐轮回调和 `optimizeProgram`。
 
 ### `src/backend/beopt.cpp`
 - 串接 BEIR optimization passes，并在固定点循环每轮开始时触发可选逐轮回调。
-- 谓词下沉后受限迭代常量、代数、位宽、Assign、CSE、DCE，默认最多 4 轮；随后单向执行互斥 mux 并行化及结合树平衡，避免结构变换振荡。
-- `Options` 暴露 max_predicate_iterations、max_mux_branches、max_tree_leaves、max_bit_range_updates、max_bit_compose_pieces；`--beopt mux/no-mux`、`balance/no-balance` 与 `bit-updates/no-bit-updates` 分别控制结构 pass，all/none 同时管理它们。
+- 布尔归一化参与主固定点和谓词下沉后的受限清理；随后单向执行互斥 mux 到 Case 的展平、再次布尔归一化及结合树平衡，并对新结构重新执行常量、代数、位宽、Assign、CSE、DCE 清理。
+- `Options` 暴露 max_predicate_iterations、max_mux_branches、max_tree_leaves、max_bit_range_updates、max_bit_compose_pieces；`--beopt mux/no-mux`、`balance/no-balance`、`bit-updates/no-bit-updates` 与 `boolean/no-boolean` 分别控制结构 pass，all/none 同时管理它们。
 
 ### `src/backend/beopt_constant.hpp`
 - 常量传播、常量折叠和 literal 简化。
 
 ### `src/backend/beopt_algebraic.hpp`
-- 代数化简；支持 Ite 的常量条件和等值分支折叠。
+- 代数化简；支持 Ite 的常量条件和等值分支折叠；Case 会删除恒假分支、在恒真分支处截断后续分支，并折叠全部结果相同的选择。
+
+### `src/backend/beopt_boolean.hpp`
+- 将无副作用的一位 Ite 常量分支、短路 phi 及 guard/fallback 模式规范化为 AND/OR/NOT；不能证明等价的一般优先级 Ite 保持不变。
+- 展平混合 Logic/Bit AND、OR 树，执行常量、幂等、互补、吸收和单互补 consensus 化简，并重建平衡二叉树；图改变后使 value-facts 分析失效。
 
 ### `src/backend/beopt_assign_chains.hpp`
 - assignment chain 简化。
@@ -293,11 +297,11 @@ done
 
 ### `src/backend/beopt_predicate.hpp`
 - predicate/guard 相关 BEIR 优化。
-- `PredicateRelations::implies/isExclusive` 统一返回 Proven/Unknown：有界二值布尔分析支持同条件、NOT、AND/OR 和相同无符号操作数对不同等宽常量的 Eq；不确定或超预算时保守返回 Unknown。
-- branchContext 保留父路径事实；每条上下文最多 8 条事实，每个节点最多 16 个上下文，超限丢弃事实或降为无条件；关系查询最多 8 个原子、深度 24、约 256 个公式节点，无跨图修改缓存。
+- `PredicateRelations::implies/isExclusive` 统一返回 Proven/Unknown：二值布尔分析支持同条件、NOT、AND/OR 和相同无符号操作数对不同等宽常量的 Eq；使用动态赋值向量精确枚举当前抽象，不再限制原子数、递归深度或公式节点数。
+- branchContext 保留全部父路径事实，demand-context 分析保留所有不同上下文，不再按事实数或上下文数截断；Case 的条件、分支值和默认值按有序剩余路径传播上下文。查询无跨图修改缓存。精确枚举的最坏时间随独立原子数指数增长。
 
 ### `src/backend/beopt_width.hpp`
-- width 相关优化和裁剪；支持 operand signed view 影响的扩展语义。
+- width 相关优化和裁剪；支持 operand signed view 影响的扩展语义；Case 的结果宽度取所有分支值与默认值的合并需求，条件保持一位，结果需求反向传播到每个值分支。
 
 ### `src/backend/rtlgen.hpp`
 - 声明 SystemVerilog emitter。
@@ -306,6 +310,7 @@ done
 - 将 BEIR program emit 为 synthesizable SystemVerilog。
 - 乘法分别按左右操作数的 signed view 扩展/截断到结果位宽，再以无符号位模式相乘并显式截断，保证混合符号语义不依赖 BEOPT。
 - 支持 scalar/array ports、BEIR lookup、assign/operation lowering。
+- 原生 BEIR Case 输出为带完整 default 的 `always_comb case (1'b1)`，保持首真分支优先语义。
 - RTL emission 将全常量 Aggregate 的 Lookup/ArrayAccess 输出为组合 case 查表函数；按元素类型、表长及规范化常量位值建立哈希索引，以完整比较处理哈希冲突，同一模块内相同表复用函数；可追踪赋值及无符号宽度转换链，省略不再被使用的数组，运行时表项保持数组读取。
 
 ## Tests And Fixtures
@@ -412,15 +417,27 @@ done
 - 用户计数仅覆盖可观察输出可达图，避免已折叠、尚未 DCE 的死别名阻止合并；变换后使 value facts 失效。
 
 ### `src/backend/beopt_structure.hpp`
-- `parallelizeExclusiveMuxes` 仅收集最多 8 个分支的等宽 Ite false-chain，单用户中间节点且条件两两证明互斥后转换为分支掩码 AND + 平衡 OR；默认分支使用 `!OR(conditions)` 掩码，未知关系/优先级链保持不变。
+- `parallelizeExclusiveMuxes` 仅收集最多 8 个分支的等宽 Ite false-chain，单用户中间节点且条件两两证明互斥后转换为一个有序 Case，保留显式默认值；未知关系/一般优先级链保持不变。
 - `balanceAssociativeTrees` 支持等宽无 signed-view 的 AND/OR/XOR/模加法；默认最多 32 叶（硬上限 64），只展开单用户同类节点，不穿越截断/扩展。按到达时间优先合并早到输入，且仅在估计延迟严格下降时重构。
 - 两个 pass 按可观察输出遍历活跃图，修改后使 value facts 失效。
 
 ### `testv2/beopt_structure_test.cpp`
-- 独立 BEIR 求值器验证 mux 默认值、非互斥拒绝、8 输入结合树及模加法语义；覆盖父上下文、预算降级、查询失效、共享节点、位宽边界、晚到输入和下沉后再次简化。
+- 独立 BEIR 求值器验证 mux 到 Case 的默认值和等价性、非互斥拒绝、8 输入结合树及模加法语义；覆盖完整父上下文、查询失效、共享节点、位宽边界、晚到输入、下沉后再次简化及选项解析。
+
+### `testv2/beir_case_test.cpp`
+- 构造原生 Case 验证首真分支布局、共同已知位和值事实、常量传播、恒真/恒假和同值代数折叠、位宽需求传播、谓词分支上下文、CSE/DCE、BEIR 文本及 `always_comb case` RTL 发射。
+
+### `testv2/beopt_boolean_test.cpp`
+- 对短路 phi、guard/fallback、吸收律和 consensus 构造小型 BEIR 并穷举输入验证等价性；确认普通优先级 Ite 不被改写。
 
 ### `testv2/fixtures/backend_structure.logic.cpp`
 - 8/128 位互斥选择、优先级选择、结合运算及嵌套谓词的端到端 C++/RTL 差分回归。
+
+### `testv2/fixtures/branch_decision.logic.cpp`
+- 软件风格控制转移判断 fixture：外层 legal/jal/jalr/branch 条件、六路 if/else-if 分支比较、布尔变量反复赋值，以及 JALR/PC target 选择；覆盖有符号和无符号 64 位比较。
+
+### `testv2/branch_decision_analysis.md`
+- 记录该 fixture 的语义差分和结构深度结果：完整路径 guard 可证明互斥，taken 的六级串行更新被一个原生 Case 替代；布尔归一化继续移除一位短路/phi Ite，使 control_valid 与 taken 的 Ite 深度降为 0。
 
 ### `testv2/beopt_bit_updates_test.cpp`
 - 独立 BEIR 求值器验证相邻、重叠、稀疏和全覆盖写入；覆盖 Assign 别名穿透、共享中间节点边界、规模限制及选项解析。
