@@ -258,7 +258,8 @@ LValue applyLValueBinding(const FunctionCFG& fn, const LValue& input, const Symb
     return out;
 }
 
-Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input, const SymbolMap& map);
+Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input,
+                            const SymbolMap& map, bool preserve_signed_view = false);
 
 void remapLValueAccessOperands(const FunctionCFG& fn, LValue& value, const SymbolMap& map) {
     for (auto& access : value.accesses) {
@@ -268,22 +269,29 @@ void remapLValueAccessOperands(const FunctionCFG& fn, LValue& value, const Symbo
     }
 }
 
-Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input, const SymbolMap& map) {
+Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input,
+                            const SymbolMap& map, bool preserve_signed_view) {
     if (input.kind == OperandKind::Var) {
         auto found = map.find(input.var_symbol);
         if (found == map.end()) return input;
         const auto& binding = found->second;
         if (binding.kind == SymbolBinding::Kind::FreshSymbol) {
-            return varOperand(symbolInfo(fn, binding.symbol));
+            Operand result = varOperand(symbolInfo(fn, binding.symbol));
+            result.signed_view = preserve_signed_view && input.signed_view;
+            return result;
         }
         LValue alias = cloneLValue(binding.alias);
         remapLValueAccessOperands(fn, alias, map);
-        return lvalueOperand(std::move(alias));
+        Operand result = lvalueOperand(std::move(alias));
+        result.signed_view = preserve_signed_view && input.signed_view;
+        return result;
     }
     if (input.kind == OperandKind::LValueRead) {
         LValue lv = applyLValueBinding(fn, input.lvalue, map);
         remapLValueAccessOperands(fn, lv, map);
-        return lvalueOperand(std::move(lv));
+        Operand result = lvalueOperand(std::move(lv));
+        result.signed_view = preserve_signed_view && input.signed_view;
+        return result;
     }
     return input;
 }
@@ -320,8 +328,17 @@ S3StmtPtr remapStmt(const FunctionCFG& fn, const S3StmtPtr& stmt, const SymbolMa
     }
     out->target = remapLValue(fn, stmt->target, map);
     out->value = applyOperandBinding(fn, stmt->value, map);
-    for (auto& operand : out->op.operands) {
-        operand = applyOperandBinding(fn, operand, map);
+    for (std::size_t index = 0; index < out->op.operands.size(); ++index) {
+        bool preserve_signed_view = out->op.kind == OpExpr::Kind::Cast && index == 0;
+        if (out->op.kind == OpExpr::Kind::Binary) {
+            const BinaryOp op = out->op.binary_op;
+            preserve_signed_view = op == BinaryOp::Mul ||
+                op == BinaryOp::Lt || op == BinaryOp::Le ||
+                op == BinaryOp::Gt || op == BinaryOp::Ge ||
+                (op == BinaryOp::Shr && index == 0);
+        }
+        out->op.operands[index] = applyOperandBinding(
+            fn, out->op.operands[index], map, preserve_signed_view);
     }
     if (stmt->call_result) out->call_result = remapLValue(fn, stmt->call_result.value(), map);
     for (auto& arg : out->args) arg = applyOperandBinding(fn, arg, map);

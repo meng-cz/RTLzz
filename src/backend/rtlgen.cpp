@@ -928,6 +928,24 @@ private:
                 bool signed_context =
                     ops[0].signed_view || ops[1].signed_view ||
                     ops[0].constant.signed_view || ops[1].constant.signed_view;
+                const bool comparison = op.op == beir::OpCode::Eq || op.op == beir::OpCode::Ne ||
+                    op.op == beir::OpCode::Lt || op.op == beir::OpCode::Le ||
+                    op.op == beir::OpCode::Gt || op.op == beir::OpCode::Ge;
+                if (comparison && signed_context) {
+                    const int compare_width = std::max(widthOf(ops[0].type), widthOf(ops[1].type));
+                    auto signedCompareOperand = [&](const beir::Operand& value) {
+                        const bool is_signed = value.signed_view || value.constant.signed_view;
+                        if (is_signed && widthOf(value.type) == compare_width)
+                            return "$signed(" + operand(value) + ")";
+                        std::string view = std::string(is_signed ? "$signed(" : "$unsigned(") +
+                                           operand(value) + ")";
+                        if (widthOf(value.type) != compare_width)
+                            view = std::to_string(compare_width) + "'(" + view + ")";
+                        return "$signed(" + view + ")";
+                    };
+                    return "(" + signedCompareOperand(ops[0]) + " " + svBinaryOp(op.op) +
+                           " " + signedCompareOperand(ops[1]) + ")";
+                }
                 if (op.op == beir::OpCode::Shr) {
                     signed_context = ops[0].signed_view || ops[0].constant.signed_view;
                 }
@@ -945,6 +963,11 @@ private:
                 // Make that truncation explicit instead of relying on the
                 // assignment target to discard high bits.
                 const int lhs_width = widthOf(ops[0].type);
+                if (op.op == beir::OpCode::Shr && signed_context) {
+                    // The unsigned zero arm of the oversized-shift guard can
+                    // otherwise make >>> evaluate its left operand unsigned.
+                    value = std::to_string(lhs_width) + "'(" + value + ")";
+                }
                 value = resizeExpr(value, lhs_width, widthOf(op.type), false);
 
                 // Int<W> defines every shift by an amount >= W as zero.  This

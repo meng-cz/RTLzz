@@ -662,13 +662,55 @@ static void rtlgenMakesNarrowShiftsAndSignedTruncationExplicit() {
 
     // Direct Int<W> simulation totalizes oversized shifts to zero, including
     // arithmetic right shifts of negative values.
-    CHECK(rtl.find("shift >= 6'd32 ? 17'h0 : 17'(($signed(wide) >>> shift))") !=
+    CHECK(rtl.find("shift >= 6'd32 ? 17'h0 : 17'(32'(($signed(wide) >>> shift)))") !=
           std::string::npos);
 
     // Unsigned truncation is a low-bit slice.  Signed truncation additionally
     // preserves the source sign in the destination sign bit, matching fixint.
     CHECK(rtl.find("assign unsigned_trunc5 = wide[4:0]") != std::string::npos);
     CHECK(rtl.find("{wide[31], wide[3:0]}") != std::string::npos);
+}
+
+static void rtlgenCastsBothSignedComparisonOperands() {
+    beir::Program program;
+    program.function_name = "signed_comparisons";
+    program.signals.push_back(beirSignal(0, "lhs", beirType(32)));
+    program.signals.push_back(beirSignal(1, "rhs", beirType(32)));
+
+    auto ge_vars = beirSignal(2, "ge_vars", beirType(1));
+    beir::Operation ge;
+    ge.kind = beir::OperationKind::Binary;
+    ge.op = beir::OpCode::Ge;
+    ge.type = beirType(1);
+    ge.operands = {beirSymbolOperand(0, beirType(32), true),
+                   beirSymbolOperand(1, beirType(32), true)};
+    ge_vars.driver = ge;
+    program.signals.push_back(ge_vars);
+
+    auto ge_zero = beirSignal(3, "ge_zero", beirType(1));
+    beir::Operand zero;
+    zero.kind = beir::OperandKind::Literal;
+    zero.type = beirType(32);
+    zero.constant.width = 32;
+    zero.constant.limbs = {0};
+    zero.constant.signed_view = true;
+    ge.operands = {beirSymbolOperand(0, beirType(32)), zero};
+    ge_zero.driver = ge;
+    program.signals.push_back(ge_zero);
+
+    program.signals.push_back(beirSignal(4, "small", beirType(8)));
+    auto mixed_width = beirSignal(5, "mixed_width", beirType(1));
+    ge.op = beir::OpCode::Lt;
+    ge.operands = {beirSymbolOperand(4, beirType(8), true),
+                   beirSymbolOperand(1, beirType(32))};
+    mixed_width.driver = ge;
+    program.signals.push_back(mixed_width);
+
+    const auto rtl = rtlgen::emitSystemVerilog(program);
+    CHECK(rtl.find("($signed(lhs) >= $signed(rhs))") != std::string::npos);
+    CHECK(rtl.find("($signed($unsigned(lhs)) >= $signed(32'h0))") != std::string::npos);
+    CHECK(rtl.find("($signed(32'($signed(small))) < $signed($unsigned(rhs)))") !=
+          std::string::npos);
 }
 
 static void rtlgenMultipliesWithIndependentSignedViews() {
@@ -703,6 +745,7 @@ static void rtlgenMultipliesWithIndependentSignedViews() {
 }
 
 int main() {
+    rtlgenCastsBothSignedComparisonOperands();
     rtlgenMultipliesWithIndependentSignedViews();
     rtlgenConnectsScalarPortElementsWithoutArraySelect();
     straightLineBuildsPortsAndOutputAssign();
