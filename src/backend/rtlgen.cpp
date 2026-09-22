@@ -908,6 +908,10 @@ private:
                 return portElementRef(ops[0], static_cast<std::size_t>(ops[1].constant.toU64()));
             }
             return operand(ops[0]) + "[" + operand(ops[1]) + "]";
+        case beir::OperationKind::AddCarry:
+            need(3);
+            return std::to_string(widthOf(op.type)) + "'((" + operand(ops[0]) + " + " +
+                   operand(ops[1]) + " + " + operand(ops[2]) + "))";
         case beir::OperationKind::Binary:
             need(2);
             {

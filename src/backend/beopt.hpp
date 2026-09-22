@@ -25,8 +25,8 @@ struct Options {
     // Predicate sinking participates in the main optimizer fixed point, while
     // this bound prevents it from dominating large graphs indefinitely.
     int max_predicate_iterations = 4;
-    std::size_t max_predicate_formulas = 1024;
-    std::size_t max_predicate_atoms = 64;
+    std::size_t max_predicate_formulas = 2048;
+    std::size_t max_predicate_atoms = 128;
     unsigned max_mux_branches = 8;
     unsigned max_tree_leaves = 32;
     unsigned max_bit_range_updates = 32;

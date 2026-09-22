@@ -35,6 +35,7 @@ enum class S1ExprKind {
 };
 
 enum class S1HardwareOp {
+    AddCarry,
     ZExt,
     SExt,
     Trunc,

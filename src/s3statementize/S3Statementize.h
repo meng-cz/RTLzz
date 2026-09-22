@@ -53,6 +53,7 @@ enum class BinaryOp {
 };
 
 enum class HardwareOp {
+    AddCarry,
     ZExt,
     SExt,
     Trunc,

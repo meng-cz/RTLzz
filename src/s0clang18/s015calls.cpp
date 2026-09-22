@@ -171,7 +171,8 @@ bool isSupportedFixintMemberAPI(const clang::CXXMemberCallExpr* expr,
 bool isSupportedRTLZZFreeAPI(const clang::FunctionDecl* function,
                              std::string& api_name) {
     api_name = unqualifiedName(function);
-    return api_name == "Cat" ||
+    return api_name == "AddCarry" ||
+           api_name == "Cat" ||
            api_name == "Repeat" ||
            api_name == "ReduceAnd" ||
            api_name == "ReduceOr" ||

@@ -591,6 +591,8 @@ inline bool narrowableOperation(const Operation& op) {
         return op.op == OpCode::BitNot || op.op == OpCode::Neg;
     case OperationKind::Binary:
         return lowBitClosedBinary(op.op) || op.op == OpCode::Shl || op.op == OpCode::Shr;
+    case OperationKind::AddCarry:
+        return true;
     default:
         return false;
     }
@@ -725,6 +727,9 @@ inline int assignedWidthFromOperation(const Program& program, const Operation& o
         if (op.op == OpCode::LogicNot) computed = 1;
         else computed = out_width;
         break;
+    case OperationKind::AddCarry:
+        computed = std::max(operand_width(0), operand_width(1)) + 2;
+        break;
     case OperationKind::Binary: {
         int lhs = operand_width(0);
         int rhs = operand_width(1);
@@ -854,6 +859,11 @@ inline void propagateDemand(const Program& program,
     case OperationKind::Unary:
         if (op.op == OpCode::BitNot || op.op == OpCode::Neg) low(0, need);
         else full(0);
+        return;
+    case OperationKind::AddCarry:
+        low(0, need);
+        low(1, need);
+        low(2, 1);
         return;
     case OperationKind::Binary:
         if (op.op == OpCode::Add || op.op == OpCode::Sub || op.op == OpCode::Mul ||
@@ -1002,7 +1012,11 @@ inline bool normalizeOperationOperands(Operation& op, Program& program, const st
         }
     };
 
-    if (op.kind == OperationKind::Binary && op.operands.size() >= 2) {
+    if (op.kind == OperationKind::AddCarry && op.operands.size() == 3) {
+        normalize_operand(0, out_width);
+        normalize_operand(1, out_width);
+        normalize_operand(2, 1);
+    } else if (op.kind == OperationKind::Binary && op.operands.size() >= 2) {
         if (op.op == OpCode::Add || op.op == OpCode::Sub) {
             int common = std::max(assigned_operand(0), assigned_operand(1));
             normalize_operand(0, common);

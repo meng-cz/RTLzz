@@ -97,6 +97,7 @@ enum class S7BinaryOp {
 };
 
 enum class S7HardwareOp {
+    AddCarry,
     ZExt,
     SExt,
     Trunc,

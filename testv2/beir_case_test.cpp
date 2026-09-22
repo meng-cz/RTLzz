@@ -88,6 +88,21 @@ static void constantPropagation() {
     CHECK(folded.operands[0].constant.toU64() == 22);
 }
 
+static void addCarryConstantPropagation() {
+    Program program;
+    Operation op;
+    op.kind = OperationKind::AddCarry;
+    op.type = {8, {}};
+    op.operands = {literal(255, 8), literal(0, 8), literal(1, 1)};
+    auto result = signal(program, "addcarry_result", 8, op);
+    MutableProgram graph(program);
+    graph.ensureValueFacts();
+    CHECK(graph.program().signal(result.node).value.constant);
+    CHECK(graph.program().signal(result.node).value.value.toU64() == 0);
+    CHECK(foldConstants(graph));
+    CHECK(graph.program().signal(result.node).driver->kind == OperationKind::Assign);
+}
+
 static void algebraicSimplification() {
     Program program;
     auto a = signal(program, "a", 1);
@@ -222,6 +237,7 @@ static void predicateContexts() {
 int main() {
     valueFacts();
     constantPropagation();
+    addCarryConstantPropagation();
     algebraicSimplification();
     widthPropagation();
     signedShiftRetainsSignBit();

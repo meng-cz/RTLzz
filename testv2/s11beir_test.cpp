@@ -627,6 +627,8 @@ static void sourcePipelineKeepsSignedShiftWidth() {
     for (const auto& line : result.output_codelines) rtl += line;
     CHECK(rtl.find("32'(($signed(signed_shift_lhs) >>> 32'h1))") != std::string::npos);
     CHECK(rtl.find("31'(($signed(signed_shift_lhs) >>>") == std::string::npos);
+    CHECK(rtl.find("8'((a + b + sel))") != std::string::npos);
+    CHECK(rtl.find("96'((wide_a + wide_b + sel))") != std::string::npos);
 }
 
 static void rtlgenMakesNarrowShiftsAndSignedTruncationExplicit() {

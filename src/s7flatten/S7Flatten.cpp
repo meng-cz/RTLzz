@@ -394,6 +394,7 @@ S7BinaryOp convertBinaryOp(BinaryOp op) {
 
 S7HardwareOp convertHardwareOp(HardwareOp op) {
     switch (op) {
+    case HardwareOp::AddCarry: return S7HardwareOp::AddCarry;
     case HardwareOp::ZExt: return S7HardwareOp::ZExt;
     case HardwareOp::SExt: return S7HardwareOp::SExt;
     case HardwareOp::Trunc: return S7HardwareOp::Trunc;
@@ -1280,6 +1281,7 @@ std::string binaryName(S7BinaryOp op) {
 
 std::string hardwareName(S7HardwareOp op) {
     switch (op) {
+    case S7HardwareOp::AddCarry: return "AddCarry";
     case S7HardwareOp::ZExt: return "ZExt";
     case S7HardwareOp::SExt: return "SExt";
     case S7HardwareOp::Trunc: return "Trunc";

@@ -201,7 +201,8 @@ bool isSupportedAPICallee(const Expr& expr) {
     if (expr.intrinsic != pred::v2::IntrinsicKind::None) return true;
     return callee == "at" || callee == "_at" || callee == "__slice" ||
            callee == "__bit" || callee == "range_at" || callee == "bit_at" ||
-           callee == "pick" || callee == "Cat" || callee == "cat" ||
+           callee == "pick" || callee == "AddCarry" ||
+           callee == "Cat" || callee == "cat" ||
            callee == "concat" || callee == "Repeat" || callee == "repeat" ||
            callee == "ReduceOr" || callee == "reduce_or" ||
            callee == "ReduceAnd" || callee == "reduce_and" ||

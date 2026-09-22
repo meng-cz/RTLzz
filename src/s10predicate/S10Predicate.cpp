@@ -180,6 +180,7 @@ std::string valueKindName(S10ValueKind kind) {
 std::string opName(S10OpKind kind) {
     switch (kind) {
     case S10OpKind::AssignCast: return "AssignCast";
+    case S10OpKind::AddCarry: return "AddCarry";
     case S10OpKind::Add: return "Add";
     case S10OpKind::Sub: return "Sub";
     case S10OpKind::Mul: return "Mul";

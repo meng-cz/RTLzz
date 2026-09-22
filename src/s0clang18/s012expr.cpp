@@ -550,7 +550,8 @@ ExprBuildResult buildFixintMemberCallExpr(const ExprBuildContext& context,
 
 bool isFixintFreeAPI(const clang::FunctionDecl* callee, std::string& api) {
     api = canonicalApiName(unqualifiedName(callee));
-    return api == "Cat" || api == "cat" || api == "concat" ||
+    return api == "AddCarry" ||
+           api == "Cat" || api == "cat" || api == "concat" ||
            api == "Repeat" || api == "repeat" ||
            api == "ReduceOr" || api == "reduce_or" ||
            api == "ReduceAnd" || api == "reduce_and" ||

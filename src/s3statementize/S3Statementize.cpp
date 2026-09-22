@@ -1652,6 +1652,7 @@ private:
     HardwareOp hardwareKind(s1apinorm::S1HardwareOp op) {
         using s1apinorm::S1HardwareOp;
         switch (op) {
+        case S1HardwareOp::AddCarry: return HardwareOp::AddCarry;
         case S1HardwareOp::ZExt: return HardwareOp::ZExt;
         case S1HardwareOp::SExt: return HardwareOp::SExt;
         case S1HardwareOp::Trunc: return HardwareOp::Trunc;
@@ -2345,6 +2346,7 @@ std::string binaryName(BinaryOp op) {
 
 std::string hardwareName(HardwareOp op) {
     switch (op) {
+    case HardwareOp::AddCarry: return "AddCarry";
     case HardwareOp::ZExt: return "ZExt";
     case HardwareOp::SExt: return "SExt";
     case HardwareOp::Trunc: return "Trunc";

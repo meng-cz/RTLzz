@@ -740,6 +740,14 @@ private:
                                    expr.to_width);
         }
 
+        if (callee == "AddCarry") {
+            if (args.size() != 3 || expr.type.width <= 1)
+                fail("AddCarry requires three operands and Width > 1", expr.debug_loc);
+            auto out = makeHardware(S1HardwareOp::AddCarry, expr.type, expr.debug_loc);
+            out->parts = std::move(args);
+            ++stats.normalized_calls;
+            return out;
+        }
         if (callee == "Cat" || callee == "cat" || callee == "concat") {
             ++stats.normalized_calls;
             return makeConcat(std::move(args));
@@ -854,6 +862,7 @@ const char* hardwareOpName(S1HardwareOp op) {
     case S1HardwareOp::DynamicWriteBit: return "DynamicWriteBit";
     case S1HardwareOp::Concat: return "Concat";
     case S1HardwareOp::Repeat: return "Repeat";
+    case S1HardwareOp::AddCarry: return "AddCarry";
     case S1HardwareOp::ReduceOr: return "ReduceOr";
     case S1HardwareOp::ReduceAnd: return "ReduceAnd";
     case S1HardwareOp::ReduceXor: return "ReduceXor";

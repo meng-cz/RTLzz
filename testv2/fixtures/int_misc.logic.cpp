@@ -39,6 +39,12 @@ bool sel;
 int32_t signed_shift_lhs;
 #pragma output_port arith_add
 Int<9> arith_add;
+#pragma output_port addcarry_bool
+Int<8> addcarry_bool;
+#pragma output_port addcarry_bit
+Int<8> addcarry_bit;
+#pragma output_port addcarry_wide
+Int<96> addcarry_wide;
 #pragma output_port arith_sub_neg
 Int<8> arith_sub_neg;
 #pragma output_port arith_mul
@@ -227,6 +233,9 @@ void hls_main() {
     Int<8> high = Int<8>(word.at<15, 8>());
 
     arith_add = a + b;
+    addcarry_bool = AddCarry<8>(a, b, sel);
+    addcarry_bit = AddCarry<8>(a, b, Int<1>(sel));
+    addcarry_wide = AddCarry<96>(wide_a, wide_b, Int<1>(sel));
     arith_sub_neg = -(a - b);
     arith_mul = a * b;
 

@@ -24,6 +24,7 @@ enum class OperandKind {
 enum class OperationKind {
     Assign,
     PortRead,
+    AddCarry,
     Binary,
     Unary,
     ArrayAccess,

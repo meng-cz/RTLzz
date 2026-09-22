@@ -1014,6 +1014,7 @@ std::string binaryName(BinaryOp op) {
 
 std::string hardwareName(HardwareOp op) {
     switch (op) {
+    case HardwareOp::AddCarry: return "AddCarry";
     case HardwareOp::ZExt: return "ZExt";
     case HardwareOp::SExt: return "SExt";
     case HardwareOp::Trunc: return "Trunc";

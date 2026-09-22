@@ -295,6 +295,7 @@ static const char* operationKindText(OperationKind kind) {
     switch (kind) {
     case OperationKind::Assign: return "assign";
     case OperationKind::PortRead: return "port_read";
+    case OperationKind::AddCarry: return "add_carry";
     case OperationKind::Binary: return "binary";
     case OperationKind::Unary: return "unary";
     case OperationKind::ArrayAccess: return "array_access";
@@ -983,6 +984,28 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
     }
     if (op.kind == OperationKind::Unary) {
         if (auto folded = factsInferUnaryConstant(op, operands, width)) return *folded;
+    }
+    if (op.kind == OperationKind::AddCarry && operands.size() == 3) {
+        if (operands[0].constant && operands[1].constant && operands[2].constant) {
+            auto lhs = factsResizeBits(operands[0].value.limbs, operands[0].width, width, false);
+            auto rhs = factsResizeBits(operands[1].value.limbs, operands[1].width, width, false);
+            auto carry = factsResizeBits(operands[2].value.limbs, operands[2].width, width, false);
+            auto sum = factsAddBits(factsAddBits(lhs, rhs, width), carry, width);
+            return factsConstantBits(sum, width, false);
+        }
+        // The third input can add one more carry bit beyond a+b.  Infer only
+        // high zeros that hold for every possible value of all three inputs.
+        auto possible_bits = [&](const ValueFacts& value) {
+            int bits = std::min(width, value.width);
+            while (bits > 0 && factsGetBit(value.known_zero, bits - 1)) --bits;
+            return bits;
+        };
+        int highest_possible = std::max({possible_bits(operands[0]),
+                                         possible_bits(operands[1]),
+                                         possible_bits(operands[2])}) + 2;
+        ValueFacts out = factsUnknown(width);
+        for (int bit = highest_possible; bit < width; ++bit) factsSetBit(out.known_zero, bit);
+        return out;
     }
     if (op.kind == OperationKind::Binary) {
         if (auto folded = factsInferBinaryConstant(op, operands, width)) return *folded;

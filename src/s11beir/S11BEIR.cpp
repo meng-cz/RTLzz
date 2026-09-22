@@ -88,6 +88,7 @@ std::string sanitizeNamePart(const std::string& text) {
 std::string opKindName(S10OpKind kind) {
     switch (kind) {
     case S10OpKind::AssignCast: return "assign_cast";
+    case S10OpKind::AddCarry: return "add_carry";
     case S10OpKind::Add: return "add";
     case S10OpKind::Sub: return "sub";
     case S10OpKind::Mul: return "mul";
@@ -650,6 +651,8 @@ struct Builder {
 
         if (source.kind == S10OpKind::AssignCast) {
             op.kind = beir::OperationKind::Cast;
+        } else if (source.kind == S10OpKind::AddCarry) {
+            op.kind = beir::OperationKind::AddCarry;
         } else if (isBinaryKind(source.kind)) {
             op.kind = beir::OperationKind::Binary;
             op.op = binaryOp(source.kind);
