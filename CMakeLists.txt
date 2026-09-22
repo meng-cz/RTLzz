@@ -94,7 +94,9 @@ target_include_directories(predicate-expand-objects PUBLIC
     ${CLANG_INCLUDE_DIRS}
 )
 
+find_package(Threads REQUIRED)
 target_link_libraries(predicate-expand-objects PUBLIC
+    Threads::Threads
     libclang
     clangTooling
     clangFrontend

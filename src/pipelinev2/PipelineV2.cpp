@@ -452,7 +452,9 @@ PipelineResult compile(const PipelineConfig& config) {
         current_debug_text = [&s5]() { return "latest successful stage: s5unroll\n" + s5unroll::debugPrint(*s5.program, s5.summaries); };
 
         report_frontend_stage("s6inline");
-        s6 = s6inline::inlineCFGProgram(*s5.program);
+        s6inline::InlineOptions inline_options;
+        inline_options.threads = config.threads;
+        s6 = s6inline::inlineCFGProgram(*s5.program, inline_options);
         if (!s6.ok()) return errorResult("s6inline", stageError(s6.error), stageContext(s6.error), current_debug_text);
         if (!s6.program) return errorResult("s6inline", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s6]() { return "latest successful stage: s6inline\n" + s6inline::debugPrint(*s6.program, s6.summaries); };
@@ -484,7 +486,9 @@ PipelineResult compile(const PipelineConfig& config) {
         current_debug_text = [&s9]() { return "latest successful stage: s9ssa\n" + s9ssa::debugPrint(*s9.program, s9.summaries); };
 
         report_frontend_stage("s10predicate");
-        s10 = s10predicate::lowerPredicates(*s9.program);
+        s10predicate::PredicateOptions predicate_options;
+        predicate_options.threads = config.threads;
+        s10 = s10predicate::lowerPredicates(*s9.program, predicate_options);
         if (!s10.ok()) return errorResult("s10predicate", stageError(s10.error), stageContext(s10.error), current_debug_text);
         if (!s10.program) return errorResult("s10predicate", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s10]() { return "latest successful stage: s10predicate\n" + s10predicate::debugPrint(*s10.program, s10.summaries); };
@@ -499,8 +503,9 @@ PipelineResult compile(const PipelineConfig& config) {
         current_debug_signals = [&s11]() { return rtlgen::collectDebugSignals(*s11.program, ""); };
 
         beir_program = *s11.program;
-        const beir::opt::Options optimization_options =
+        beir::opt::Options optimization_options =
             beir::opt::parseOptions(config.beopt_args);
+        optimization_options.threads = config.threads;
         beir_program = beir::opt::optimizeProgram(
             std::move(beir_program),
             optimization_options,

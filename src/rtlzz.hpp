@@ -69,6 +69,7 @@ struct CompileOptions {
     // Maximum number of scalar symbols produced by S7 flatten. Zero means no
     // artificial limit; memory and the internal SymbolId range remain bounds.
     std::size_t max_leaf_symbols = 0;
+    unsigned threads = 1;
     // Extra clang arguments passed through after rtlzz-managed arguments.
     std::vector<std::string> clang_args;
     // Additional include directories translated into clang -I arguments.
@@ -238,6 +239,7 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     config.clang_args = buildClangArgs(options);
     config.unroll_limit = options.unroll_limit;
     config.max_leaf_symbols = options.max_leaf_symbols;
+    config.threads = options.threads;
     config.beopt_args = options.beopt_args;
     config.progress_callback = options.progress_callback;
     switch (options.rtl_debug) {

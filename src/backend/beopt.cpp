@@ -127,7 +127,7 @@ Program optimizeProgram(Program program,
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
         if (options.predicate_sinking && iteration == iter_before_predicate_sinking) {
             changed = sinkPredicates(graph, {options.max_predicate_formulas,
-                                             options.max_predicate_atoms}) || changed;
+                                             options.max_predicate_atoms}, options.threads) || changed;
         }
     }
     // Structural rewrites have one canonical direction and run only once after

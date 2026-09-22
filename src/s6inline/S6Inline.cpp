@@ -1,4 +1,5 @@
 #include "s6inline/S6Inline.h"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <deque>
@@ -180,7 +181,7 @@ LValue symbolLValue(const SymbolInfo& symbol) {
     return out;
 }
 
-FunctionCFG cloneFunction(const FunctionCFG& input) {
+FunctionCFG cloneFunction(const FunctionCFG& input, unsigned threads) {
     FunctionCFG out;
     out.name = input.name;
     out.return_type = input.return_type;
@@ -191,9 +192,10 @@ FunctionCFG cloneFunction(const FunctionCFG& input) {
     out.loop_regions = input.loop_regions;
     out.return_slot = input.return_slot;
     out.return_slot_symbol = input.return_slot_symbol;
-    for (const auto& block : input.blocks) {
-        out.blocks.push_back(std::make_unique<BasicBlock>(*block));
-    }
+    out.blocks.resize(input.blocks.size());
+    parallelFor(input.blocks.size(), threads, [&](std::size_t i) {
+        out.blocks[i] = std::make_unique<BasicBlock>(*input.blocks[i]);
+    });
     return out;
 }
 
@@ -505,7 +507,7 @@ public:
         for (const auto& helper : input_.helpers) verifyNoLoops(helper);
         for (const auto& [_, lambda] : input_.lambdas) verifyNoLoops(lambda);
 
-        FunctionCFG top = cloneFunction(input_.top);
+        FunctionCFG top = cloneFunction(input_.top, options_.threads);
         inlineFunction(top, 0);
         verifyNoResidualCalls(top);
         verifyFunction(top);
@@ -621,7 +623,7 @@ private:
             fail("Recursive helper/lambda call graph reached S6");
         }
         stack_.push_back(key);
-        FunctionCFG fn = cloneFunction(*resolved.function);
+        FunctionCFG fn = cloneFunction(*resolved.function, options_.threads);
         inlineFunction(fn, depth + 1);
         verifyNoResidualCalls(fn);
         verifyFunction(fn);
@@ -695,7 +697,8 @@ private:
         bool needs_writeback = call_stmt.call_result.has_value() && !isVoidType(callee.return_type);
         auto* writeback = needs_writeback ? appendBlock(caller) : nullptr;
 
-        for (const auto& old_block : callee.blocks) {
+        parallelFor(callee.blocks.size(), options_.threads, [&](std::size_t i) {
+            const auto& old_block = callee.blocks[i];
             auto& clone = *caller.blocks[static_cast<std::size_t>(block_map.at(old_block->id))];
             clone.stmts.clear();
             clone.loop_stack.clear();
@@ -707,7 +710,7 @@ private:
             if (old_block->id == callee.exit) {
                 setJump(clone, writeback ? writeback->id : continuation->id);
             }
-        }
+        });
 
         if (needs_writeback) {
             if (callee.return_slot_symbol < 0) {
@@ -940,15 +943,17 @@ private:
         out.exit = fn.exit;
         out.return_slot = fn.return_slot;
         out.return_slot_symbol = fn.return_slot_symbol;
-        for (const auto& block : fn.blocks) {
+        out.blocks.resize(fn.blocks.size());
+        parallelFor(fn.blocks.size(), options_.threads, [&](std::size_t i) {
+            const auto& block = fn.blocks[i];
             auto converted = std::make_unique<InlinedBasicBlock>();
             converted->id = block->id;
             converted->stmts = block->stmts;
             converted->terminator = block->terminator;
             converted->successors = block->successors;
             converted->predecessors = block->predecessors;
-            out.blocks.push_back(std::move(converted));
-        }
+            out.blocks[i] = std::move(converted);
+        });
         return out;
     }
 

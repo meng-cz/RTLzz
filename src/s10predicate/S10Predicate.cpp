@@ -1,4 +1,5 @@
 #include "s10predicate/S10Predicate.h"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -673,28 +674,26 @@ void lowerPhi(Context& ctx,
     ++ctx.summary.lowered_phis;
 }
 
-void lowerStmt(Context& ctx,
+S10Definition lowerStmt(const S10PredicateProgram& program,
                const S9Stmt& stmt,
                BlockId block_id,
                const S10Operand& block_guard) {
     switch (stmt.kind) {
     case S9StmtKind::Assign:
-        ctx.output.definitions.push_back(makeAssign(stmt.target,
-                                                    mapOperand(ctx.output, stmt.value),
+        return makeAssign(stmt.target,
+                                                    mapOperand(program, stmt.value),
                                                     block_guard, stmt.debug_loc,
-                                                    block_id, stmt.debug_note));
-        break;
+                                                    block_id, stmt.debug_note);
     case S9StmtKind::Op: {
         S10Definition def;
         def.kind = S10DefKind::Op;
         def.debug_loc = stmt.debug_loc;
         def.guard = block_guard;
         def.target = stmt.target;
-        def.op = copyOperation(stmt.op, ctx.output);
+        def.op = copyOperation(stmt.op, program);
         def.source_block = block_id;
         def.debug_note = stmt.debug_note;
-        ctx.output.definitions.push_back(std::move(def));
-        break;
+        return def;
     }
     case S9StmtKind::Lookup: {
         S10Definition def;
@@ -702,16 +701,16 @@ void lowerStmt(Context& ctx,
         def.debug_loc = stmt.debug_loc;
         def.guard = block_guard;
         def.target = stmt.target;
-        def.lookup_index = mapOperand(ctx.output, stmt.lookup_index);
+        def.lookup_index = mapOperand(program, stmt.lookup_index);
         for (const auto& elem : stmt.lookup_elements) {
-            def.lookup_elements.push_back(mapOperand(ctx.output, elem));
+            def.lookup_elements.push_back(mapOperand(program, elem));
         }
         def.source_block = block_id;
         def.debug_note = stmt.debug_note;
-        ctx.output.definitions.push_back(std::move(def));
-        break;
+        return def;
     }
     }
+    fail("Invalid S9 statement kind");
 }
 
 bool isOutputPort(const S10Port& port) {
@@ -793,13 +792,27 @@ S10PredicateProgram lowerFunction(const S9SSACFG& fn,
         if (!block.reachable) ++ctx.summary.ignored_unreachable_blocks;
     }
 
+    struct StatementWork {
+        const S9Stmt* stmt;
+        BlockId block;
+        std::size_t definition;
+    };
+    std::vector<StatementWork> statements;
     for (BlockId block_id : cfg.topo) {
         const auto& block = fn.blocks[static_cast<std::size_t>(block_id)];
         if (!block.reachable) continue;
-        S10Operand block_guard = guardForBlock(guards, block_id);
         for (const auto& phi : block.phis) lowerPhi(ctx, phi, block_id, guards);
-        for (const auto& stmt : block.stmts) lowerStmt(ctx, stmt, block_id, block_guard);
+        for (const auto& stmt : block.stmts) {
+            statements.push_back({&stmt, block_id, ctx.output.definitions.size()});
+            ctx.output.definitions.emplace_back();
+        }
     }
+    // All generated IDs and definition slots are fixed before workers start.
+    parallelFor(statements.size(), options.threads, [&](std::size_t i) {
+        const auto& work = statements[i];
+        ctx.output.definitions[work.definition] = lowerStmt(
+            ctx.output, *work.stmt, work.block, guardForBlock(guards, work.block));
+    });
 
     for (auto& port : ctx.output.ports) {
         if (isOutputPort(port) && !port.final_value) {

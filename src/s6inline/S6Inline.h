@@ -64,6 +64,7 @@ struct InlineOptions {
     bool debug_print = false;
     int max_inline_depth = 128;
     int max_cloned_blocks = 100000;
+    unsigned threads = 1;
 };
 
 struct InlineSummary {

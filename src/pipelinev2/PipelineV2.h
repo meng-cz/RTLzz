@@ -29,6 +29,7 @@ struct PipelineConfig {
     std::string top_function;
     std::vector<std::string> clang_args;
     int unroll_limit = 1024;
+    unsigned threads = 1;
     // Zero means no artificial S7 leaf-symbol limit.
     std::size_t max_leaf_symbols = 0;
     std::vector<std::string> beopt_args;
