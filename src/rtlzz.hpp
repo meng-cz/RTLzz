@@ -81,6 +81,10 @@ struct CompileOptions {
     std::function<void(const std::string&)> progress_callback;
     // Optional RTL debug data. None avoids building API debug payloads.
     RtlDebugMode rtl_debug = RtlDebugMode::None;
+    // Return declarations and statements for an existing module instead of a
+    // complete module. Bind RTLZZ port names to containing-module signals.
+    bool rtl_module_body = false;
+    std::vector<std::pair<std::string, std::string>> rtl_port_bindings;
 };
 
 struct CompileResult {
@@ -240,6 +244,8 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     config.max_leaf_symbols = options.max_leaf_symbols;
     config.beopt_args = options.beopt_args;
     config.progress_callback = options.progress_callback;
+    config.rtl_module_body = options.rtl_module_body;
+    config.rtl_port_bindings = options.rtl_port_bindings;
     switch (options.rtl_debug) {
     case RtlDebugMode::None:
         config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::None;

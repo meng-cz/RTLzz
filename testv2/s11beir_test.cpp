@@ -631,6 +631,31 @@ static void sourcePipelineKeepsSignedShiftWidth() {
     CHECK(rtl.find("96'((wide_a + wide_b + sel))") != std::string::npos);
 }
 
+static void sourcePipelineEmitsModuleBody() {
+    rtlzz::CompileOptions options;
+    options.source_name = "module_body.logic.cpp";
+    options.source_codelines = {
+        "#include <fixint.hpp>\n",
+        "#pragma input_port source\nInt<8> source;\n",
+        "#pragma output_port result\nInt<8> result;\n",
+        "void hls_main() { result = source + Int<8>(1); }\n",
+    };
+    options.vullib_dir = "third_party/vulsim/vullib";
+    options.top_function = "hls_main";
+    options.rtl_module_body = true;
+    options.rtl_port_bindings = {{"source", "external_source"},
+                                 {"result", "external_result"}};
+    auto generated = rtlzz::compileToRtl(std::move(options));
+    if (!generated.ok()) std::cerr << generated.error << "\n";
+    CHECK(generated.ok());
+    std::string body;
+    for (const auto& line : generated.output_codelines) body += line;
+    CHECK(body.find("module ") == std::string::npos);
+    CHECK(body.find("endmodule") == std::string::npos);
+    CHECK(body.find("assign source = external_source;") != std::string::npos);
+    CHECK(body.find("assign external_result = result;") != std::string::npos);
+}
+
 static void rtlgenMakesNarrowShiftsAndSignedTruncationExplicit() {
     beir::Program program;
     program.function_name = "width_lowering";
@@ -737,6 +762,7 @@ int main() {
     sourcePipelineRunsThroughBEIR();
     sourcePipelinePreservesArrayPortGroupsInBEIR();
     sourcePipelineKeepsSignedShiftWidth();
+    sourcePipelineEmitsModuleBody();
     rtlgenMakesNarrowShiftsAndSignedTruncationExplicit();
     return 0;
 }

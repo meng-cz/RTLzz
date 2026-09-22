@@ -200,6 +200,42 @@ public:
         return os.str();
     }
 
+    std::string emitBody(const std::vector<std::pair<std::string, std::string>>& bindings) {
+        std::unordered_map<std::string, std::string> bound_ports;
+        for (const auto& [port, expression] : bindings) {
+            if (!bound_ports.emplace(port, expression).second)
+                throw std::runtime_error("rtlgen duplicate module-body port binding: " + port);
+        }
+        std::ostringstream os;
+        prepareConstantLookups();
+        for (const auto& port : program_.ports) {
+            auto it = bound_ports.find(port.name);
+            if (it == bound_ports.end())
+                throw std::runtime_error("rtlgen missing module-body port binding: " + port.name);
+            if (it->second.empty())
+                throw std::runtime_error("rtlgen empty module-body port binding: " + port.name);
+            if (it->second == sanitizeIdentifier(port.name)) continue;
+            os << "    " << logicType(port.type) << sanitizeIdentifier(port.name)
+               << unpackedDims(port.type) << ";" << debugComment(portDebug(port)) << "\n";
+        }
+        os << "\n";
+        emitSignalDecls(os);
+        emitConstantLookupFunctions(os);
+        for (const auto& port : program_.ports) {
+            const auto& external = bound_ports.at(port.name);
+            const auto local = sanitizeIdentifier(port.name);
+            if (external == local) continue;
+            if (port.direction == beir::PortDirection::Output)
+                os << "    assign " << external << " = " << local << ";\n";
+            else
+                os << "    assign " << local << " = " << external << ";\n";
+        }
+        os << "\n";
+        emitPortElementConnections(os);
+        emitSignalAssignments(os);
+        return os.str();
+    }
+
     std::string emitDebugReport() {
         std::ostringstream os;
         os << "rtlzz rtl debug report\n";
@@ -1158,6 +1194,12 @@ private:
 
 std::string emitSystemVerilog(const beir::Program& program) {
     return Emitter(program).emit();
+}
+
+std::string emitSystemVerilogBody(
+    const beir::Program& program,
+    const std::vector<std::pair<std::string, std::string>>& port_bindings) {
+    return Emitter(program).emitBody(port_bindings);
 }
 
 std::vector<RtlDebugSignal> collectDebugSignals(const beir::Program& program,

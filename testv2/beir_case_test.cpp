@@ -192,6 +192,20 @@ static void rtlEmission() {
     CHECK(emitText(program).find("driver case") != std::string::npos);
 }
 
+static void moduleBodyEmission() {
+    Program program;
+    program.function_name = "inner_logic";
+    program.ports.push_back({"input_port", PortDirection::Input, {8, {}}, {}});
+    program.ports.push_back({"output_port", PortDirection::Output, {8, {}}, {}});
+    const std::string body = pred::rtlgen::emitSystemVerilogBody(
+        program, {{"input_port", "register_data"}, {"output_port", "output_port"}});
+    CHECK(body.find("module ") == std::string::npos);
+    CHECK(body.find("endmodule") == std::string::npos);
+    CHECK(body.find("logic [7:0] input_port;") != std::string::npos);
+    CHECK(body.find("assign input_port = register_data;") != std::string::npos);
+    CHECK(body.find("logic [7:0] output_port;") == std::string::npos);
+}
+
 static void graphOptimizations() {
     Program program;
     auto condition = signal(program, "condition", 1);
@@ -242,6 +256,7 @@ int main() {
     widthPropagation();
     signedShiftRetainsSignBit();
     rtlEmission();
+    moduleBodyEmission();
     graphOptimizations();
     predicateContexts();
     std::cout << "BEIR case tests passed\n";

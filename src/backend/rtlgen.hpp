@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace pred::rtlgen {
 
@@ -29,6 +30,11 @@ struct RtlDebugSignal {
 };
 
 std::string emitSystemVerilog(const beir::Program& program);
+// Emit declarations and statements for insertion into an existing module.
+// Each binding maps an RTLZZ port name to a signal in the containing module.
+std::string emitSystemVerilogBody(
+    const beir::Program& program,
+    const std::vector<std::pair<std::string, std::string>>& port_bindings);
 std::vector<RtlDebugSignal> collectDebugSignals(const beir::Program& program,
                                                 const std::string& rtl_text);
 std::string emitDebugReport(const beir::Program& program,

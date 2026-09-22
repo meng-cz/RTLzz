@@ -525,7 +525,9 @@ PipelineResult compile(const PipelineConfig& config) {
             result.output_text = beir::emitText(beir_program);
             break;
         case OutputKind::Rtl:
-            result.output_text = rtlgen::emitSystemVerilog(beir_program);
+            result.output_text = config.rtl_module_body
+                ? rtlgen::emitSystemVerilogBody(beir_program, config.rtl_port_bindings)
+                : rtlgen::emitSystemVerilog(beir_program);
             if (config.rtl_debug_output == RtlDebugOutputKind::Structured) {
                 result.rtl_debug_signals =
                     rtlgen::collectDebugSignals(beir_program, result.output_text);
