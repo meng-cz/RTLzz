@@ -35,6 +35,8 @@ Int<96> wide_b;
 Int<6> wide_sh;
 #pragma input_port sel
 bool sel;
+#pragma input_port signed_shift_lhs
+int32_t signed_shift_lhs;
 #pragma output_port arith_add
 Int<9> arith_add;
 #pragma output_port arith_sub_neg
@@ -57,6 +59,8 @@ Int<8> bit_not_mix;
 Int<8> shift_logical;
 #pragma output_port shift_signed
 Int<8> shift_signed;
+#pragma output_port signed_shift_result
+Int<32> signed_shift_result;
 #pragma output_port cmp_unsigned
 bool cmp_unsigned;
 #pragma output_port cmp_signed
@@ -210,6 +214,10 @@ void test_pick_writes() {
     pick_full = edges;
 }
 
+int32_t signed_shift_identity(int32_t value) {
+    return value;
+}
+
 void hls_main() {
     constexpr int LOW_BITS = 8;
     constexpr int MID_LO = 8;
@@ -227,6 +235,8 @@ void hls_main() {
 
     shift_logical = a >> sh;
     shift_signed = a.sint() >> sh;
+    int32_t signed_value = signed_shift_identity(signed_shift_lhs);
+    signed_shift_result = Int<32>((signed_value >> 1) - 32);
 
     cmp_unsigned = a > b;
     cmp_signed = a.sint() < b.sint();

@@ -12,9 +12,11 @@
 #include "s9ssa/S9SSA.h"
 #include "s10predicate/S10Predicate.h"
 #include "s11beir/S11BEIR.h"
+#include "rtlzz.hpp"
 
 #include <cstdlib>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -607,6 +609,26 @@ static void sourcePipelinePreservesArrayPortGroupsInBEIR() {
     CHECK(selected->element_nodes.size() == 1);
 }
 
+static void sourcePipelineKeepsSignedShiftWidth() {
+    const std::string path = "testv2/fixtures/int_misc.logic.cpp";
+    std::ifstream input(path);
+    CHECK(input.good());
+    const std::string source((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+    rtlzz::CompileOptions options;
+    options.source_name = path;
+    options.source_codelines = {source};
+    options.vullib_dir = "third_party/vulsim/vullib";
+    options.top_function = "hls_main";
+    auto result = rtlzz::compileToRtl(std::move(options));
+    if (!result.ok()) std::cerr << result.error << "\n";
+    CHECK(result.ok());
+    std::string rtl;
+    for (const auto& line : result.output_codelines) rtl += line;
+    CHECK(rtl.find("32'(($signed(signed_shift_lhs) >>> 32'h1))") != std::string::npos);
+    CHECK(rtl.find("31'(($signed(signed_shift_lhs) >>>") == std::string::npos);
+}
+
 static void rtlgenMakesNarrowShiftsAndSignedTruncationExplicit() {
     beir::Program program;
     program.function_name = "width_lowering";
@@ -662,7 +684,7 @@ static void rtlgenMakesNarrowShiftsAndSignedTruncationExplicit() {
 
     // Direct Int<W> simulation totalizes oversized shifts to zero, including
     // arithmetic right shifts of negative values.
-    CHECK(rtl.find("shift >= 6'd32 ? 17'h0 : 17'(($signed(wide) >>> shift))") !=
+    CHECK(rtl.find("shift >= 6'd32 ? 17'h0 : 17'(32'(($signed(wide) >>> shift)))") !=
           std::string::npos);
 
     // Unsigned truncation is a low-bit slice.  Signed truncation additionally
@@ -712,6 +734,7 @@ int main() {
     groupedOutputArrayBuildsBEIRArrayPort();
     sourcePipelineRunsThroughBEIR();
     sourcePipelinePreservesArrayPortGroupsInBEIR();
+    sourcePipelineKeepsSignedShiftWidth();
     rtlgenMakesNarrowShiftsAndSignedTruncationExplicit();
     return 0;
 }

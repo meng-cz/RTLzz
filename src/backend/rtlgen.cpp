@@ -945,6 +945,11 @@ private:
                 // Make that truncation explicit instead of relying on the
                 // assignment target to discard high bits.
                 const int lhs_width = widthOf(ops[0].type);
+                if (op.op == beir::OpCode::Shr && signed_context) {
+                    // Size at the source width before any result narrowing, so
+                    // the signed shift retains its sign bit and sign fill.
+                    value = std::to_string(lhs_width) + "'(" + value + ")";
+                }
                 value = resizeExpr(value, lhs_width, widthOf(op.type), false);
 
                 // Int<W> defines every shift by an amount >= W as zero.  This
