@@ -148,7 +148,6 @@ struct PredicateError {
 struct PredicateOptions {
     bool debug_print = false;
     int max_values = 300000;
-    unsigned threads = 1;
 };
 
 struct PredicateSummary {

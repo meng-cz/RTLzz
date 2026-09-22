@@ -746,14 +746,10 @@ inline int assignedWidthFromOperation(const Program& program, const Operation& o
                 : out_width;
         } else if (op.op == OpCode::Shr && op.operands.size() >= 2) {
             std::uint64_t amount = 0;
-            if (op.operands[0].signed_view || op.operands[0].constant.signed_view) {
-                computed = lhs; // Sign-fill retains the original high bit.
-            } else if (literalU64(op.operands[1], amount) &&
-                       amount <= static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-                computed = std::max(1, lhs - static_cast<int>(amount));
-            } else {
-                computed = out_width;
-            }
+            computed = literalU64(op.operands[1], amount) &&
+                       amount <= static_cast<std::uint64_t>(std::numeric_limits<int>::max())
+                ? std::max(1, lhs - static_cast<int>(amount))
+                : out_width;
         }
         break;
     }
@@ -876,10 +872,7 @@ inline void propagateDemand(const Program& program,
             std::uint64_t amount = 0;
             if (literalU64(op.operands[1], amount) &&
                 amount <= static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-                if (op.operands[0].signed_view || op.operands[0].constant.signed_view)
-                    full(0); // The original sign bit supplies every shifted-in bit.
-                else
-                    low(0, need + static_cast<int>(amount));
+                low(0, need + static_cast<int>(amount));
                 full(1);
                 return;
             }

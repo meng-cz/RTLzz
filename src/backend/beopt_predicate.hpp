@@ -1,5 +1,4 @@
 #pragma once
-#include "parallel.hpp"
 
 #include "backend/beir.hpp"
 
@@ -1046,8 +1045,7 @@ inline std::optional<bool> guardedDefaultSelection(const Operation& op,
 } // namespace predicate_detail
 
 inline bool sinkPredicates(MutableProgram& graph,
-                           predicate_detail::PredicateLimits limits = {},
-                           unsigned threads = 1) {
+                           predicate_detail::PredicateLimits limits = {}) {
     Program& program = graph.program();
     const auto unconditional = predicate_detail::unconditionallyReachable(graph);
     std::vector<bool> candidates(program.signals.size(), false);
@@ -1079,28 +1077,18 @@ inline bool sinkPredicates(MutableProgram& graph,
     for (NodeId id : ranked_candidates) selected_candidates[id] = true;
     const predicate_detail::PredicateDemandIndex demand_index(
         program, contexts, ranked_candidates, support, limits.max_contexts_per_candidate);
+    predicate_detail::SnapshotPredicateRelations relations(program, limits);
     std::vector<std::pair<NodeId, bool>> rewrites;
-    std::vector<NodeId> proof_candidates;
     for (const auto& signal : program.signals) {
         if (!selected_candidates[signal.id] ||
             contexts[signal.id].size() > limits.max_contexts_per_candidate) {
             continue;
         }
         if (!demand_index.mayBenefitFromProof(signal.id)) continue;
-        proof_candidates.push_back(signal.id);
+        const auto selected = predicate_detail::guardedDefaultSelection(
+            *signal.driver, contexts[signal.id], relations);
+        if (selected) rewrites.emplace_back(signal.id, *selected);
     }
-    std::vector<std::optional<bool>> selections(proof_candidates.size());
-    parallelRanges(proof_candidates.size(), threads, 4,
-                   [&](std::size_t begin, std::size_t end) {
-        predicate_detail::SnapshotPredicateRelations relations(program, limits);
-        for (auto i = begin; i < end; ++i) {
-            const auto id = proof_candidates[i];
-            selections[i] = predicate_detail::guardedDefaultSelection(
-                *program.signal(id).driver, contexts[id], relations);
-        }
-    });
-    for (std::size_t i = 0; i < proof_candidates.size(); ++i)
-        if (selections[i]) rewrites.emplace_back(proof_candidates[i], *selections[i]);
     for (const auto& [id, take_true] : rewrites) {
         Signal& signal = program.signal(id);
         Operation& op = *signal.driver;

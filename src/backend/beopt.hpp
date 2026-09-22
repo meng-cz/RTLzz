@@ -31,7 +31,6 @@ struct Options {
     unsigned max_tree_leaves = 32;
     unsigned max_bit_range_updates = 32;
     unsigned max_bit_compose_pieces = 64;
-    unsigned threads = 1;
 };
 
 Options parseOptions(const std::vector<std::string>& values);

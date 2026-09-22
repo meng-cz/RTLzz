@@ -188,7 +188,6 @@ done
 ### `src/s6inline/S6Inline.cpp`
 - 在 CFG 层 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation。
 - 支持 helper/lambda、多级调用、重载、loop body 内调用和递归检测。
-- 重映射比较、乘法、算术右移和 cast 的操作数时保留使用点 signed_view，避免内联后丢失有符号语义。
 - `ConstRef` 的 lvalue 实参直接绑定为 caller lvalue alias；全局输入端口提升出的只读聚合参数不会在每个 helper 调用点复制并于 S7 重复展平。rvalue const-ref 仍创建独立存储。
 
 ### `src/s6inline/checklist.md`
@@ -302,13 +301,13 @@ done
 - branchContext 保留全部父路径事实；下沉前先排除存在无条件使用路径的 Ite，只向可能到达候选 Ite 的信号传播 demand-context，并以 guard/路径条件的布尔原子或比较选择变量交集廉价筛选 SAT 查询。对保留的路径不按事实数或上下文数截断；Case 条件、分支值和默认值按有序剩余路径传播上下文。同一图快照复用查询结果，图修改后不复用。
 
 ### `src/backend/beopt_width.hpp`
-- width 相关优化和裁剪；有符号右移保留原始符号位及其需求，不按逻辑右移缩窄；支持 operand signed view 影响的扩展语义；Case 的结果宽度取所有分支值与默认值的合并需求，条件保持一位，结果需求反向传播到每个值分支。
+- width 相关优化和裁剪；支持 operand signed view 影响的扩展语义；Case 的结果宽度取所有分支值与默认值的合并需求，条件保持一位，结果需求反向传播到每个值分支。
 
 ### `src/backend/rtlgen.hpp`
 - 声明 SystemVerilog emitter。
 
 ### `src/backend/rtlgen.cpp`
-- 将 BEIR program emit 为 synthesizable SystemVerilog；有符号比较将两侧独立扩展后转为有符号表达式，算术右移用尺寸转换隔离三元超范围移位保护的无符号上下文。
+- 将 BEIR program emit 为 synthesizable SystemVerilog。
 - 乘法分别按左右操作数的 signed view 扩展/截断到结果位宽，再以无符号位模式相乘并显式截断，保证混合符号语义不依赖 BEOPT。
 - 支持 scalar/array ports、BEIR lookup、assign/operation lowering。
 - 原生 BEIR Case 输出为带完整 default 的 `always_comb case (1'b1)`，保持首真分支优先语义。
@@ -426,7 +425,7 @@ done
 - 独立 BEIR 求值器验证 mux 到 Case 的默认值和等价性、非互斥拒绝、8 输入结合树及模加法语义；覆盖完整父上下文、查询失效、共享节点、位宽边界、晚到输入、下沉后再次简化及选项解析。
 
 ### `testv2/beir_case_test.cpp`
-- 构造原生 Case 验证首真分支布局、共同已知位和值事实、常量传播、恒真/恒假和同值代数折叠、位宽需求传播、谓词分支上下文、CSE/DCE、BEIR 文本及 `always_comb case` RTL 发射；另验证有符号右移不丢符号位。
+- 构造原生 Case 验证首真分支布局、共同已知位和值事实、常量传播、恒真/恒假和同值代数折叠、位宽需求传播、谓词分支上下文、CSE/DCE、BEIR 文本及 `always_comb case` RTL 发射。
 
 ### `testv2/beopt_boolean_test.cpp`
 - 对短路 phi、guard/fallback、吸收律和 consensus 构造小型 BEIR 并穷举输入验证等价性；确认普通优先级 Ite 不被改写。
@@ -436,9 +435,6 @@ done
 
 ### `testv2/fixtures/branch_decision.logic.cpp`
 - 软件风格控制转移判断 fixture：外层 legal/jal/jalr/branch 条件、六路 if/else-if 分支比较、布尔变量反复赋值，以及 JALR/PC target 选择；覆盖有符号和无符号 64 位比较。
-
-### `testv2/fixtures/signed_compare_shift.logic.cpp`
-- 经 helper 内联的 int32_t 变量比较、零/负常量比较与算术右移；用于有符号 lowering 的 RTL/C++ 差分和 FPU 缺陷回归。
 
 ### `testv2/branch_decision_analysis.md`
 - 记录该 fixture 的语义差分和结构深度结果：完整路径 guard 可证明互斥，taken 的六级串行更新被一个原生 Case 替代；布尔归一化继续移除一位短路/phi Ite，使 control_valid 与 taken 的 Ite 深度降为 0。

@@ -135,35 +135,6 @@ static void widthPropagation() {
     CHECK(narrowed.driver->operands[2].type.width == 4);
 }
 
-static void signedShiftRetainsSignBit() {
-    Program program;
-    program.function_name = "signed_shift_width";
-    auto input = signal(program, "input_value", 32);
-    input.signed_view = true;
-    Operation shift_op;
-    shift_op.kind = OperationKind::Binary;
-    shift_op.op = OpCode::Shr;
-    shift_op.type = {32, {}};
-    shift_op.operands = {input, literal(1, 32)};
-    auto shifted = signal(program, "shifted", 32, shift_op);
-    Operation assign;
-    assign.kind = OperationKind::Assign;
-    assign.type = {32, {}};
-    assign.operands = {shifted};
-    auto output = signal(program, "output", 32, assign);
-    program.outputs.push_back(output.text);
-
-    MutableProgram graph(program);
-    simplifyWidthOperations(graph);
-    const auto& result = graph.program().signal(shifted.node);
-    CHECK(result.type.width == 32);
-    CHECK(result.driver->kind == OperationKind::Binary);
-    CHECK(result.driver->op == OpCode::Shr);
-    CHECK(result.driver->operands[0].signed_view);
-    const std::string rtl = pred::rtlgen::emitSystemVerilog(graph.program());
-    CHECK(rtl.find("32'(($signed(input_value) >>> 32'h1))") != std::string::npos);
-}
-
 static void rtlEmission() {
     Program program;
     program.function_name = "case_test";
@@ -224,7 +195,6 @@ int main() {
     constantPropagation();
     algebraicSimplification();
     widthPropagation();
-    signedShiftRetainsSignBit();
     rtlEmission();
     graphOptimizations();
     predicateContexts();

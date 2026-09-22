@@ -1,5 +1,4 @@
 #include "s6inline/S6Inline.h"
-#include "parallel.hpp"
 
 #include <algorithm>
 #include <deque>
@@ -181,7 +180,7 @@ LValue symbolLValue(const SymbolInfo& symbol) {
     return out;
 }
 
-FunctionCFG cloneFunction(const FunctionCFG& input, unsigned threads) {
+FunctionCFG cloneFunction(const FunctionCFG& input) {
     FunctionCFG out;
     out.name = input.name;
     out.return_type = input.return_type;
@@ -192,10 +191,9 @@ FunctionCFG cloneFunction(const FunctionCFG& input, unsigned threads) {
     out.loop_regions = input.loop_regions;
     out.return_slot = input.return_slot;
     out.return_slot_symbol = input.return_slot_symbol;
-    out.blocks.resize(input.blocks.size());
-    parallelFor(input.blocks.size(), threads, [&](std::size_t i) {
-        out.blocks[i] = std::make_unique<BasicBlock>(*input.blocks[i]);
-    });
+    for (const auto& block : input.blocks) {
+        out.blocks.push_back(std::make_unique<BasicBlock>(*block));
+    }
     return out;
 }
 
@@ -258,8 +256,7 @@ LValue applyLValueBinding(const FunctionCFG& fn, const LValue& input, const Symb
     return out;
 }
 
-Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input,
-                            const SymbolMap& map, bool preserve_signed_view = false);
+Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input, const SymbolMap& map);
 
 void remapLValueAccessOperands(const FunctionCFG& fn, LValue& value, const SymbolMap& map) {
     for (auto& access : value.accesses) {
@@ -269,29 +266,22 @@ void remapLValueAccessOperands(const FunctionCFG& fn, LValue& value, const Symbo
     }
 }
 
-Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input,
-                            const SymbolMap& map, bool preserve_signed_view) {
+Operand applyOperandBinding(const FunctionCFG& fn, const Operand& input, const SymbolMap& map) {
     if (input.kind == OperandKind::Var) {
         auto found = map.find(input.var_symbol);
         if (found == map.end()) return input;
         const auto& binding = found->second;
         if (binding.kind == SymbolBinding::Kind::FreshSymbol) {
-            Operand result = varOperand(symbolInfo(fn, binding.symbol));
-            result.signed_view = preserve_signed_view && input.signed_view;
-            return result;
+            return varOperand(symbolInfo(fn, binding.symbol));
         }
         LValue alias = cloneLValue(binding.alias);
         remapLValueAccessOperands(fn, alias, map);
-        Operand result = lvalueOperand(std::move(alias));
-        result.signed_view = preserve_signed_view && input.signed_view;
-        return result;
+        return lvalueOperand(std::move(alias));
     }
     if (input.kind == OperandKind::LValueRead) {
         LValue lv = applyLValueBinding(fn, input.lvalue, map);
         remapLValueAccessOperands(fn, lv, map);
-        Operand result = lvalueOperand(std::move(lv));
-        result.signed_view = preserve_signed_view && input.signed_view;
-        return result;
+        return lvalueOperand(std::move(lv));
     }
     return input;
 }
@@ -328,17 +318,8 @@ S3StmtPtr remapStmt(const FunctionCFG& fn, const S3StmtPtr& stmt, const SymbolMa
     }
     out->target = remapLValue(fn, stmt->target, map);
     out->value = applyOperandBinding(fn, stmt->value, map);
-    for (std::size_t index = 0; index < out->op.operands.size(); ++index) {
-        bool preserve_signed_view = out->op.kind == OpExpr::Kind::Cast && index == 0;
-        if (out->op.kind == OpExpr::Kind::Binary) {
-            const BinaryOp op = out->op.binary_op;
-            preserve_signed_view = op == BinaryOp::Mul ||
-                op == BinaryOp::Lt || op == BinaryOp::Le ||
-                op == BinaryOp::Gt || op == BinaryOp::Ge ||
-                (op == BinaryOp::Shr && index == 0);
-        }
-        out->op.operands[index] = applyOperandBinding(
-            fn, out->op.operands[index], map, preserve_signed_view);
+    for (auto& operand : out->op.operands) {
+        operand = applyOperandBinding(fn, operand, map);
     }
     if (stmt->call_result) out->call_result = remapLValue(fn, stmt->call_result.value(), map);
     for (auto& arg : out->args) arg = applyOperandBinding(fn, arg, map);
@@ -524,7 +505,7 @@ public:
         for (const auto& helper : input_.helpers) verifyNoLoops(helper);
         for (const auto& [_, lambda] : input_.lambdas) verifyNoLoops(lambda);
 
-        FunctionCFG top = cloneFunction(input_.top, options_.threads);
+        FunctionCFG top = cloneFunction(input_.top);
         inlineFunction(top, 0);
         verifyNoResidualCalls(top);
         verifyFunction(top);
@@ -640,7 +621,7 @@ private:
             fail("Recursive helper/lambda call graph reached S6");
         }
         stack_.push_back(key);
-        FunctionCFG fn = cloneFunction(*resolved.function, options_.threads);
+        FunctionCFG fn = cloneFunction(*resolved.function);
         inlineFunction(fn, depth + 1);
         verifyNoResidualCalls(fn);
         verifyFunction(fn);
@@ -714,8 +695,7 @@ private:
         bool needs_writeback = call_stmt.call_result.has_value() && !isVoidType(callee.return_type);
         auto* writeback = needs_writeback ? appendBlock(caller) : nullptr;
 
-        parallelFor(callee.blocks.size(), options_.threads, [&](std::size_t i) {
-            const auto& old_block = callee.blocks[i];
+        for (const auto& old_block : callee.blocks) {
             auto& clone = *caller.blocks[static_cast<std::size_t>(block_map.at(old_block->id))];
             clone.stmts.clear();
             clone.loop_stack.clear();
@@ -727,7 +707,7 @@ private:
             if (old_block->id == callee.exit) {
                 setJump(clone, writeback ? writeback->id : continuation->id);
             }
-        });
+        }
 
         if (needs_writeback) {
             if (callee.return_slot_symbol < 0) {
@@ -960,17 +940,15 @@ private:
         out.exit = fn.exit;
         out.return_slot = fn.return_slot;
         out.return_slot_symbol = fn.return_slot_symbol;
-        out.blocks.resize(fn.blocks.size());
-        parallelFor(fn.blocks.size(), options_.threads, [&](std::size_t i) {
-            const auto& block = fn.blocks[i];
+        for (const auto& block : fn.blocks) {
             auto converted = std::make_unique<InlinedBasicBlock>();
             converted->id = block->id;
             converted->stmts = block->stmts;
             converted->terminator = block->terminator;
             converted->successors = block->successors;
             converted->predecessors = block->predecessors;
-            out.blocks[i] = std::move(converted);
-        });
+            out.blocks.push_back(std::move(converted));
+        }
         return out;
     }
 
