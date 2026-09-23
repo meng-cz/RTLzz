@@ -90,6 +90,56 @@ inline bool foldSameGuardMux(Operation& op, MutableProgram& graph) {
     return false;
 }
 
+inline bool foldEquivalentStaticBitOperation(Operation& op, MutableProgram& graph) {
+    const ValueType type = op.type;
+    if (type.isArray() || type.width <= 0) return false;
+    Operand replacement;
+    const char* reason = nullptr;
+    if (op.kind == OperationKind::Slice && op.operands.size() == 1 &&
+        op.lo == 0 && op.hi == type.width - 1 &&
+        sameValueType(op.operands[0].type, type)) {
+        replacement = op.operands[0];
+        reason = "folded full-width static slice in assign chain";
+    } else if (op.kind == OperationKind::BitSelect && op.operands.size() == 1 &&
+               type.width == 1 && op.bit == 0 &&
+               op.operands[0].type.width == 1 && !op.operands[0].type.isArray()) {
+        replacement = op.operands[0];
+        reason = "folded one-bit static selection in assign chain";
+    } else if ((op.kind == OperationKind::ReduceOr ||
+                op.kind == OperationKind::ReduceAnd ||
+                op.kind == OperationKind::ReduceXor) &&
+               op.operands.size() == 1 && type.width == 1 &&
+               op.operands[0].type.width == 1 && !op.operands[0].type.isArray()) {
+        // Every supported reduction is the identity function on a one-bit
+        // input.  Fold it before aliases are collected so register-read
+        // helpers lower back to their rdata port.
+        replacement = op.operands[0];
+        reason = "folded one-bit reduction in assign chain";
+    } else if (op.kind == OperationKind::WriteSlice && op.operands.size() == 2 &&
+               op.lo == 0 && op.hi == type.width - 1 &&
+               sameValueType(op.operands[1].type, type)) {
+        // A write covering the complete destination ignores its old value.
+        replacement = op.operands[1];
+        reason = "folded full-width static write in assign chain";
+    } else if (op.kind == OperationKind::WriteBit && op.operands.size() == 2 &&
+               type.width == 1 && op.bit == 0 &&
+               op.operands[1].type.width == 1 && !op.operands[1].type.isArray()) {
+        replacement = op.operands[1];
+        reason = "folded one-bit static write in assign chain";
+    } else {
+        return false;
+    }
+
+    DebugInfo debug = generatedDebug(reason, {replacement}, graph.program(), op);
+    op = Operation{};
+    op.kind = OperationKind::Assign;
+    op.type = type;
+    op.operands = {std::move(replacement)};
+    op.debug = std::move(debug);
+    op.source_locs = op.debug.source_locs;
+    return true;
+}
+
 } // namespace assign_chain_detail
 
 inline bool foldAssignChains(MutableProgram& graph) {
@@ -110,7 +160,8 @@ inline bool foldAssignChains(MutableProgram& graph) {
 
     for (auto& signal : graph.program().signals) {
         if (!signal.driver) continue;
-        bool signal_changed = assign_chain_detail::foldSameGuardMux(*signal.driver, graph);
+        bool signal_changed = assign_chain_detail::foldEquivalentStaticBitOperation(*signal.driver, graph);
+        signal_changed = assign_chain_detail::foldSameGuardMux(*signal.driver, graph) || signal_changed;
         if (signal_changed) signal.debug = signal.driver->debug;
         changed = signal_changed || changed;
     }
