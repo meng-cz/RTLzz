@@ -125,32 +125,20 @@ Program optimizeProgram(Program program,
         if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
-        if (options.predicate_sinking && iteration == iter_before_predicate_sinking) {
-            changed = sinkPredicates(graph, {options.max_predicate_formulas,
-                                             options.max_predicate_atoms}) || changed;
+        if (iteration == iter_before_predicate_sinking) {
+            if (options.predicate_sinking) {
+                changed = sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms}) || changed;
+            }
+            if (options.exclusive_muxes) {
+                changed = parallelizeExclusiveMuxes(graph, options.max_mux_branches) || changed;
+            }
+            if (options.boolean_control_normalization) {
+                changed = normalizeBooleanControl(graph) || changed;
+            }
+            if (options.balance_trees) {
+                changed = balanceAssociativeTrees(graph, options.max_tree_leaves) || changed;
+            }
         }
-    }
-    // Structural rewrites have one canonical direction and run only once after
-    // scalar normalization, so cleanup cannot oscillate between mux/tree forms.
-    bool structural_changed = false;
-    if (options.exclusive_muxes) {
-        structural_changed = parallelizeExclusiveMuxes(graph, options.max_mux_branches) ||
-                             structural_changed;
-    }
-    if (options.boolean_control_normalization) {
-        structural_changed = normalizeBooleanControl(graph) || structural_changed;
-    }
-    if (options.balance_trees) {
-        structural_changed = balanceAssociativeTrees(graph, options.max_tree_leaves) ||
-                             structural_changed;
-    }
-    if (structural_changed) {
-        if (options.constant_folding) foldConstants(graph);
-        if (options.algebraic_identities) simplifyAlgebraicIdentities(graph);
-        if (options.width_simplification) simplifyWidthOperations(graph);
-        if (options.fold_assign_chains) foldAssignChains(graph);
-        if (options.common_subexpressions) mergeCommonExpressions(graph);
-        if (options.dead_node_elimination) eliminateDeadNodes(graph);
     }
     return graph.finish();
 }

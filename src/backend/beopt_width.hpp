@@ -561,8 +561,78 @@ inline bool rewriteWidenAfterSelect(Operation& op, Program& program) {
     return false;
 }
 
+// Equality compares bit patterns.  Bits known to agree on both sides need not
+// reach the comparator; a bit known to disagree determines its result outright.
+// Keep this restricted to equally wide, unsigned operands so that shortening
+// the comparison cannot change an implicit sign/zero extension.
+inline bool rewriteKnownBitsEquality(Operation& op, Program& program) {
+    if (op.kind != OperationKind::Binary ||
+        (op.op != OpCode::Eq && op.op != OpCode::Ne) ||
+        op.operands.size() != 2) return false;
+    const Operand& lhs = op.operands[0];
+    const Operand& rhs = op.operands[1];
+    const int width = widthOf(lhs.type);
+    if (width <= 1 || width != widthOf(rhs.type) ||
+        lhs.signed_view || rhs.signed_view ||
+        lhs.constant.signed_view || rhs.constant.signed_view ||
+        lhs.type.isArray() || rhs.type.isArray()) return false;
+
+    auto known = [&](const Operand& operand, int bit) -> int {
+        if (operand.kind == OperandKind::Literal) {
+            return getBit(operand.constant.limbs, bit) ? 1 : 0;
+        }
+        if (operand.kind != OperandKind::Symbol) return -1;
+        const Signal* signal = program.findSignal(operand.node);
+        if (!signal || !signal->value.valid || signal->value.width < width) return -1;
+        if (getBit(signal->value.known_zero, bit)) return 0;
+        if (getBit(signal->value.known_one, bit)) return 1;
+        return -1;
+    };
+
+    int highest_unresolved = -1;
+    for (int bit = width - 1; bit >= 0; --bit) {
+        const int left = known(lhs, bit);
+        const int right = known(rhs, bit);
+        if (left >= 0 && right >= 0 && left != right) {
+            setAssign(op, literal(op.op == OpCode::Ne ? 1 : 0, widthOf(op.type)),
+                      op.type, "folded equality with conflicting known bits", program);
+            return true;
+        }
+        if (highest_unresolved < 0 && (left < 0 || right < 0)) highest_unresolved = bit;
+    }
+    if (highest_unresolved < 0) {
+        setAssign(op, literal(op.op == OpCode::Eq ? 1 : 0, widthOf(op.type)),
+                  op.type, "folded equality with matching known bits", program);
+        return true;
+    }
+
+    const int narrow_width = highest_unresolved + 1;
+    if (narrow_width == width) return false;
+    auto narrow = [&](Operand operand) {
+        if (operand.kind == OperandKind::Literal) {
+            resizeLiteralLimbs(operand.constant.limbs, width, narrow_width, false);
+            operand.type.width = narrow_width;
+            operand.constant.width = narrow_width;
+            return operand;
+        }
+        const Signal* signal = program.findSignal(operand.node);
+        if (signal && signal->driver && signal->driver->operands.size() == 1 &&
+            isZeroExtLike(signal->driver->kind) &&
+            widthOf(signal->driver->operands[0].type) == narrow_width) {
+            return signal->driver->operands[0];
+        }
+        return appendTruncTemp(program, std::move(operand), narrow_width);
+    };
+    Operand narrow_lhs = narrow(lhs);
+    Operand narrow_rhs = narrow(rhs);
+    setBinary(op, op.op, std::move(narrow_lhs), std::move(narrow_rhs), op.type,
+              "removed matching known high bits from equality", program);
+    return true;
+}
+
 inline bool simplifyWidthOperation(Operation& op, Program& program) {
-    return rewriteIdentity(op, program) ||
+    return rewriteKnownBitsEquality(op, program) ||
+           rewriteIdentity(op, program) ||
            rewriteSelectAfterWiden(op, program) ||
            rewriteWidenAfterSelect(op, program);
 }

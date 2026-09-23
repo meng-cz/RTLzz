@@ -150,6 +150,71 @@ static void widthPropagation() {
     CHECK(narrowed.driver->operands[2].type.width == 4);
 }
 
+static void knownBitsEqualityWidth() {
+    Program program;
+    program.function_name = "known_bits_equality";
+    auto input = signal(program, "input_value", 2);
+    Operation extension;
+    extension.kind = OperationKind::ZExt;
+    extension.type = {32, {}};
+    extension.to_width = 32;
+    extension.operands = {input};
+    auto widened = signal(program, "widened", 32, extension);
+    auto compare = [&](std::string name, OpCode code, Operand lhs, Operand rhs) {
+        Operation op;
+        op.kind = OperationKind::Binary;
+        op.op = code;
+        op.type = {1, {}};
+        op.operands = {std::move(lhs), std::move(rhs)};
+        auto result = signal(program, std::move(name), 1, op);
+        program.outputs.push_back(result.text);
+        return result;
+    };
+    auto eq_zero = compare("eq_zero", OpCode::Eq, widened, literal(0, 32));
+    auto eq_one = compare("eq_one", OpCode::Eq, widened, literal(1, 32));
+    auto eq_four = compare("eq_four", OpCode::Eq, widened, literal(4, 32));
+    auto ne_four = compare("ne_four", OpCode::Ne, widened, literal(4, 32));
+    Operation high_one_op;
+    high_one_op.kind = OperationKind::Binary;
+    high_one_op.op = OpCode::BitOr;
+    high_one_op.type = {32, {}};
+    high_one_op.operands = {widened, literal(0x80000000ULL, 32)};
+    auto high_one = signal(program, "high_one", 32, high_one_op);
+    auto eq_high_one = compare("eq_high_one", OpCode::Eq,
+                               high_one, literal(0x80000001ULL, 32));
+    auto unknown = signal(program, "unknown", 32);
+    auto eq_unknown = compare("eq_unknown", OpCode::Eq, unknown, literal(0, 32));
+    Operand signed_widened = widened;
+    signed_widened.signed_view = true;
+    auto signed_eq = compare("signed_eq", OpCode::Eq, signed_widened, literal(0, 32));
+
+    MutableProgram graph(program);
+    CHECK(simplifyWidthOperations(graph));
+    for (int iteration = 0; iteration < 4; ++iteration) simplifyWidthOperations(graph);
+    for (NodeId id : {eq_zero.node, eq_one.node}) {
+        const Operation& op = *graph.program().signal(id).driver;
+        CHECK(op.kind == OperationKind::Binary && op.op == OpCode::Eq);
+        CHECK(op.operands[0].node == input.node);
+        CHECK(op.operands[0].type.width == 2);
+        CHECK(op.operands[1].type.width == 2);
+    }
+    for (auto [id, expected] : {std::pair{eq_four.node, 0ULL},
+                                std::pair{ne_four.node, 1ULL}}) {
+        const Operation& op = *graph.program().signal(id).driver;
+        CHECK(op.kind == OperationKind::Assign);
+        CHECK(op.operands[0].constant.toU64() == expected);
+    }
+    CHECK(graph.program().signal(eq_unknown.node).driver->operands[0].type.width == 32);
+    CHECK(graph.program().signal(signed_eq.node).driver->operands[0].type.width == 32);
+    const Operation& high_one_compare = *graph.program().signal(eq_high_one.node).driver;
+    CHECK(high_one_compare.kind == OperationKind::Binary);
+    CHECK(high_one_compare.operands[0].type.width == 2);
+    CHECK(high_one_compare.operands[1].type.width == 2);
+    const std::string rtl = pred::rtlgen::emitSystemVerilog(graph.program());
+    CHECK(rtl.find("input_value == 2'h0") != std::string::npos);
+    CHECK(rtl.find("input_value == 2'h1") != std::string::npos);
+}
+
 static void signedShiftRetainsSignBit() {
     Program program;
     program.function_name = "signed_shift_width";
@@ -254,6 +319,7 @@ int main() {
     addCarryConstantPropagation();
     algebraicSimplification();
     widthPropagation();
+    knownBitsEqualityWidth();
     signedShiftRetainsSignBit();
     rtlEmission();
     moduleBodyEmission();
