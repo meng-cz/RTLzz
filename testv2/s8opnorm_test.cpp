@@ -411,6 +411,54 @@ static void sourcePipelineRunsThroughS8() {
     CHECK(debug.find("lookupwrite [arr__idx_0") != std::string::npos);
 }
 
+static void branchLocalComputationIsHoistedBeforeItsBranch() {
+    auto program = baseProgram();
+    auto& fn = program.top;
+    fn.symbols.push_back(symbol(6, "branch_cmp", boolType()));
+    fn.blocks.clear();
+
+    s7flatten::S7BasicBlock entry;
+    entry.id = 0;
+    entry.terminator.kind = s7flatten::S7TermKind::Branch;
+    entry.terminator.condition = var(fn.symbols[3]);
+    entry.terminator.true_target = 1;
+    entry.terminator.false_target = 2;
+
+    s7flatten::S7BasicBlock nested;
+    nested.id = 1;
+    s7flatten::S7Operation eq;
+    eq.kind = s7flatten::S7OpKind::Binary;
+    eq.binary_op = s7flatten::S7BinaryOp::Eq;
+    eq.operands = {var(fn.symbols[0]), var(fn.symbols[0])};
+    nested.stmts.push_back(opStmt(6, std::move(eq)));
+    nested.terminator.kind = s7flatten::S7TermKind::Branch;
+    nested.terminator.condition = var(fn.symbols[6]);
+    nested.terminator.true_target = 3;
+    nested.terminator.false_target = 4;
+
+    s7flatten::S7BasicBlock otherwise;
+    otherwise.id = 2;
+    otherwise.terminator.kind = s7flatten::S7TermKind::Exit;
+    s7flatten::S7BasicBlock true_exit;
+    true_exit.id = 3;
+    true_exit.terminator.kind = s7flatten::S7TermKind::Exit;
+    s7flatten::S7BasicBlock false_exit;
+    false_exit.id = 4;
+    false_exit.terminator.kind = s7flatten::S7TermKind::Exit;
+    fn.blocks = {std::move(entry), std::move(nested), std::move(otherwise),
+                 std::move(true_exit), std::move(false_exit)};
+    fn.exit = 2;
+
+    auto debug = normalizeDebug(std::move(program));
+    // Eq normalization introduces an intermediate comparison followed by an
+    // assignment; both move across the outer branch in one deep-first pass.
+    CHECK(debug.find("lifted_branch_computations=2") != std::string::npos);
+    const auto entry_pos = debug.find("  bb0\n");
+    const auto nested_pos = debug.find("  bb1\n");
+    CHECK(entry_pos != std::string::npos && nested_pos != std::string::npos);
+    CHECK(debug.substr(entry_pos, nested_pos - entry_pos).find("__s81_state_up_branch_cmp_") != std::string::npos);
+}
+
 int main() {
     addUsesFixintWidthThenCastsToTarget();
     multiplyUsesOperandWidthSum();
@@ -425,5 +473,6 @@ int main() {
     signedViewDivAndModAreRejected();
     negativeConstantDivisorUsesUnsignedBitPattern();
     sourcePipelineRunsThroughS8();
+    branchLocalComputationIsHoistedBeforeItsBranch();
     return 0;
 }

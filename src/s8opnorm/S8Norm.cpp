@@ -1,4 +1,5 @@
 #include "s8opnorm/S8Norm.h"
+#include "s8opnorm/S81StateUpgrade.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1558,7 +1559,8 @@ std::string debugPrint(const S8NormProgram& program,
         os << "summary function=" << summary.function_name
            << " inserted_casts=" << summary.inserted_casts
            << " normalized_ops=" << summary.normalized_ops
-           << " parsed_literals=" << summary.parsed_literals << "\n";
+           << " parsed_literals=" << summary.parsed_literals
+           << " lifted_branch_computations=" << summary.lifted_branch_computations << "\n";
     }
     const auto& fn = program.top;
     os << "top " << fn.name << " entry=bb" << fn.entry << " exit=bb" << fn.exit << "\n";
@@ -1594,6 +1596,8 @@ NormResult normalizeOperations(const S7FlattenedProgram& program,
         NormSummary summary;
         S8NormProgram out;
         out.top = normalizeFunction(program.top, options, summary);
+        summary.lifted_branch_computations =
+            s81stateupgrade::hoistBranchLocalCombinational(out).lifted_statements;
         verifyNormProgram(out);
         result.summaries.push_back(summary);
         if (options.debug_print) result.debug_text = debugPrint(out, result.summaries);

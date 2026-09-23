@@ -221,6 +221,7 @@ struct NormSummary {
     int inserted_casts = 0;
     int normalized_ops = 0;
     int parsed_literals = 0;
+    int lifted_branch_computations = 0;
 };
 
 struct NormResult {

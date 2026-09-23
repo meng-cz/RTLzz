@@ -219,6 +219,10 @@ done
 - 将字面常量解析为 `vector<uint64_t> + valid_width`。
 - 对常量除数 div/mod 做 lowering；二次幂转截取/移位，其他常量使用乘法/移位序列。
 
+### `src/s8opnorm/S81StateUpgrade.hpp/.cpp`
+- S8 结束、S9 SSA 前的分支局部组合计算提升：从最深分支向外处理，复制定义为带 `__s81_state_up_` 前缀的新临时信号，并递归重命名单前驱后代中的使用。
+- 仅提升无副作用、总定义的 Assign/静态组合 Op；动态读写、数组查找、端口写入、重定义或跨分支合流可见的值均保守保留在原分支中。
+
 ### `src/s8opnorm/checklist.md`
 - S8 语义确认记录。
 

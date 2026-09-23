@@ -512,6 +512,9 @@ PipelineResult compile(const PipelineConfig& config) {
             optimization_options.exclusive_muxes = false;
             optimization_options.max_iterations = std::min(optimization_options.max_iterations, 8);
         }
+        // Predicate sinking is temporarily disabled while its interaction
+        // with nested local values and dynamic aggregate updates is fixed.
+        optimization_options.predicate_sinking = false;
         beir_program = beir::opt::optimizeProgram(
             std::move(beir_program),
             optimization_options,
