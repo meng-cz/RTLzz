@@ -15,7 +15,7 @@ usage() {
 Usage: testv2/regression.sh [--cases N] [--seed N] [--build-dir DIR] [--log-dir DIR]
 
 Runs every testv2/fixtures/**/*.logic.cpp through the C++/RTL differential
-harness.  Files named illegal_* or uninitialized_* are expected-negative tests:
+harness with both the native and CIRCT RTL backends. Files named illegal_* or uninitialized_* are expected-negative tests:
 rejection is reported as XFAIL, while unexpectedly accepting one is XPASS.
 Per-fixture raw input ranges are read from testv2/regression.json.
 
@@ -136,34 +136,41 @@ oracle_crash_reason() {
     printf 'C++ oracle crashed with %s before RTL comparison; random input likely violates a fixture input/index precondition' "$signal"
 }
 
-echo "Running ${#FIXTURES[@]} fixtures: cases=$CASES seed=$SEED"
+echo "Running ${#FIXTURES[@]} fixtures with native and CIRCT backends: cases=$CASES seed=$SEED"
 for fixture in "${FIXTURES[@]}"; do
     relative="${fixture#"$FIXTURE_DIR"/}"
     safe_name="${relative//\//__}"
-    log="$LOG_DIR/${safe_name}.log"
     base="$(basename "$fixture")"
     expected_failure=0
     if [[ "$base" == illegal_* || "$base" == uninitialized_* ]]; then
         expected_failure=1
     fi
 
-    if python3 "$ROOT_DIR/scripts/differential_rtl.py" \
-        "$fixture" \
-        --top hls_main \
-        --build-dir "$BUILD_DIR" \
-        --input-config "$INPUT_CONFIG" \
-        --cases "$CASES" \
-        --seed "$SEED" >"$log" 2>&1; then
-        if [[ $expected_failure -eq 1 ]]; then
-            status="XPASS"
-            reason="expected an input-validation failure but RTL differential passed"
-            xpass_count=$((xpass_count + 1))
-        else
-            status="PASS"
-            reason="$(tail -n 1 "$log")"
-            pass_count=$((pass_count + 1))
+    for backend in native circt; do
+        log="$LOG_DIR/${safe_name}.${backend}.log"
+        circt_args=()
+        if [[ "$backend" == circt ]]; then
+            circt_args+=(--circt)
         fi
-    else
+
+        if python3 "$ROOT_DIR/scripts/differential_rtl.py" \
+            "$fixture" \
+            --top hls_main \
+            --build-dir "$BUILD_DIR" \
+            --input-config "$INPUT_CONFIG" \
+            --cases "$CASES" \
+            --seed "$SEED" \
+            "${circt_args[@]}" >"$log" 2>&1; then
+            if [[ $expected_failure -eq 1 ]]; then
+                status="XPASS"
+                reason="expected an input-validation failure but RTL differential passed"
+                xpass_count=$((xpass_count + 1))
+            else
+                status="PASS"
+                reason="$(tail -n 1 "$log")"
+                pass_count=$((pass_count + 1))
+            fi
+        else
         # A crashed direct-C++ oracle means no RTL result was compared.  Keep
         # that distinct from a compiler/lowering failure; in practice these
         # fixtures usually need a constrained dynamic-index input domain.
@@ -175,12 +182,13 @@ for fixture in "${FIXTURES[@]}"; do
         if [[ -n "$oracle_reason" ]]; then
             reason="$oracle_reason"
         else
-            diagnostic="$LOG_DIR/${safe_name}.diagnostic.log"
+            diagnostic="$LOG_DIR/${safe_name}.${backend}.diagnostic.log"
             "$PREDICATE" "$fixture" \
                 --top hls_main \
                 --vullib "$ROOT_DIR/third_party/vulsim/vullib" \
                 --format rtl \
                 --no-rtl-debug \
+                "${circt_args[@]}" \
                 -o /tmp/rtlzz_regression_diagnostic.sv \
                 >"$diagnostic" 2>&1 || true
             if [[ -s "$diagnostic" ]]; then
@@ -189,17 +197,19 @@ for fixture in "${FIXTURES[@]}"; do
                 reason="$(concise_reason "$log")"
             fi
         fi
-        if [[ $expected_failure -eq 1 ]]; then
-            status="XFAIL"
-            xfail_count=$((xfail_count + 1))
-        else
-            status="FAIL"
-            fail_count=$((fail_count + 1))
+            if [[ $expected_failure -eq 1 ]]; then
+                status="XFAIL"
+                xfail_count=$((xfail_count + 1))
+            else
+                status="FAIL"
+                fail_count=$((fail_count + 1))
+            fi
         fi
-    fi
 
-    printf '%-5s %-55s %s\n' "$status" "$relative" "$reason"
-    printf '%s\t%s\t%s\n' "$status" "$relative" "$reason" >>"$SUMMARY_FILE"
+        fixture_label="${relative} [${backend}]"
+        printf '%-5s %-55s %s\n' "$status" "$fixture_label" "$reason"
+        printf '%s\t%s\t%s\n' "$status" "$fixture_label" "$reason" >>"$SUMMARY_FILE"
+    done
 done
 
 echo

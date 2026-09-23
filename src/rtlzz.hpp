@@ -76,6 +76,9 @@ struct CompileOptions {
     // BEIR optimization options. Empty means the default optimization pipeline;
     // use {"none"} to disable all BEIR optimization passes.
     std::vector<std::string> beopt_args;
+    // Emit RTL through the external CIRCT HW/Comb bridge.  This is opt-in;
+    // failures are reported rather than falling back to the native emitter.
+    bool use_circt = false;
     // Optional progress hook used by embedding tools. It reports frontend
     // stages and backend optimization iterations; standalone calls are silent.
     std::function<void(const std::string&)> progress_callback;
@@ -243,6 +246,7 @@ inline CompileResult compileSource(const CompileOptions& options, OutputKind out
     config.unroll_limit = options.unroll_limit;
     config.max_leaf_symbols = options.max_leaf_symbols;
     config.beopt_args = options.beopt_args;
+    config.use_circt = options.use_circt;
     config.progress_callback = options.progress_callback;
     config.rtl_module_body = options.rtl_module_body;
     config.rtl_port_bindings = options.rtl_port_bindings;

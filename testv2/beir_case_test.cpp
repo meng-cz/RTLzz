@@ -4,6 +4,7 @@
 #include "backend/beopt_dce.hpp"
 #include "backend/beopt_predicate.hpp"
 #include "backend/beopt_width.hpp"
+#include "backend/circt_bridge.hpp"
 #include "backend/rtlgen.hpp"
 
 #include <cstdlib>
@@ -215,6 +216,45 @@ static void knownBitsEqualityWidth() {
     CHECK(rtl.find("input_value == 2'h1") != std::string::npos);
 }
 
+static void circtBridgeEmission() {
+    Program program;
+    program.function_name = "circt_bridge_test";
+    auto input = signal(program, "input_value", 8);
+    auto index = signal(program, "index_value", 3);
+    auto condition = signal(program, "condition", 1);
+    Operation select;
+    select.kind = OperationKind::DynamicSlice;
+    select.type = {4, {}};
+    select.operands = {input, index};
+    auto selected = signal(program, "selected", 4, select);
+    auto output = caseNode(program, {condition, selected, literal(0xa, 4)}, 4);
+    program.signal(input.node).port_name = "input";
+    program.signal(index.node).port_name = "index";
+    program.signal(condition.node).port_name = "condition";
+    program.signal(output.node).port_name = "output";
+    program.ports = {
+        {"input", PortDirection::Input, {8, {}}, {input.node}},
+        {"index", PortDirection::Input, {3, {}}, {index.node}},
+        {"condition", PortDirection::Input, {1, {}}, {condition.node}},
+        {"output", PortDirection::Output, {4, {}}, {output.node}},
+    };
+    program.outputs.push_back(output.text);
+
+    const auto full = pred::circt::emitSystemVerilog(program, false, {}, false);
+    CHECK(full.ok());
+    CHECK(full.verilog.find("module circt_bridge_test") != std::string::npos);
+    CHECK(full.verilog.find("module {") == std::string::npos);
+    CHECK(full.verilog.find("endmodule") != std::string::npos);
+    const auto body = pred::circt::emitSystemVerilog(
+        program, true,
+        {{"input", "outer_input"}, {"index", "outer_index"},
+         {"condition", "outer_condition"}, {"output", "outer_output"}}, false);
+    CHECK(body.ok());
+    CHECK(body.verilog.find("module ") == std::string::npos);
+    CHECK(body.verilog.find("assign input = outer_input") != std::string::npos);
+    CHECK(body.verilog.find("assign outer_output = output") != std::string::npos);
+}
+
 static void signedShiftRetainsSignBit() {
     Program program;
     program.function_name = "signed_shift_width";
@@ -320,6 +360,7 @@ int main() {
     algebraicSimplification();
     widthPropagation();
     knownBitsEqualityWidth();
+    circtBridgeEmission();
     signedShiftRetainsSignBit();
     rtlEmission();
     moduleBodyEmission();

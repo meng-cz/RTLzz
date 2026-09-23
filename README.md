@@ -47,6 +47,10 @@ python3 scripts/differential_rtl.py testv2/fixtures/controlflow_misc.logic.cpp -
 python3 scripts/differential_rtl.py testv2/fixtures/inline_misc.logic.cpp --top hls_main --cases 100
 ```
 
+Pass `--circt` to run the same C++/RTL differential test through the CIRCT
+backend. `testv2/regression.sh` runs every fixture with both the native and
+CIRCT emitters and records the backend in its per-fixture logs and `summary.tsv`.
+
 Use `--release` (or `-r`) with RTL output to suppress all debug sidecar files,
 including error snapshots. It takes precedence over `--rtl-debug-file`, regardless
 of argument order, and requires `--format rtl` (the default). Diagnostics still

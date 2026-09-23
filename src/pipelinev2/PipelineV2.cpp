@@ -1,6 +1,7 @@
 #include "pipelinev2/PipelineV2.h"
 
 #include "backend/beopt.hpp"
+#include "backend/circt_bridge.hpp"
 #include "backend/rtlgen.hpp"
 #include "debug/RTLZZException.h"
 #include "s0ast/S0AST.h"
@@ -17,6 +18,7 @@
 #include "s10predicate/S10Predicate.h"
 #include "s11beir/S11BEIR.h"
 
+#include <algorithm>
 #include <exception>
 #include <functional>
 #include <optional>
@@ -499,8 +501,17 @@ PipelineResult compile(const PipelineConfig& config) {
         current_debug_signals = [&s11]() { return rtlgen::collectDebugSignals(*s11.program, ""); };
 
         beir_program = *s11.program;
-        const beir::opt::Options optimization_options =
+        beir::opt::Options optimization_options =
             beir::opt::parseOptions(config.beopt_args);
+        if (config.use_circt) {
+            // CIRCT performs a second combinational optimization round after
+            // BEIR lowering. Avoid the BEIR passes whose proof/search cost is
+            // disproportionate on the CIRCT path; retain the local canonical
+            // and width simplifications needed to produce compact legal IR.
+            optimization_options.predicate_sinking = false;
+            optimization_options.exclusive_muxes = false;
+            optimization_options.max_iterations = std::min(optimization_options.max_iterations, 8);
+        }
         beir_program = beir::opt::optimizeProgram(
             std::move(beir_program),
             optimization_options,
@@ -525,9 +536,27 @@ PipelineResult compile(const PipelineConfig& config) {
             result.output_text = beir::emitText(beir_program);
             break;
         case OutputKind::Rtl:
-            result.output_text = config.rtl_module_body
-                ? rtlgen::emitSystemVerilogBody(beir_program, config.rtl_port_bindings)
-                : rtlgen::emitSystemVerilog(beir_program);
+            if (config.use_circt) {
+                if (config.progress_callback) config.progress_callback("RTLzz CIRCT lowering and optimization");
+                auto circt_result = circt::emitSystemVerilog(
+                    beir_program,
+                    config.rtl_module_body,
+                    config.rtl_port_bindings,
+                    config.rtl_debug_output != RtlDebugOutputKind::None);
+                if (!circt_result.ok()) {
+                    std::string detail = circt_result.error;
+                    if (!circt_result.input_mlir_path.empty())
+                        detail += "\nCIRCT input: " + circt_result.input_mlir_path;
+                    if (!circt_result.stderr_path.empty())
+                        detail += "\nCIRCT stderr: " + circt_result.stderr_path;
+                    return errorResult("circt", detail, std::nullopt, current_debug_text, current_debug_signals);
+                }
+                result.output_text = std::move(circt_result.verilog);
+            } else {
+                result.output_text = config.rtl_module_body
+                    ? rtlgen::emitSystemVerilogBody(beir_program, config.rtl_port_bindings)
+                    : rtlgen::emitSystemVerilog(beir_program);
+            }
             if (config.rtl_debug_output == RtlDebugOutputKind::Structured) {
                 result.rtl_debug_signals =
                     rtlgen::collectDebugSignals(beir_program, result.output_text);

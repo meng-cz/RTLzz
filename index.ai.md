@@ -2,7 +2,7 @@
 
 本文档是当前代码树的逐文件索引。项目现在只保留 V2 编译路径：
 
-`S0 native AST -> S1 API norm -> S2 validate -> S3 statementize -> S4 CFG -> S5 unroll -> S6 inline -> S7 flatten -> S8 op norm -> S9 SSA -> S10 predicate -> S11 BEIR -> BEOPT -> RTL`
+`S0 native AST -> S1 API norm -> S2 validate -> S3 statementize -> S4 CFG -> S5 unroll -> S6 inline -> S7 flatten -> S8 op norm -> S9 SSA -> S10 predicate -> S11 BEIR -> BEOPT -> RTL (native or CIRCT)`
 
 ## 回归测试流程
 
@@ -311,6 +311,11 @@ done
 - 乘法分别按左右操作数的 signed view 扩展/截断到结果位宽，再以无符号位模式相乘并显式截断，保证混合符号语义不依赖 BEOPT。
 - 支持 scalar/array ports、BEIR lookup、assign/operation lowering。
 - 原生 BEIR Case 输出为带完整 default 的 `always_comb case (1'b1)`，保持首真分支优先语义。
+
+### `src/backend/circt_bridge.hpp` / `src/backend/circt_bridge.cpp`
+- 将 BEOPT 后的纯组合 BEIR lower 为 CIRCT HW/Comb IR，调用 `circt-opt --canonicalize --cse --hw-cleanup --lower-hw-to-sv --export-verilog`，并提取导出的 Verilog module 或 module body。
+- 支持标量组合运算、首真优先 Case、Aggregate-backed signal Lookup、动态位/片选择和动态位/片写入；动态操作被 lower 为明确的组合选择网络。
+- `--circt` / `CompileOptions::use_circt` 显式启用。CIRCT 缺失、IR 不支持或优化失败均为编译错误，不回退 native emitter；非 release 调用保留输入 MLIR、导出输出和 stderr 以供诊断。
 - RTL emission 将全常量 Aggregate 的 Lookup/ArrayAccess 输出为组合 case 查表函数；按元素类型、表长及规范化常量位值建立哈希索引，以完整比较处理哈希冲突，同一模块内相同表复用函数；可追踪赋值及无符号宽度转换链，省略不再被使用的数组，运行时表项保持数组读取。
 
 ## Tests And Fixtures
@@ -379,13 +384,14 @@ done
 ## Scripts
 
 ### `testv2/regression.sh`
-- 一键递归运行 `testv2/fixtures/**/*.logic.cpp` 的 C++/RTL 随机差分；自动构建 `predicate-expand`，从 `testv2/regression.json` 读取输入域约束，区分 `PASS`、预期负向测试 `XFAIL`、`FAIL` 与 `XPASS`，并保存逐项日志和 `summary.tsv`。
+- 一键递归运行 `testv2/fixtures/**/*.logic.cpp` 的 C++/RTL 随机差分；每个 fixture 分别使用 native emitter 与 `--circt` CIRCT emitter 验证。自动构建 `predicate-expand`，从 `testv2/regression.json` 读取输入域约束，区分 `PASS`、预期负向测试 `XFAIL`、`FAIL` 与 `XPASS`，并在逐项日志和 `summary.tsv` 中记录后端。
 
 ### `testv2/regression.json`
 - 全量差分的 fixture 配置清单；`input_ranges` 以 raw port value 的闭区间 `[MIN, MAX]` 限制随机输入，避免 C++ oracle 执行 fixture 前置条件之外的未定义行为。
 
 ### `scripts/differential_rtl.py`
 - V2 RTL differential harness。
+- `--circt` 仅让 RTL 生成阶段走 CIRCT；端口元数据仍来自同一 BEIR 程序，因此 C++ oracle、随机输入和比较规则与 native 后端完全相同。
 - 生成 port metadata、RTL、C++ oracle 和 Verilator testbench；oracle 直接写入源文件全局 input port、调用无参 top、读取全局 output port，并比较随机输入下的输出。
 - `--input-config` 加载 fixture manifest，重复的 `--input-range NAME=MIN:MAX` 可覆盖单个输入范围；配置会校验输入名、闭区间顺序和端口位宽。oracle 异常退出会报告 case、signal/exit code 与完整触发输入。
 

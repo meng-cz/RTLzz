@@ -2,7 +2,8 @@
 """Differentially test generated SystemVerilog RTL against the original C++.
 
 The script:
-  1. runs predicate-expand to produce pipelinev2 port metadata and RTL,
+  1. runs predicate-expand to produce pipelinev2 port metadata and RTL
+     (from the native emitter or the optional CIRCT backend),
   2. builds a tiny C++ oracle harness that includes and calls the source top,
   3. builds a Verilator C++ testbench around the generated RTL,
   4. compares RTL outputs against the C++ oracle for random inputs.
@@ -628,6 +629,8 @@ def main() -> int:
     ap.add_argument("--verilator", default=shutil.which("verilator") or "verilator")
     ap.add_argument("--beopt", action="append", default=[],
                     help="BEIR optimization option to pass to predicate-expand, e.g. none")
+    ap.add_argument("--circt", action="store_true",
+                    help="emit RTL through the CIRCT backend instead of the native emitter")
     ap.add_argument(
         "--input-config", type=Path,
         help="JSON fixture manifest containing optional per-input ranges",
@@ -656,7 +659,10 @@ def main() -> int:
         for opt in args.beopt:
             common_args += ["--beopt", opt]
         run(common_args + ["--format", "portmeta", "-o", str(portmeta)], cwd=ROOT)
-        run(common_args + ["--format", "rtl", "-o", str(rtl)], cwd=ROOT)
+        rtl_args = common_args + ["--format", "rtl", "-o", str(rtl)]
+        if args.circt:
+            rtl_args.append("--circt")
+        run(rtl_args, cwd=ROOT)
         program = json.loads(portmeta.read_text())
         resolved_top = program.get("function", args.top)
         try:
@@ -726,7 +732,8 @@ def main() -> int:
                     else:
                         print("rerun with --keep to inspect temporary artifacts", file=sys.stderr)
                     return 1
-        print(f"PASS {args.cases} RTL cases for {source}")
+        backend = "CIRCT" if args.circt else "native"
+        print(f"PASS {args.cases} RTL cases for {source} ({backend} backend)")
         return 0
     finally:
         if args.keep:
