@@ -127,10 +127,9 @@ Program optimizeProgram(Program program,
         if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
         if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
         if (iteration == iter_before_predicate_sinking) {
-            // with bug, not used for now
-            // if (options.predicate_sinking) {
-            //     changed = sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms}) || changed;
-            // }
+            if (options.predicate_sinking) {
+                changed = sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms}) || changed;
+            }
             if (options.boolean_control_normalization) {
                 changed = normalizeBooleanControl(graph) || changed;
             }
