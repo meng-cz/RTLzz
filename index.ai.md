@@ -278,7 +278,7 @@ done
 ### `src/backend/beopt.cpp`
 - 串接 BEIR optimization passes，并在固定点循环每轮开始时触发可选逐轮回调。
 - 布尔归一化参与主固定点和谓词下沉后的受限清理；随后单向执行互斥 mux 到 Case 的展平、再次布尔归一化及结合树平衡，并对新结构重新执行常量、代数、位宽、Assign、CSE、DCE 清理。
-- `Options` 暴露 max_predicate_iterations、max_predicate_formulas、max_predicate_atoms、max_mux_branches、max_tree_leaves、max_bit_range_updates、max_bit_compose_pieces；谓词证明默认每次查询最多使用 1024 个可达公式、64 个原子。`--beopt mux/no-mux`、`balance/no-balance`、`bit-updates/no-bit-updates` 与 `boolean/no-boolean` 分别控制结构 pass，all/none 同时管理它们。
+- `Options` 暴露 max_predicate_iterations、max_predicate_formulas、max_predicate_atoms、max_mux_branches、max_tree_leaves、max_bit_range_updates、max_bit_compose_pieces；谓词证明默认每次查询最多使用 16384 个可达公式、512 个原子。`--beopt mux/no-mux`、`balance/no-balance`、`bit-updates/no-bit-updates` 与 `boolean/no-boolean` 分别控制结构 pass，all/none 同时管理它们。
 
 ### `src/backend/beopt_constant.hpp`
 - 常量传播、常量折叠和 literal 简化。
@@ -314,7 +314,7 @@ done
 - 将 BEIR program emit 为 synthesizable SystemVerilog。
 - 乘法分别按左右操作数的 signed view 扩展/截断到结果位宽，再以无符号位模式相乘并显式截断，保证混合符号语义不依赖 BEOPT。
 - 支持 scalar/array ports、BEIR lookup、assign/operation lowering。
-- 原生 BEIR Case 输出为带完整 default 的 `always_comb case (1'b1)`，保持首真分支优先语义。
+- 原生 BEIR Case 输出为带完整 default 的 `always_comb unique case (1'b1)`，向 RTL 工具声明分支条件互斥；省略位宽适配后的赋值表达式与 default 完全相同的分支。
 
 ### `src/backend/circt_bridge.hpp` / `src/backend/circt_bridge.cpp`
 - 将 BEOPT 后的纯组合 BEIR lower 为 CIRCT HW/Comb IR，调用 `circt-opt --canonicalize --cse --hw-cleanup --lower-hw-to-sv --export-verilog`，并提取导出的 Verilog module 或 module body。
@@ -423,12 +423,18 @@ done
 
 ### `src/backend/beopt_bit_updates.hpp`
 - `BitRangeUpdateCoalescingPass` 从输出侧收集单活跃用户的静态 WriteSlice 链，穿透同类型 Assign 别名，并按位区间生成一次扁平 Assign/Concat。
-- 重叠区间使用最新写入值，空洞保留原值；共享中间结果、类型或范围不匹配时保守停止。默认最多收集 32 次更新和 64 个组合片段，并设有硬上限。
+- 重叠区间使用最新写入值，空洞保留原值；共享中间结果、类型或范围不匹配时保守停止。默认最多收集 1024 次更新和 2048 个组合片段，硬上限分别为 4096 和 8192。
 - 用户计数仅覆盖可观察输出可达图，避免已折叠、尚未 DCE 的死别名阻止合并；变换后使 value facts 失效。
 
+### `src/backend/beopt_case_guards.hpp`
+- 在主优化固定点之后，对 Case 条件建立带补边的共享布尔 DAG，并在保留的路径事实下进行 cofactor 化简；删除条件时不使用该条件本身作为证明前提。
+- 将最多 16 位的常量相等/不等译码展开成精确位约束，穿透安全的 Assign/Slice/BitSelect/Trunc/扩展边界，使不同状态译码能裁掉包含数据计算的前序排除条件；其他数据运算保守作为原子；完整位译码在输出时重新合并为单个等值比较。
+- 对原生有序 Case 使用原始条件构建平衡前缀 OR，显式排除更早命中的分支；对已经互斥的分支，通过路径化简消除冗余屏蔽。负向路径事实也重建为共享的平衡 OR 前缀加取反。
+- 化简保持精确语义及分支互斥，采用有界结构证明（不承诺任意布尔函数的全局最小式）；最终只做代数、CSE、Assign、DCE 清理，避免重新串行化控制前缀。
+
 ### `src/backend/beopt_structure.hpp`
-- `parallelizeExclusiveMuxes` 仅收集最多 8 个分支的等宽 Ite false-chain，单用户中间节点且条件两两证明互斥后转换为一个有序 Case，保留显式默认值；未知关系/一般优先级链保持不变。
-- `balanceAssociativeTrees` 支持等宽无 signed-view 的 AND/OR/XOR/模加法；默认最多 32 叶（硬上限 64），只展开单用户同类节点，不穿越截断/扩展。按到达时间优先合并早到输入，且仅在估计延迟严格下降时重构。
+- `parallelizeExclusiveMuxes` 遍历等宽 Ite 的 true/false 两臂，收集完整路径谓词并转换为一个有序 Case，保留显式默认值。叶路径在分叉处包含相反条件，结构性保证互斥并保留原优先级语义；共享节点和 signed-view 边界保持为叶子。默认最多 1024 个分叉（硬上限 4096），超限候选不修改。
+- `balanceAssociativeTrees` 支持等宽无 signed-view 的 AND/OR/XOR/模加法；默认最多 1024 叶（硬上限 4096），只展开单用户同类节点，不穿越截断/扩展。按到达时间优先合并早到输入，且仅在估计延迟严格下降时重构。
 - 两个 pass 按可观察输出遍历活跃图，修改后使 value facts 失效。
 
 ### `testv2/beopt_structure_test.cpp`
@@ -454,3 +460,6 @@ done
 
 ### `testv2/fixtures/bit_update_coalescing.logic.cpp`
 - 相邻、重叠和带空洞静态位段更新的端到端 C++/RTL 差分 fixture。
+
+### `testv2/case_guard_analysis.md`
+- 记录 Case 路径消冗余、128 路优先级前缀、随机布尔穷举与 FPUArithmetic 实际生成结果；FMA_SUM1 条件恢复为单个状态比较，并注明图深度统计方法和验证范围。

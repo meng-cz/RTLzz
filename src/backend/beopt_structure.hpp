@@ -60,74 +60,91 @@ inline void assign(Program& program, NodeId id, Operand value, const DebugInfo& 
 }
 } // namespace structure_detail
 
-inline bool parallelizeExclusiveMuxes(MutableProgram& graph, unsigned max_branches = 8) {
+// Paths to distinct leaves disagree at their first divergent tree edge.  This
+// proves mutual exclusion structurally, even for overlapping original tests.
+inline bool parallelizeExclusiveMuxes(MutableProgram& graph, unsigned max_branches = 1024) {
     using namespace structure_detail;
     if (max_branches < 3) return false;
-    max_branches = std::min(max_branches, 8u);
+    max_branches = std::min(max_branches, 4096u);
     auto& program = graph.program();
     const auto live = reachable(graph);
-    auto use_count = users(graph);
-    auto order = width_detail::topologicalOrder(program);
+    const auto use_count = users(graph);
+    const auto order = width_detail::topologicalOrder(program);
     std::unordered_set<NodeId> consumed;
     bool changed = false;
     for (auto it = order.rbegin(); it != order.rend(); ++it) {
         const NodeId root = *it;
         if (!live.count(root) || consumed.count(root)) continue;
-        const auto& signal = program.signal(root);
-        if (!signal.driver || signal.driver->kind != OperationKind::Ite || signal.type.isArray()) continue;
-        const auto type = signal.type;
-        auto debug = signal.driver->debug;
-        std::vector<Operand> conditions, data;
-        std::vector<NodeId> chain;
-        Operand fallback;
-        NodeId current = root;
-        bool valid = true;
-        while (true) {
-            const auto& op = *program.signal(current).driver;
-            if (op.kind != OperationKind::Ite || op.operands.size() != 3 ||
-                !predicate_detail::sameValueType(op.type, type) ||
-                op.operands[0].type.width != 1 || op.operands[0].type.isArray() ||
-                !predicate_detail::sameValueType(op.operands[1].type, type) ||
-                !predicate_detail::sameValueType(op.operands[2].type, type)) { valid = false; break; }
-            chain.push_back(current);
-            conditions.push_back(op.operands[0]); data.push_back(op.operands[1]);
-            fallback = op.operands[2];
-            const auto* next = predicate_detail::symbolDriver(fallback, program);
-            if (!next || next->kind != OperationKind::Ite || use_count[fallback.node] != 1) break;
-            if (conditions.size() >= max_branches) { valid = false; break; }
-            current = fallback.node;
+        const auto original = program.signal(root).driver;
+        const auto type = program.signal(root).type;
+        if (!original || original->kind != OperationKind::Ite || type.isArray()) continue;
+        struct Edge { Operand condition; bool positive; };
+        struct Leaf { Operand value; std::vector<Edge> path; };
+        std::vector<Leaf> leaves;
+        std::vector<Edge> path;
+        std::vector<NodeId> expanded;
+        bool overflow = false;
+        std::function<void(Operand, bool)> collect = [&](Operand value, bool is_root) {
+            if (overflow) return;
+            const auto* op = predicate_detail::symbolDriver(value, program);
+            bool descend = op && op->kind == OperationKind::Ite &&
+                op->operands.size() == 3 && !value.signed_view &&
+                !value.constant.signed_view &&
+                predicate_detail::sameValueType(op->type, type) &&
+                op->operands[0].type.width == 1 && !op->operands[0].type.isArray() &&
+                predicate_detail::sameValueType(op->operands[1].type, type) &&
+                predicate_detail::sameValueType(op->operands[2].type, type) &&
+                (is_root || (value.node < use_count.size() && use_count[value.node] == 1 &&
+                             !consumed.count(value.node)));
+            if (!descend) {
+                if (leaves.size() >= max_branches + 1u) { overflow = true; return; }
+                leaves.push_back({value, path});
+                return;
+            }
+            if (expanded.size() >= max_branches) { overflow = true; return; }
+            expanded.push_back(value.node);
+            path.push_back({op->operands[0], true});
+            collect(op->operands[1], false);
+            path.back().positive = false;
+            collect(op->operands[2], false);
+            path.pop_back();
+        };
+        Operand root_value;
+        root_value.kind = OperandKind::Symbol; root_value.node = root; root_value.type = type;
+        collect(root_value, true);
+        // A single mux already has the desired shape. Keep shared subgraphs as
+        // leaves, so flattening never duplicates their data computations.
+        if (overflow || expanded.size() < 2) continue;
+        auto debug = original->debug;
+        addDebugMessage(debug, "flattened mux tree using structurally exclusive full paths");
+        Operation result;
+        result.kind = OperationKind::Case; result.type = type; result.debug = debug;
+        for (std::size_t i = 0; i + 1 < leaves.size(); ++i) {
+            std::vector<Operand> terms;
+            for (const auto& edge : leaves[i].path) {
+                auto term = edge.condition;
+                if (!edge.positive)
+                    term = emit(program, OperationKind::Unary, OpCode::LogicNot,
+                                {1, {}}, {term}, debug);
+                terms.push_back(term);
+            }
+            result.operands.push_back(balanced(program, std::move(terms), OpCode::BitAnd,
+                                               {1, {}}, debug));
+            result.operands.push_back(leaves[i].value);
         }
-        if (!valid || conditions.size() < 3) continue;
-        predicate_detail::PredicateRelations relations(program);
-        for (std::size_t i = 0; valid && i < conditions.size(); ++i)
-            for (std::size_t j = 0; j < i; ++j)
-                if (relations.isExclusive(conditions[i], conditions[j]) != predicate_detail::Proof::Proven) {
-                    valid = false; break;
-                }
-        if (!valid) continue;
-        addDebugMessage(debug, "flattened proven-exclusive mux chain into case");
-        Operation case_op;
-        case_op.kind = OperationKind::Case;
-        case_op.type = type;
-        case_op.debug = debug;
-        case_op.operands.reserve(conditions.size() * 2 + 1);
-        for (std::size_t i = 0; i < conditions.size(); ++i) {
-            case_op.operands.push_back(conditions[i]);
-            case_op.operands.push_back(data[i]);
-        }
-        case_op.operands.push_back(fallback);
-        program.signal(root).driver = std::move(case_op);
-        consumed.insert(chain.begin(), chain.end());
+        result.operands.push_back(leaves.back().value);
+        program.signal(root).driver = std::move(result);
+        consumed.insert(expanded.begin(), expanded.end());
         changed = true;
     }
     if (changed) graph.markValueFactsDirty();
     return changed;
 }
 
-inline bool balanceAssociativeTrees(MutableProgram& graph, unsigned max_leaves = 32) {
+inline bool balanceAssociativeTrees(MutableProgram& graph, unsigned max_leaves = 1024) {
     using namespace structure_detail;
     if (max_leaves < 3) return false;
-    max_leaves = std::min(max_leaves, 64u);
+    max_leaves = std::min(max_leaves, 4096u);
     auto& program = graph.program();
     const auto live = reachable(graph);
     const auto use_count = users(graph);

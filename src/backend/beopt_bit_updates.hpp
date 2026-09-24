@@ -128,12 +128,12 @@ inline bool sameSource(const Operand& lhs, const Operand& rhs) {
 // composition. Updates are collected newest-first, so overlapping writes keep
 // the source-language "last write wins" semantics.
 inline bool coalesceBitRangeUpdates(MutableProgram& graph,
-                                    unsigned max_updates = 32,
-                                    unsigned max_pieces = 64) {
+                                    unsigned max_updates = 1024,
+                                    unsigned max_pieces = 2048) {
     using namespace bit_update_detail;
     if (max_updates == 0 || max_pieces < 2) return false;
-    max_updates = std::min(max_updates, 64u);
-    max_pieces = std::min(max_pieces, 128u);
+    max_updates = std::min(max_updates, 4096u);
+    max_pieces = std::min(max_pieces, 8192u);
 
     Program& program = graph.program();
     const std::size_t original_count = program.signals.size();

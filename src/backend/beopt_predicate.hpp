@@ -175,10 +175,10 @@ struct PredicateLimits {
     // These apply to each query's reachable cone, not the snapshot cache.
     // Predicate sinking is deliberately conservative by default. Rules 1-6
     // handle cheap proofs; SAT is only attempted for small residual queries.
-    std::size_t max_formulas = 64;
-    std::size_t max_atoms = 8;
-    std::size_t max_candidate_ites = 128;
-    std::size_t max_contexts_per_candidate = 64;
+    std::size_t max_formulas = 16384;
+    std::size_t max_atoms = 512;
+    std::size_t max_candidate_ites = 4096;
+    std::size_t max_contexts_per_candidate = 1024;
 };
 
 inline Proof asProof(ProofOutcome outcome) {
@@ -1012,8 +1012,9 @@ public:
     std::pair<ProofOutcome, ProofOutcome> classify(const Context& context, const Operand& guard) {
         // Layers 1-5: conservative identity, constant, literal-set and structural proofs.
         if (const auto truth = structuralTruth(context, guard)) {
-            return {*truth ? ProofOutcome::Counterexample : ProofOutcome::Proven,
-                    *truth ? ProofOutcome::Proven : ProofOutcome::Counterexample};
+            // Match classifyDetailed: first proves true, second proves false.
+            return {*truth ? ProofOutcome::Proven : ProofOutcome::Counterexample,
+                    *truth ? ProofOutcome::Counterexample : ProofOutcome::Proven};
         }
         Key key{context, guard};
         if (const auto found = cache_.find(key); found != cache_.end()) return found->second;

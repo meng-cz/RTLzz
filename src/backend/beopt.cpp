@@ -1,6 +1,5 @@
 #include "backend/beopt.hpp"
 
-#include "backend/befin_boolreg.hpp"
 #include "backend/beopt_algebraic.hpp"
 #include "backend/beopt_assign_chains.hpp"
 #include "backend/beopt_constant.hpp"
@@ -10,6 +9,7 @@
 #include "backend/beopt_width.hpp"
 #include "backend/beopt_slices.hpp"
 #include "backend/beopt_structure.hpp"
+#include "backend/beopt_case_guards.hpp"
 #include "backend/beopt_bit_updates.hpp"
 #include "backend/beopt_boolean.hpp"
 
@@ -131,11 +131,12 @@ Program optimizeProgram(Program program,
             // if (options.predicate_sinking) {
             //     changed = sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms}) || changed;
             // }
-            if (options.exclusive_muxes) {
-                changed = parallelizeExclusiveMuxes(graph, options.max_mux_branches) || changed;
-            }
             if (options.boolean_control_normalization) {
                 changed = normalizeBooleanControl(graph) || changed;
+            }
+            if (options.exclusive_muxes) {
+                changed = parallelizeExclusiveMuxes(graph, options.max_mux_branches) || changed;
+                simplifyCaseGuards(graph);
             }
             if (options.balance_trees) {
                 changed = balanceAssociativeTrees(graph, options.max_tree_leaves) || changed;

@@ -68,6 +68,14 @@ int main() {
     CHECK(relations.isExclusive(a, b) == Proof::Unknown);
     CHECK(relations.isExclusive(eq0, eq1) == Proof::Proven);
 
+    // Structural fast-path results must use the same true/false ordering as SAT.
+    SnapshotPredicateRelations snapshot(program);
+    for (bool truth : {false, true}) {
+        auto context = guardedContext(a, truth);
+        normalizeContext(context);
+        CHECK(snapshot.classify(context, a) == relations.classifyDetailed(context, a));
+    }
+
     // A relation object can be queried again after its BEIR graph changes.
     program.signal(eq1.node).driver->operands[1] = literal(0, 2);
     CHECK(relations.isExclusive(eq0, eq1) == Proof::Unknown);
@@ -81,7 +89,7 @@ int main() {
                          OpCode::LogicOr, wide_or, input);
     }
     CHECK(relations.impliesDetailed(guardedContext(a, true), {wide_or, true})
-          == ProofOutcome::ResourceLimit);
+          == ProofOutcome::Proven);
     PredicateRelations generous_relations(program, false, {512, 256});
     CHECK(generous_relations.implies(a, wide_or) == Proof::Proven);
     const auto possible = generous_relations.classify(unconditionalContext(), wide_or);

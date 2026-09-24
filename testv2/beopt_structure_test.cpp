@@ -1,5 +1,6 @@
 #include "backend/beopt.hpp"
 #include "backend/beopt_structure.hpp"
+#include "backend/beopt_case_guards.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -157,9 +158,10 @@ static Program muxProgram(bool exclusive, bool shared = false) {
 static void muxes() {
     for (bool exclusive : {false, true}) {
         auto p = muxProgram(exclusive); MutableProgram g(p);
-        CHECK(parallelizeExclusiveMuxes(g) == exclusive);
-        const auto& root = g.program().signal(g.program().signals.size() - 1);
-        CHECK(root.driver->kind == (exclusive ? OperationKind::Case : OperationKind::Ite));
+        const auto root_id = p.signals.back().id;
+        CHECK(parallelizeExclusiveMuxes(g));
+        const auto& root = g.program().signal(root_id);
+        CHECK(root.driver->kind == OperationKind::Case);
         if (exclusive) CHECK(caseBranchCount(*root.driver) == 3);
         for (unsigned sel = 0; sel < 4; ++sel)
             for (unsigned a = 0; a < 256; ++a) {
@@ -167,8 +169,140 @@ static void muxes() {
                 CHECK(eval(p,p.outputs[0],in) == eval(g.program(),p.outputs[0],in));
             }
     }
-    MutableProgram shared(muxProgram(true, true)); CHECK(!parallelizeExclusiveMuxes(shared));
+    auto shared_input = muxProgram(true, true);
+    MutableProgram shared(shared_input); CHECK(parallelizeExclusiveMuxes(shared));
+    for (unsigned sel = 0; sel < 4; ++sel)
+        for (const auto& out : shared_input.outputs)
+            CHECK(eval(shared_input, out, {{"sel",sel},{"a",17},{"b",89}}) ==
+                  eval(shared.program(), out, {{"sel",sel},{"a",17},{"b",89}}));
     MutableProgram bounded(muxProgram(true)); CHECK(!parallelizeExclusiveMuxes(bounded, 2));
+}
+static void generalMuxTrees() {
+    Program p;
+    auto a = node(p, "a", 1), b = node(p, "b", 1), c = node(p, "c", 1);
+    auto root = mux(p, a, mux(p, b, literal(11), literal(22)),
+                         mux(p, c, literal(33), literal(44)));
+    output(p, root); MutableProgram g(p);
+    CHECK(parallelizeExclusiveMuxes(g));
+    CHECK(g.program().signal(root.node).driver->kind == OperationKind::Case);
+    for (unsigned bits = 0; bits < 8; ++bits) {
+        std::map<std::string,uint64_t> in{{"a",bits&1},{"b",(bits>>1)&1},{"c",bits>>2}};
+        CHECK(eval(p,p.outputs[0],in) == eval(g.program(),p.outputs[0],in));
+    }
+    // 256 nested true arms, exceeding the old hard limit by 32x.
+    Program large;
+    auto sel = node(large, "sel", 8);
+    auto value = literal(7);
+    for (unsigned i = 0; i < 256; ++i) {
+        auto cond = binary(large, OpCode::Eq, sel, literal(i), 1);
+        value = mux(large, cond, literal(i ^ 0x5a), value);
+        // Alternate orientation while preserving each selection.
+        if (i & 1) {
+            auto neg = operation(large, OperationKind::Unary, OpCode::LogicNot, {cond}, 1);
+            auto& updated = *large.signal(value.node).driver;
+            updated.operands = {neg, updated.operands[2], updated.operands[1]};
+        }
+    }
+    output(large,value); MutableProgram lg(large);
+    CHECK(parallelizeExclusiveMuxes(lg));
+    CHECK(caseBranchCount(*lg.program().signal(value.node).driver) == 256);
+    for (unsigned i = 0; i < 256; ++i)
+        CHECK(eval(large,large.outputs[0],{{"sel",i}}) ==
+              eval(lg.program(),large.outputs[0],{{"sel",i}}));
+}
+static void caseGuards() {
+    // A data-dependent earlier arm cannot affect a different state decoder.
+    Program p;
+    auto state=node(p,"state",8), data=node(p,"data",1);
+    auto eq3=binary(p,OpCode::Eq,state,literal(3),1);
+    auto eq27=binary(p,OpCode::Eq,state,literal(27),1);
+    auto early=binary(p,OpCode::BitAnd,eq3,data,1);
+    auto result=mux(p,early,literal(11),mux(p,eq27,literal(22),literal(33)));
+    output(p,result); MutableProgram graph(p);
+    CHECK(parallelizeExclusiveMuxes(graph));
+    CHECK(simplifyCaseGuards(graph));
+    const auto op=*graph.program().signal(result.node).driver;
+    CHECK(op.kind==OperationKind::Case);
+    const auto late=op.operands[2];
+    const auto& decoder=*graph.program().signal(late.node).driver;
+    CHECK(decoder.kind==OperationKind::Binary && decoder.op==OpCode::Eq);
+    CHECK(decoder.operands[0].node==state.node);
+    CHECK(decoder.operands[1].constant.toU64()==27);
+    std::set<NodeId> seen; std::vector<NodeId> pending{late.node};
+    while (!pending.empty()) {
+        auto id=pending.back(); pending.pop_back();
+        if (!seen.insert(id).second) continue;
+        CHECK(id!=data.node);
+        if (graph.program().signal(id).driver)
+            for (const auto& o:graph.program().signal(id).driver->operands)
+                if (o.kind==OperandKind::Symbol) pending.push_back(o.node);
+    }
+    for (unsigned st=0;st<256;++st) for (unsigned d=0;d<2;++d) {
+        const std::map<std::string,uint64_t> input{{"state",st},{"data",d}};
+        CHECK(eval(p,p.outputs[0],input)==eval(graph.program(),p.outputs[0],input));
+        unsigned active=0;
+        for (std::size_t i=0;i<caseBranchCount(op);++i) {
+            const auto c=op.operands[2*i];
+            active+=c.kind==OperandKind::Literal ? c.constant.toU64() :
+                eval(graph.program(),graph.program().signal(c.node).name,input);
+        }
+        CHECK(active<=1);
+    }
+    // Native ordered Case may overlap. Preserve first-hit semantics while
+    // producing mutually exclusive guards with logarithmic prefix depth.
+    Program priority; std::vector<Operand> args;
+    for (unsigned i=0;i<128;++i) {
+        args.push_back(node(priority,"c"+std::to_string(i),1));
+        args.push_back(literal(i));
+    }
+    args.push_back(literal(255));
+    auto root=operation(priority,OperationKind::Case,OpCode::None,args);
+    output(priority,root); MutableProgram pg(priority);
+    CHECK(simplifyCaseGuards(pg));
+    const auto po=*pg.program().signal(root.node).driver;
+    CHECK(depth(pg.program(),po.operands[254].node)<=10);
+    for (unsigned k=0;k<256;++k) {
+        std::map<std::string,uint64_t> input;
+        for (unsigned i=0;i<128;++i) input["c"+std::to_string(i)]=
+            k<128 ? i==k : ((i*37+k*13)%31==0);
+        CHECK(eval(priority,priority.outputs[0],input)==eval(pg.program(),priority.outputs[0],input));
+        unsigned active=0;
+        for (std::size_t i=0;i<caseBranchCount(po);++i) {
+            auto c=po.operands[2*i];
+            active+=c.kind==OperandKind::Literal ? c.constant.toU64() :
+                eval(pg.program(),pg.program().signal(c.node).name,input);
+        }
+        CHECK(active<=1);
+    }
+}
+static void randomCaseGuards() {
+    uint32_t seed=0x71ab923u;
+    auto random=[&]() { seed=seed*1664525u+1013904223u; return seed; };
+    for (unsigned trial=0;trial<32;++trial) {
+        Program p; std::vector<Operand> terms;
+        for (unsigned i=0;i<5;++i) terms.push_back(node(p,"x"+std::to_string(i),1));
+        for (unsigned i=0;i<24;++i) {
+            const auto a=terms[random()%terms.size()], b=terms[random()%terms.size()];
+            terms.push_back((random()&3)==0 ? operation(p,OperationKind::Unary,OpCode::LogicNot,{a},1) :
+                binary(p,(random()&1) ? OpCode::BitAnd : OpCode::BitOr,a,b,1));
+        }
+        std::vector<Operand> args;
+        for (unsigned i=0;i<8;++i) { args.push_back(terms[random()%terms.size()]); args.push_back(literal(i)); }
+        args.push_back(literal(99));
+        auto root=operation(p,OperationKind::Case,OpCode::None,args); output(p,root);
+        MutableProgram g(p); CHECK(simplifyCaseGuards(g));
+        for (unsigned bits=0;bits<32;++bits) {
+            std::map<std::string,uint64_t> input;
+            for (unsigned i=0;i<5;++i) input["x"+std::to_string(i)]=(bits>>i)&1;
+            CHECK(eval(p,p.outputs[0],input)==eval(g.program(),p.outputs[0],input));
+            unsigned active=0; const auto& op=*g.program().signal(root.node).driver;
+            for (std::size_t i=0;i<caseBranchCount(op);++i) {
+                auto c=op.operands[2*i];
+                active+=c.kind==OperandKind::Literal ? c.constant.toU64() : eval(g.program(),g.program().signal(c.node).name,input);
+            }
+            CHECK(active<=1);
+        }
+    }
 }
 static void trees() {
     for (auto opcode : {OpCode::BitAnd, OpCode::BitOr, OpCode::BitXor, OpCode::Add}) {
@@ -187,6 +321,17 @@ static void trees() {
         }
         MutableProgram limited(p); CHECK(!balanceAssociativeTrees(limited, 3));
     }
+    Program wide;
+    auto wide_input = node(wide, "input", 8);
+    auto chain = wide_input;
+    for (unsigned i = 1; i < 256; ++i)
+        chain = binary(wide, OpCode::Add, chain, wide_input);
+    output(wide, chain); MutableProgram wide_graph(wide);
+    CHECK(balanceAssociativeTrees(wide_graph));
+    CHECK(depth(wide_graph.program(), chain.node) == 8);
+    for (unsigned i = 0; i < 256; ++i)
+        CHECK(eval(wide, wide.outputs[0], {{"input",i}}) ==
+              eval(wide_graph.program(), wide.outputs[0], {{"input",i}}));
     Program p;
     auto a = node(p,"a",8), b = node(p,"b",8), c = node(p,"c",8), d = node(p,"d",8);
     auto late = binary(p,OpCode::Mul,a,b);
@@ -220,8 +365,10 @@ static void postSinkingCleanup() {
     auto both = binary(p,OpCode::LogicAnd,a,b,1);
     auto inner = mux(p,both,literal(9),literal(10));
     auto root = mux(p,a,mux(p,b,inner,literal(9)),literal(9)); output(p,root);
-    Options options; options.max_iterations = 0;
-    auto result = optimizeProgram(p,options);
+    // Test cleanup after explicitly invoking sinking; the pipeline may disable it.
+    MutableProgram sunk(p);
+    sinkPredicates(sunk);
+    auto result = optimizeProgram(sunk.finish());
     for (const auto& signal : result.signals) if (signal.name == p.outputs[0]) {
         CHECK(signal.driver->kind == OperationKind::Assign);
         CHECK(signal.driver->operands[0].kind == OperandKind::Literal);
@@ -237,4 +384,4 @@ static void postSinkingCleanup() {
     auto boolean_only = parseOptions({"none", "boolean"});
     CHECK(boolean_only.boolean_control_normalization);
 }
-int main() { relations(); muxes(); trees(); postSinkingCleanup(); }
+int main() { relations(); muxes(); generalMuxTrees(); caseGuards(); randomCaseGuards(); trees(); postSinkingCleanup(); }

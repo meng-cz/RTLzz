@@ -581,6 +581,37 @@ void collectNamesExpr(const s1apinorm::S1ExprPtr& expr, std::unordered_set<std::
     for (const auto& part : expr->parts) collectNamesExpr(part, out);
 }
 
+// Only speculate expressions whose evaluation is both side-effect free and
+// total. In particular, purity alone does not justify eagerly evaluating a
+// guarded division, dynamic index, shift, or call. This whitelist is shared by
+// the surface-AST and normalized-AST lowering paths.
+template <typename ExprT>
+bool canEvaluateLogicalOperandEagerly(const std::shared_ptr<ExprT>& expr) {
+    if (!expr) return false;
+    using Kind = decltype(expr->kind);
+    switch (expr->kind) {
+    case Kind::Literal:
+    case Kind::VarRef:
+        return true;
+    case Kind::FieldAccess:
+        return canEvaluateLogicalOperandEagerly(expr->struct_base);
+    case Kind::Cast:
+        return canEvaluateLogicalOperandEagerly(expr->cast_expr);
+    case Kind::UnaryOp:
+        return (expr->op == "!" || expr->op == "~" || expr->op == "+") &&
+               canEvaluateLogicalOperandEagerly(expr->operand);
+    case Kind::BinaryOp:
+        if (expr->op != "||" && expr->op != "&&" &&
+            expr->op != "|" && expr->op != "&" && expr->op != "^" &&
+            expr->op != "==" && expr->op != "!=" && expr->op != "<" &&
+            expr->op != "<=" && expr->op != ">" && expr->op != ">=") return false;
+        return canEvaluateLogicalOperandEagerly(expr->left) &&
+               canEvaluateLogicalOperandEagerly(expr->right);
+    default:
+        return false;
+    }
+}
+
 struct LowerResult {
     Operand operand;
     std::vector<S3StmtPtr> prelude;
@@ -849,7 +880,11 @@ private:
             if (expr->op == ",") fail(expr->debug_loc, "Comma expression is not supported");
             if (expr->op == "=") return lowerAssignmentExpr(expr);
             if (isCompoundAssign(expr->op)) return lowerCompoundAssignExpr(expr);
-            if (expr->op == "&&" || expr->op == "||") return lowerShortCircuit(expr);
+            if ((expr->op == "&&" || expr->op == "||") &&
+                !(canEvaluateLogicalOperandEagerly(expr->left) &&
+                  canEvaluateLogicalOperandEagerly(expr->right))) {
+                return lowerShortCircuit(expr);
+            }
             auto lhs = lowerExpr(expr->left);
             result.prelude = std::move(lhs.prelude);
             auto rhs = lowerExpr(expr->right);
@@ -1007,7 +1042,11 @@ private:
             if (expr->op == ",") fail(expr->debug_loc, "Comma expression is not supported");
             if (expr->op == "=") return lowerAssignmentExpr(expr);
             if (isCompoundAssign(expr->op)) return lowerCompoundAssignExpr(expr);
-            if (expr->op == "&&" || expr->op == "||") return lowerShortCircuit(expr);
+            if ((expr->op == "&&" || expr->op == "||") &&
+                !(canEvaluateLogicalOperandEagerly(expr->left) &&
+                  canEvaluateLogicalOperandEagerly(expr->right))) {
+                return lowerShortCircuit(expr);
+            }
             auto lhs = lowerExpr(expr->left);
             result.prelude = std::move(lhs.prelude);
             auto rhs = lowerExpr(expr->right);

@@ -17,7 +17,7 @@ struct Options {
     bool width_simplification = true;
     bool algebraic_identities = true;
     bool predicate_sinking = true;
-    int max_iterations = 16;
+    int max_iterations = 8;
     bool exclusive_muxes = true;
     bool balance_trees = true;
     bool bit_range_update_coalescing = true;
@@ -25,12 +25,12 @@ struct Options {
     // Predicate sinking participates in the main optimizer fixed point, while
     // this bound prevents it from dominating large graphs indefinitely.
     int max_predicate_iterations = 4;
-    std::size_t max_predicate_formulas = 2048;
-    std::size_t max_predicate_atoms = 128;
-    unsigned max_mux_branches = 8;
-    unsigned max_tree_leaves = 32;
-    unsigned max_bit_range_updates = 32;
-    unsigned max_bit_compose_pieces = 64;
+    std::size_t max_predicate_formulas = 16384;
+    std::size_t max_predicate_atoms = 512;
+    unsigned max_mux_branches = 1024;
+    unsigned max_tree_leaves = 1024;
+    unsigned max_bit_range_updates = 1024;
+    unsigned max_bit_compose_pieces = 2048;
 };
 
 Options parseOptions(const std::vector<std::string>& values);

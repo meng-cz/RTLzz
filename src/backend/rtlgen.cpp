@@ -796,22 +796,25 @@ private:
         if (signal.type.isArray() || op.type.isArray()) {
             throw std::runtime_error("rtlgen does not support array-valued BEIR case operation");
         }
+        const auto& fallback = op.operands.back();
+        const auto fallback_expr = resizeExpr(operand(fallback), widthOf(fallback.type),
+                                              widthOf(signal.type), false);
         os << "    always_comb begin" << debugComment(op.debug) << "\n"
-           << "        case (1'b1)\n";
+           << "        unique case (1'b1)\n";
         for (std::size_t branch = 0; branch < beir::caseBranchCount(op); ++branch) {
             const auto& condition = op.operands[branch * 2];
             const auto& value = op.operands[branch * 2 + 1];
             if (condition.type.isArray() || widthOf(condition.type) != 1) {
                 throw std::runtime_error("rtlgen BEIR case condition must be one bit");
             }
+            const auto value_expr = resizeExpr(operand(value), widthOf(value.type),
+                                               widthOf(signal.type), false);
+            if (value_expr == fallback_expr) continue;
             os << "            " << operand(condition) << ": " << sig(signal.id)
-               << " = " << resizeExpr(operand(value), widthOf(value.type),
-                                      widthOf(signal.type), false) << ";\n";
+               << " = " << value_expr << ";\n";
         }
-        const auto& fallback = op.operands.back();
         os << "            default: " << sig(signal.id) << " = "
-           << resizeExpr(operand(fallback), widthOf(fallback.type),
-                         widthOf(signal.type), false) << ";\n"
+           << fallback_expr << ";\n"
            << "        endcase\n"
            << "    end\n";
     }

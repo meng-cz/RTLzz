@@ -420,7 +420,48 @@ static void dynamicWritesUseIndexBeforeValue() {
     expectContains(debug, "DynamicWriteBit(base, index, value)");
 }
 
-int main() {
+static void pureLogicalExpressionsDoNotCreateControlFlow() {
+    auto top = baseTop();
+    top.params.push_back(param("gate", boolType()));
+    top.params.push_back(param("a", boolType()));
+    top.params.push_back(param("b", boolType()));
+    top.params.push_back(outputParam("out", boolType()));
+    auto expr = make_binary("||", make_var("a", boolType()),
+        make_binary("&&", make_var("b", boolType()),
+                    make_unary("!", make_var("a", boolType()), boolType()), boolType()), boolType());
+    top.body.push_back(ifStmt(make_var("gate", boolType()),
+        {assign(make_var("out", boolType()), expr)}));
+    const auto debug = statementizeDebug(top);
+    expectContains(debug, "LogicalOr(");
+    expectContains(debug, "LogicalAnd(");
+    CHECK(debug.find("shortcircuit") == std::string::npos);
+}
+
+static void unsafeLogicalRhsRemainsConditional() {
+    for (const std::string op : {"||", "&&"}) {
+        for (bool use_call : {false, true}) {
+            auto top = baseTop();
+            top.params.push_back(param("gate", boolType()));
+            top.params.push_back(param("divisor", int8()));
+            top.params.push_back(outputParam("out", boolType()));
+            auto rhs = use_call ? call("effect", {}, boolType()) :
+                make_binary("!=", make_binary("/", make_literal("7", int8()),
+                    make_var("divisor", int8()), int8()), make_literal("0", int8()), boolType());
+            top.body.push_back(assign(make_var("out", boolType()),
+                make_binary(op, make_var("gate", boolType()), rhs, boolType())));
+            const auto debug = statementizeDebug(top);
+            expectContains(debug, "shortcircuit");
+            const auto branch = debug.find("if ");
+            const auto evaluation = debug.find(use_call ? "= effect(" : "= Div(");
+            CHECK(branch != std::string::npos && evaluation != std::string::npos && branch < evaluation);
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    pureLogicalExpressionsDoNotCreateControlFlow();
+    unsafeLogicalRhsRemainsConditional();
+    if (argc == 2 && std::string(argv[1]) == "--logical-only") return 0;
     dynamicWritesUseIndexBeforeValue();
     nestedCallsBecomeStatementLevel();
     returnIfHelperAndLambdaAreStatementized();
