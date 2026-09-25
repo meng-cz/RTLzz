@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <memory>
+#include <set>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,6 +24,7 @@ struct Node {
     bool input = false;
     Operand operand;
     Edge a = 0, b = 0;
+    Edge fact = 0;
 };
 
 inline bool isBool(const ValueType& type) {
@@ -55,11 +58,203 @@ inline constexpr std::size_t kCutNodes = 256;
 // 4 -> 16 inputs grows the truth table from 16 to 65536 rows (4096x).
 inline constexpr std::size_t kTruthBudget = 65536ULL * 4096;
 
+// Facts use stable input IDs, independent of DAG rebuilding and BEIR NodeIds.
+class InputRelations {
+    std::map<Operand, Edge, decltype(&predicate_detail::operandLess)> ids_{
+        &predicate_detail::operandLess};
+    std::vector<Operand> operands_;
+    std::set<std::pair<Edge, Edge>> implications_;
+    std::map<Edge, Edge> aliases_;
+public:
+    Edge input(const Operand& operand) {
+        auto found = ids_.find(operand);
+        if (found != ids_.end()) return found->second;
+        Edge id = (operands_.size() + 1) * 2;
+        operands_.push_back(operand); ids_.emplace(operand, id); return id;
+    }
+    void imply(Edge a, Edge b) {
+        implications_.emplace(a, b);
+        implications_.emplace(b ^ 1, a ^ 1); // Contrapositive.
+    }
+    bool empty() const { return implications_.empty(); }
+    bool implies(Edge a, Edge b) const {
+        return a == b || implications_.count({a,b});
+    }
+    Edge canonical(Edge e) const {
+        while (aliases_.count(e)) e = aliases_.at(e);
+        return e;
+    }
+    // Bit 0/1/2 denotes less/equal/greater. Require identical comparison
+    // widths and signed interpretation; mixed extensions remain opaque.
+    struct Compare { Operand a, b; unsigned mask; };
+    static std::optional<Compare> comparison(const Operand& value, const Program& program) {
+        const auto* op = predicate_detail::symbolDriver(value, program);
+        if (!op || op->kind != OperationKind::Binary || op->operands.size()!=2) return {};
+        unsigned mask;
+        switch(op->op) {
+        case OpCode::Lt: mask=1; break; case OpCode::Eq: mask=2; break;
+        case OpCode::Le: mask=3; break; case OpCode::Gt: mask=4; break;
+        case OpCode::Ne: mask=5; break; case OpCode::Ge: mask=6; break;
+        default: return {};
+        }
+        Operand a=op->operands[0], b=op->operands[1];
+        if (a.type.isArray() || a.type.width<=0 ||
+            !predicate_detail::sameValueType(a.type,b.type) || a.signed_view!=b.signed_view)
+            return {};
+        for (const auto& v : {a,b}) if (v.kind==OperandKind::Literal &&
+            (v.constant.width!=v.type.width || v.constant.signed_view!=v.signed_view)) return {};
+        if (predicate_detail::operandLess(b,a)) {
+            std::swap(a,b); mask=((mask&1)<<2)|(mask&2)|((mask&4)>>2);
+        }
+        return Compare{a,b,mask};
+    }
+    static unsigned possible(const Operand& x, const Operand& y, const Program& program) {
+        auto a=comparison(x,program), b=comparison(y,program);
+        if (!a || !b) return 15; // Four possible pairs of Boolean values.
+        unsigned result=0;
+        auto add=[&](unsigned lhs,unsigned rhs) {
+            result |= 1u << ((bool(a->mask&lhs)?2:0) | (bool(b->mask&rhs)?1:0));
+        };
+        if (predicate_detail::sameOperand(a->a,b->a) && predicate_detail::sameOperand(a->b,b->b)) {
+            if (predicate_detail::sameOperand(a->a,a->b)) add(2,2);
+            else for (unsigned r : {1u,2u,4u}) add(r,r);
+            return result;
+        }
+        // Constant thresholds sharing a selector. Use an overapproximation of
+        // the ordered intervals, valid even when adjacent integers leave a gap.
+        auto orient=[](Compare& c) {
+            if (c.a.kind==OperandKind::Literal) {
+                std::swap(c.a,c.b); c.mask=((c.mask&1)<<2)|(c.mask&2)|((c.mask&4)>>2);
+            }
+        };
+        orient(*a); orient(*b);
+        if (!predicate_detail::sameOperand(a->a,b->a) || a->b.kind!=OperandKind::Literal ||
+            b->b.kind!=OperandKind::Literal || a->a.signed_view) return 15;
+        auto limbs=[](Operand v) {
+            v.constant.limbs.resize((v.type.width+63)/64,0);
+            if (v.type.width%64) v.constant.limbs.back() &= (std::uint64_t{1}<<(v.type.width%64))-1;
+            return v.constant.limbs;
+        };
+        const auto av=limbs(a->b), bv=limbs(b->b);
+        int order=0;
+        for (std::size_t k=av.size(); k-- > 0;) if (av[k]!=bv[k]) { order=av[k]<bv[k]?-1:1; break; }
+        if (!order) { for(unsigned r:{1u,2u,4u}) add(r,r); }
+        else if (order<0) { add(1,1);add(2,1);add(4,1);add(4,2);add(4,4); }
+        else { add(1,1);add(1,2);add(1,4);add(2,4);add(4,4); }
+        return result;
+    }
+    void prove(const Program& program) {
+        // Index every visited signal in each input's three-level driving cone.
+        // There is no pair-count cap: all pairs with a common signal are tried.
+        std::map<Operand,std::vector<std::size_t>,decltype(&predicate_detail::operandLess)>
+            postings{&predicate_detail::operandLess};
+        for (std::size_t i=0;i<operands_.size();++i) {
+            std::map<Operand,unsigned,decltype(&predicate_detail::operandLess)> seen{&predicate_detail::operandLess};
+            std::function<void(const Operand&,unsigned)> visit=[&](const Operand& v,unsigned depth) {
+                if(v.kind==OperandKind::Literal) return;
+                auto found=seen.find(v);
+                if(found!=seen.end() && found->second<=depth) return;
+                seen[v]=depth;
+                if(depth==3) return;
+                if(const auto* op=predicate_detail::symbolDriver(v,program))
+                    for(const auto& child:op->operands) visit(child,depth+1);
+            };
+            visit(operands_[i],0);
+            for(const auto& entry:seen) postings[entry.first].push_back(i);
+        }
+        std::vector<std::set<std::size_t>> peers(operands_.size());
+        for(const auto& entry:postings) {
+            const auto& ids=entry.second;
+            for(std::size_t i=0;i<ids.size();++i)
+                for(std::size_t j=0;j<i;++j) peers[ids[i]].insert(ids[j]);
+        }
+        auto record=[&](std::size_t i,std::size_t j,unsigned allowed) {
+            for(unsigned x=0;x<2;++x) for(unsigned y=0;y<2;++y)
+                if(!(allowed&(1u<<(2*x+y))))
+                    imply((i+1)*2+!x,(j+1)*2+y);
+        };
+        for(std::size_t i=0;i<peers.size();++i) for(auto j:peers[i]) {
+            unsigned direct=possible(operands_[i],operands_[j],program);
+            if(direct!=15) { record(i,j,direct); continue; }
+            // Exact enumeration of a bounded Boolean abstraction. Comparisons
+            // at the leaves constrain the assignments, instead of treating all
+            // comparison outcomes as independent SAT atoms.
+            struct Formula { int kind; unsigned a,b; }; // atom, constant, not, and, or
+            std::vector<Formula> formulas;
+            std::vector<Operand> atoms;
+            bool overflow=false;
+            std::function<unsigned(const Operand&,unsigned)> build=[&](const Operand& v,unsigned depth) {
+                auto add=[&](int kind,unsigned a=0,unsigned b=0) {
+                    formulas.push_back({kind,a,b}); return unsigned(formulas.size()-1);
+                };
+                if(v.kind==OperandKind::Literal) return add(1,!v.constant.isZero());
+                const auto* op=predicate_detail::symbolDriver(v,program);
+                if(op && depth<3) {
+                    if(op->kind==OperationKind::Assign && op->operands.size()==1 &&
+                       predicate_detail::sameValueType(op->type,op->operands[0].type))
+                        return build(op->operands[0],depth+1);
+                    if(op->kind==OperationKind::Unary && op->op==OpCode::LogicNot && op->operands.size()==1)
+                        return add(2,build(op->operands[0],depth+1));
+                    if(op->kind==OperationKind::Binary && op->operands.size()==2 &&
+                       (op->op==OpCode::LogicAnd || op->op==OpCode::LogicOr ||
+                        (op->operands[0].type.width==1 && op->operands[1].type.width==1 &&
+                         !op->operands[0].type.isArray() && !op->operands[1].type.isArray() &&
+                         (op->op==OpCode::BitAnd || op->op==OpCode::BitOr)))) {
+                        auto x=build(op->operands[0],depth+1),y=build(op->operands[1],depth+1);
+                        return add(op->op==OpCode::LogicAnd || op->op==OpCode::BitAnd?3:4,x,y);
+                    }
+                }
+                unsigned k=0;
+                while(k<atoms.size() && !predicate_detail::sameOperand(atoms[k],v)) ++k;
+                if(k==atoms.size()) atoms.push_back(v);
+                overflow |= atoms.size()>8;
+                return add(0,k);
+            };
+            auto x=build(operands_[i],0),y=build(operands_[j],0);
+            if(overflow) continue;
+            struct Constraint { unsigned a,b,allowed; };
+            std::vector<Constraint> constraints;
+            for(unsigned a=0;a<atoms.size();++a) for(unsigned b=0;b<a;++b) {
+                unsigned allowed=possible(atoms[a],atoms[b],program);
+                if(allowed!=15) constraints.push_back({a,b,allowed});
+            }
+            unsigned allowed=0;
+            std::vector<bool> values(formulas.size());
+            for(unsigned bits=0;bits<(1u<<atoms.size());++bits) {
+                bool valid=true;
+                for(const auto& c:constraints)
+                    if(!(c.allowed&(1u<<((((bits>>c.a)&1)*2)+((bits>>c.b)&1))))) {valid=false;break;}
+                if(!valid) continue;
+                for(unsigned k=0;k<formulas.size();++k) {
+                    const auto& f=formulas[k];
+                    values[k]=f.kind==0?bool((bits>>f.a)&1):f.kind==1?bool(f.a):
+                              f.kind==2?!values[f.a]:f.kind==3?(values[f.a]&&values[f.b]):
+                              (values[f.a]||values[f.b]);
+                }
+                allowed |= 1u << (unsigned(values[x])*2+unsigned(values[y]));
+            }
+            record(i,j,allowed);
+        }
+        for (const auto& relation : implications_) {
+            if (!implications_.count({relation.second, relation.first})) continue;
+            Edge a = canonical(relation.first), b = canonical(relation.second);
+            if (a == b || a == (b ^ 1)) continue;
+            if (a > b) std::swap(a,b);
+            aliases_[b] = a; aliases_[b ^ 1] = a ^ 1;
+        }
+    }
+};
+
 class Dag {
+    std::shared_ptr<InputRelations> relations_;
+    std::map<Edge, Edge> canonical_inputs_;
     std::map<std::pair<Edge, Edge>, Edge> unique_;
     std::map<Operand, Edge, decltype(&predicate_detail::operandLess)> inputs_{
         &predicate_detail::operandLess};
 public:
+    explicit Dag(std::shared_ptr<InputRelations> relations = std::make_shared<InputRelations>())
+        : relations_(std::move(relations)) {}
+    const auto& relations() const { return relations_; }
     std::vector<Node> nodes{Node{}};
     Edge input(Operand operand) {
         if (operand.kind == OperandKind::Literal) return !operand.constant.isZero();
@@ -68,15 +263,50 @@ public:
         operand.signed_view = false;
         auto found = inputs_.find(operand);
         if (found != inputs_.end()) return found->second;
+        const Edge fact = relations_->input(operand);
+        const Edge canonical = relations_->canonical(fact);
+        if (auto alias = canonical_inputs_.find(canonical & ~Edge{1}); alias != canonical_inputs_.end()) {
+            const Edge result = alias->second ^ (canonical & 1);
+            inputs_.emplace(std::move(operand), result); return result;
+        }
         const Edge result = nodes.size() * 2;
-        nodes.push_back({true, operand, 0, 0});
+        canonical_inputs_.emplace(canonical & ~Edge{1}, result ^ (canonical & 1));
+        nodes.push_back({true, operand, 0, 0, fact});
         inputs_.emplace(std::move(operand), result);
         return result;
+    }
+    bool implies(Edge a, Edge b) const {
+        unsigned budget = 128;
+        return impliesWithin(a, b, 0, budget);
+    }
+    bool impliesWithin(Edge a, Edge b, unsigned depth, unsigned& budget) const {
+        if (!budget) return false;
+        --budget;
+        if (!a || b == 1 || a == b) return true;
+        if (a <= 1 || b <= 1 || depth >= 8) return false;
+        const Node x = nodes[a / 2], y = nodes[b / 2];
+        if (x.input && y.input)
+            return relations_->implies(x.fact ^ (a & 1), y.fact ^ (b & 1));
+        // Conjunction/disjunction implications lift input facts through the DAG.
+        if (!y.input && !(b & 1))
+            return impliesWithin(a,y.a,depth+1,budget) && impliesWithin(a,y.b,depth+1,budget);
+        if (!x.input && (a & 1))
+            return impliesWithin(x.a^1,b,depth+1,budget) && impliesWithin(x.b^1,b,depth+1,budget);
+        if (!x.input && !(a & 1) &&
+            (impliesWithin(x.a,b,depth+1,budget) || impliesWithin(x.b,b,depth+1,budget))) return true;
+        if (!y.input && (b & 1) &&
+            (impliesWithin(a,y.a^1,depth+1,budget) || impliesWithin(a,y.b^1,depth+1,budget))) return true;
+        return false;
     }
     Edge land(Edge a, Edge b, unsigned depth = 0) {
         if (a > b) std::swap(a, b);
         if (!a || a == (b ^ 1)) return 0;
         if (a == 1 || a == b) return b;
+        if (!relations_->empty()) {
+            if (implies(a, b ^ 1) || implies(b, a ^ 1)) return 0;
+            if (implies(a, b)) return a;
+            if (implies(b, a)) return b;
+        }
         // Bounded, two-level absorption and contradiction. No tree expansion.
         auto contains = [&](Edge tree, Edge leaf) {
             return tree > 1 && !(tree & 1) && !nodes[tree / 2].input &&
@@ -212,7 +442,7 @@ public:
                 if (live[id] && !nodes[id].input) {
                     ++fanout[nodes[id].a / 2]; ++fanout[nodes[id].b / 2];
                 }
-            Dag next;
+            Dag next(relations_);
             std::vector<Edge> mapped(nodes.size());
             std::vector<unsigned> depth(1, 0);
             auto level = [&](Edge edge) {
@@ -263,6 +493,22 @@ public:
             *this = std::move(next);
             if (!balanced) break;
         }
+    }
+
+    // Replay saved input facts after balancing has changed the AIG shape.
+    // Stable input operands reconnect facts even when node IDs were renumbered.
+    // One topological sweep propagates each simplification to every consumer.
+    void propagateRelations(std::vector<Edge>& roots, const InputRelations& snapshot) {
+        Dag next(std::make_shared<InputRelations>(snapshot));
+        std::vector<Edge> mapped(nodes.size());
+        for (std::size_t id = 1; id < nodes.size(); ++id) {
+            const Node node = nodes[id];
+            mapped[id] = node.input ? next.input(node.operand) :
+                next.land(mapped[node.a / 2] ^ (node.a & 1),
+                          mapped[node.b / 2] ^ (node.b & 1));
+        }
+        for (auto& root : roots) root = mapped[root / 2] ^ (root & 1);
+        *this = std::move(next);
     }
 
     // Exact truth table of a bounded cut. Only single-fanout, non-output
@@ -414,8 +660,11 @@ inline bool normalizeBooleanControl(MutableProgram& graph) {
         }
         values[id] = result;
     }
+    dag.relations()->prove(program);
+    const InputRelations input_relations_snapshot = *dag.relations();
     dag.rewriteLocal(values);
     dag.optimizeAig(values, output);
+    dag.propagateRelations(values, input_relations_snapshot);
     // Prune the temporary DAG before cut analysis; dead original logic must
     // neither count as shared fanout nor consume the truth-table budget.
     const std::size_t initial = dag.nodes.size();
@@ -444,7 +693,7 @@ inline bool normalizeBooleanControl(MutableProgram& graph) {
     }
     // Rebuild through a second canonical DAG so substitutions propagate to all
     // outputs and newly equal expressions merge, without iterating whole cones.
-    Dag final;
+    Dag final(dag.relations());
     // Resolve mapped edges with an explicit stack; replacements depend only on
     // their cut leaves, so the resulting graph remains acyclic.
     std::vector<Edge> resolved(dag.nodes.size());
