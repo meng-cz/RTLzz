@@ -287,8 +287,9 @@ done
 - 代数化简；支持 Ite 的常量条件和等值分支折叠；Case 会删除恒假分支、在恒真分支处截断后续分支，并折叠全部结果相同的选择。
 
 ### `src/backend/beopt_boolean.hpp`
-- 将无副作用的一位 Ite 常量分支、短路 phi 及 guard/fallback 模式规范化为 AND/OR/NOT；不能证明等价的一般优先级 Ite 保持不变。
-- 展平混合 Logic/Bit AND、OR 树，执行常量、幂等、互补、吸收和单互补 consensus 化简，并重建平衡二叉树；图改变后使 value-facts 分析失效。
+- 所有标量一位信号统一导入多输入、多输出 AND/补边 DAG；Assign、NOT、AND/OR/XOR、一位 Eq/Ne、ITE 和合法 Case 导入为内部逻辑，Case 保留首真优先语义。多位操作产生的一位结果及不支持的操作作为不透明输入，外部消费者和可观察端口标为输出。
+- 图内执行常量传播、规范化结构共享及有界局部代数化简；单扇出且不跨输出边界的局部区域进行精确真值表改写，最多 16 输入、8 层、256 个内部节点，全 pass 真值表分析预算为 268435456 个行/节点工作单位，仅接受 AND 节点数下降的替换。
+- 统一重建各输出并再次合并共享结构，只发射可达节点；尽量复用原有信号避免重复运行不断生成临时节点。pass 自带 BEIR DCE，不依赖外部 CSE/Constant/DCE 开关。实现及边界约束见 [`boolnorm.md`](boolnorm.md)。
 
 ### `src/backend/beopt_assign_chains.hpp`
 - assignment chain 简化。
@@ -301,8 +302,9 @@ done
 
 ### `src/backend/beopt_predicate.hpp`
 - predicate/guard 相关 BEIR 优化。
+- 当前下沉流程、预算覆盖范围及静态性能风险见 [`sinkpred.md`](sinkpred.md)。
 - `PredicateRelations::implies/isExclusive` 对调用者统一返回 Proven/Unknown；详细查询另区分 Proven、Counterexample 和 ResourceLimit。SAT/DPLL 证明按单次查询实际可达的公式和原子数限制资源，超限只使该查询返回 Unknown，不停止后续节点或更小子树的证明。
-- branchContext 保留全部父路径事实；下沉前先排除存在无条件使用路径的 Ite，只向可能到达候选 Ite 的信号传播 demand-context，并以 guard/路径条件的布尔原子或比较选择变量交集廉价筛选 SAT 查询。对保留的路径不按事实数或上下文数截断；Case 条件、分支值和默认值按有序剩余路径传播上下文。同一图快照复用查询结果，图修改后不复用。
+- 下沉从候选 Ite 沿消费者遍历至首个 Ite 数据臂，逐使用位置收集启用条件，要求全部条件蕴含候选 guard 的同一极性。直接输出、条件端口、Case/Call 边界保守放弃；候选及消费者边遍历预算在分析期间生效，超限不授权改写。共享公式快照，统一提交 Assign；不再调用全路径 demand-context/support 分析。
 
 ### `src/backend/beopt_width.hpp`
 - width 相关优化和裁剪；支持 operand signed view 影响的扩展语义；Case 的结果宽度取所有分支值与默认值的合并需求，条件保持一位，结果需求反向传播到每个值分支。
@@ -444,7 +446,7 @@ done
 - 构造原生 Case 验证首真分支布局、共同已知位和值事实、常量传播、恒真/恒假和同值代数折叠、位宽需求传播、谓词分支上下文、CSE/DCE、BEIR 文本及 `always_comb case` RTL 发射。
 
 ### `testv2/beopt_boolean_test.cpp`
-- 对短路 phi、guard/fallback、吸收律和 consensus 构造小型 BEIR 并穷举输入验证等价性；确认普通优先级 Ite 不被改写。
+- 穷举验证短路 phi、吸收律、consensus、一般 ITE 和优先级 Case；覆盖多输出共享、死逻辑清理、多位输入边界及连续调用稳定性。400 个随机多输出图各穷举 16 组输入，覆盖 XOR/Eq/Ne/ITE/Case。
 
 ### `testv2/fixtures/backend_structure.logic.cpp`
 - 8/128 位互斥选择、优先级选择、结合运算及嵌套谓词的端到端 C++/RTL 差分回归。

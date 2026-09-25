@@ -34,7 +34,7 @@ struct Options {
 };
 
 Options parseOptions(const std::vector<std::string>& values);
-using IterationCallback = std::function<void(int iteration)>;
+using IterationCallback = std::function<void(const std::string& iteration)>;
 
 Program optimizeProgram(Program program,
                         const Options& options = Options{},

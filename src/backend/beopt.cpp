@@ -104,41 +104,44 @@ Program optimizeProgram(Program program,
                         const Options& options,
                         const IterationCallback& iteration_callback) {
     MutableProgram graph(std::move(program));
-    bool changed = true;
-    int iteration = 0;
-    int iter_before_predicate_sinking = options.max_iterations > 8 ? 4 : std::max(1, options.max_iterations/2);
-    while ((changed || iteration <= iter_before_predicate_sinking) && iteration < options.max_iterations) {
-        ++iteration;
-        if (iteration_callback) iteration_callback(iteration);
-        changed = false;
-        if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
-        if (options.constant_folding) changed = foldConstants(graph) || changed;
-        if (options.width_simplification) changed = specializeConstantSlices(graph) || changed;
+    const int iter_before_predicate_sinking = options.max_iterations > 8 ? 4 : std::max(1, options.max_iterations / 2);
+    for (int iteration = 1; iteration <= options.max_iterations; ++iteration) {
+        const std::string iter_msg = "iteration " + std::to_string(iteration) + "/" + std::to_string(options.max_iterations);
+        const auto run_pass = [&](const char* name, auto pass, auto&&... args) {
+            if (iteration_callback) iteration_callback(iter_msg + ": " + name);
+            pass(graph, std::forward<decltype(args)>(args)...);
+        };
+        if (options.fold_assign_chains) run_pass("foldAssignChains", foldAssignChains);
+        if (options.constant_folding) run_pass("foldConstants", foldConstants);
+        if (options.width_simplification) run_pass("specializeConstantSlices", specializeConstantSlices);
         if (options.bit_range_update_coalescing) {
-            changed = coalesceBitRangeUpdates(graph,
-                                              options.max_bit_range_updates,
-                                              options.max_bit_compose_pieces) || changed;
+            run_pass("coalesceBitRangeUpdates", coalesceBitRangeUpdates,
+                     options.max_bit_range_updates, options.max_bit_compose_pieces);
         }
-        if (options.algebraic_identities) changed = simplifyAlgebraicIdentities(graph) || changed;
+        if (options.algebraic_identities) run_pass("simplifyAlgebraicIdentities", simplifyAlgebraicIdentities);
         if (options.boolean_control_normalization)
-            changed = normalizeBooleanControl(graph) || changed;
-        if (options.width_simplification) changed = simplifyWidthOperations(graph) || changed;
-        if (options.common_subexpressions) changed = mergeCommonExpressions(graph) || changed;
-        if (options.fold_assign_chains) changed = foldAssignChains(graph) || changed;
-        if (options.dead_node_elimination) changed = eliminateDeadNodes(graph) || changed;
+            run_pass("normalizeBooleanControl", normalizeBooleanControl);
+        if (options.width_simplification) run_pass("simplifyWidthOperations", simplifyWidthOperations);
+        if (options.common_subexpressions) run_pass("mergeCommonExpressions", mergeCommonExpressions);
+        if (options.fold_assign_chains) run_pass("foldAssignChains", foldAssignChains);
+        if (options.dead_node_elimination) run_pass("eliminateDeadNodes", eliminateDeadNodes);
         if (iteration == iter_before_predicate_sinking) {
             if (options.predicate_sinking) {
-                changed = sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms}) || changed;
+                if (iteration_callback) iteration_callback(iter_msg + ": sinkPredicates");
+                sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms});
             }
             if (options.boolean_control_normalization) {
-                changed = normalizeBooleanControl(graph) || changed;
+                run_pass("normalizeBooleanControl", normalizeBooleanControl);
             }
             if (options.exclusive_muxes) {
-                changed = parallelizeExclusiveMuxes(graph, options.max_mux_branches) || changed;
-                simplifyCaseGuards(graph);
+                run_pass("parallelizeExclusiveMuxes", parallelizeExclusiveMuxes, options.max_mux_branches);
+                run_pass("simplifyCaseGuards", [](MutableProgram& graph) { simplifyCaseGuards(graph); });
+            }
+            if (options.boolean_control_normalization) {
+                run_pass("normalizeBooleanControl", normalizeBooleanControl);
             }
             if (options.balance_trees) {
-                changed = balanceAssociativeTrees(graph, options.max_tree_leaves) || changed;
+                run_pass("balanceAssociativeTrees", balanceAssociativeTrees, options.max_tree_leaves);
             }
         }
     }

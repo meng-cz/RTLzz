@@ -515,12 +515,10 @@ PipelineResult compile(const PipelineConfig& config) {
         beir_program = beir::opt::optimizeProgram(
             std::move(beir_program),
             optimization_options,
-            [&config, &optimization_options](int iteration) {
+            [&config, &optimization_options](const std::string& message) {
                 if (config.progress_callback) {
                     config.progress_callback(
-                        "RTLzz backend optimization: round " +
-                        std::to_string(iteration) + "/" +
-                        std::to_string(optimization_options.max_iterations));
+                        "RTLzz backend optimization: " + message);
                 }
             });
         current_debug_text = [&beir_program]() {

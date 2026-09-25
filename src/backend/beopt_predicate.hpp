@@ -178,7 +178,9 @@ struct PredicateLimits {
     std::size_t max_formulas = 16384;
     std::size_t max_atoms = 512;
     std::size_t max_candidate_ites = 4096;
-    std::size_t max_contexts_per_candidate = 1024;
+    std::size_t max_contexts_per_candidate = 1024; // Unique first-ITE boundary conditions.
+    std::size_t max_consumer_edges_per_candidate = 65536;
+    std::size_t max_total_consumer_edges = 4194304;
 };
 
 inline Proof asProof(ProofOutcome outcome) {
@@ -1048,47 +1050,95 @@ inline std::optional<bool> guardedDefaultSelection(const Operation& op,
 inline bool sinkPredicates(MutableProgram& graph,
                            predicate_detail::PredicateLimits limits = {}) {
     Program& program = graph.program();
-    const auto unconditional = predicate_detail::unconditionallyReachable(graph);
-    std::vector<bool> candidates(program.signals.size(), false);
-    bool any_candidate = false;
+    // Preserve operand positions, including multiple uses by the same ITE.
+    struct Use { NodeId consumer; std::size_t operand; };
+    std::vector<std::vector<Use>> users(program.signals.size());
     for (const auto& signal : program.signals) {
-        if (!graph.isObservable(signal) && signal.driver &&
-            signal.driver->kind == OperationKind::Ite && signal.driver->operands.size() == 3 &&
-            !unconditional[signal.id]) {
-            candidates[signal.id] = true;
-            any_candidate = true;
+        if (!signal.driver) continue;
+        for (std::size_t i = 0; i < signal.driver->operands.size(); ++i) {
+            const auto& operand = signal.driver->operands[i];
+            if (operand.kind == OperandKind::Symbol && operand.node < users.size())
+                users[operand.node].push_back({signal.id, i});
         }
     }
-    if (!any_candidate) return false;
-    const auto relevant = predicate_detail::relevantToCandidates(program, candidates);
-    const auto contexts = predicate_detail::analyzeDemandContexts(graph, &relevant);
-    predicate_detail::PredicateSupport support(program);
-    std::vector<NodeId> ranked_candidates;
-    for (const auto& signal : program.signals)
-        if (candidates[signal.id]) ranked_candidates.push_back(signal.id);
-    for (NodeId id : ranked_candidates) support.of(program.signal(id).driver->operands[0]);
-    std::sort(ranked_candidates.begin(), ranked_candidates.end(),
-              [&](NodeId lhs, NodeId rhs) {
-                  return support.of(program.signal(lhs).driver->operands[0]).size() >
-                         support.of(program.signal(rhs).driver->operands[0]).size();
-              });
-    if (ranked_candidates.size() > limits.max_candidate_ites)
-        ranked_candidates.resize(limits.max_candidate_ites);
-    std::vector<bool> selected_candidates(program.signals.size(), false);
-    for (NodeId id : ranked_candidates) selected_candidates[id] = true;
-    const predicate_detail::PredicateDemandIndex demand_index(
-        program, contexts, ranked_candidates, support, limits.max_contexts_per_candidate);
-    predicate_detail::SnapshotPredicateRelations relations(program, limits);
+    // Share formula construction while the graph is unchanged. Avoid the
+    // fingerprint-only structural truth memo used by the old demand analysis.
+    predicate_detail::PredicateRelations relations(program, true, limits);
     std::vector<std::pair<NodeId, bool>> rewrites;
+    std::vector<std::size_t> visited(program.signals.size(), 0);
+    std::size_t candidate_count = 0, total_edges = 0;
     for (const auto& signal : program.signals) {
-        if (!selected_candidates[signal.id] ||
-            contexts[signal.id].size() > limits.max_contexts_per_candidate) {
+        if (graph.isObservable(signal) || !signal.driver ||
+            signal.driver->kind != OperationKind::Ite || signal.driver->operands.size() != 3)
             continue;
+        if (candidate_count >= limits.max_candidate_ites ||
+            total_edges >= limits.max_total_consumer_edges) break;
+        const std::size_t generation = ++candidate_count;
+        std::vector<NodeId> pending{signal.id};
+        visited[signal.id] = generation;
+        std::vector<predicate_detail::Context> boundaries;
+        bool blocked = false;
+        std::size_t edges = 0;
+        for (std::size_t cursor = 0; cursor < pending.size() && !blocked; ++cursor) {
+            const NodeId id = pending[cursor];
+            // An observable intermediate remains an unprotected use even if
+            // it also has guarded consumers. Conservatively reject dead ends.
+            if (graph.isObservable(program.signal(id)) || users[id].empty()) {
+                blocked = true;
+                break;
+            }
+            for (const auto& use : users[id]) {
+                if (edges >= limits.max_consumer_edges_per_candidate ||
+                    total_edges >= limits.max_total_consumer_edges) {
+                    blocked = true;
+                    break;
+                }
+                ++edges;
+                ++total_edges;
+                const auto& consumer = *program.signal(use.consumer).driver;
+                if (consumer.kind == OperationKind::Ite) {
+                    if (consumer.operands.size() != 3 || use.operand == 0) {
+                        blocked = true;
+                        break;
+                    }
+                    // First ITE only: never import an outer consumer's guard.
+                    predicate_detail::appendContext(boundaries,
+                        predicate_detail::guardedContext(consumer.operands[0], use.operand == 1));
+                    if (boundaries.size() > limits.max_contexts_per_candidate) {
+                        blocked = true;
+                        break;
+                    }
+                } else if (consumer.kind == OperationKind::Case ||
+                           consumer.kind == OperationKind::Call) {
+                    // Case needs its own boundary semantics. Unknown calls are
+                    // not assumed to be side-effect-free combination logic.
+                    blocked = true;
+                    break;
+                } else if (visited[use.consumer] != generation) {
+                    visited[use.consumer] = generation;
+                    pending.push_back(use.consumer);
+                }
+            }
         }
-        if (!demand_index.mayBenefitFromProof(signal.id)) continue;
-        const auto selected = predicate_detail::guardedDefaultSelection(
-            *signal.driver, contexts[signal.id], relations);
-        if (selected) rewrites.emplace_back(signal.id, *selected);
+        if (blocked || boundaries.empty()) continue;
+        bool always_true = true, always_false = true;
+        const auto& guard = signal.driver->operands[0];
+        for (const auto& context : boundaries) {
+            const auto& boundary = context.predicates.front();
+            if (predicate_detail::sameOperand(boundary.guard, guard)) {
+                always_true &= boundary.when_true;
+                always_false &= !boundary.when_true;
+            } else {
+                if (always_true)
+                    always_true = relations.impliesDetailed(context, {guard, true}) ==
+                                  predicate_detail::ProofOutcome::Proven;
+                if (always_false)
+                    always_false = relations.impliesDetailed(context, {guard, false}) ==
+                                   predicate_detail::ProofOutcome::Proven;
+            }
+            if (!always_true && !always_false) break;
+        }
+        if (always_true || always_false) rewrites.emplace_back(signal.id, always_true);
     }
     for (const auto& [id, take_true] : rewrites) {
         Signal& signal = program.signal(id);
