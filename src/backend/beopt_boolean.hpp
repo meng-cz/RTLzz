@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -112,6 +113,15 @@ public:
         return result;
     }
     Edge lor(Edge a, Edge b) { return land(a ^ 1, b ^ 1) ^ 1; }
+    Edge lxor(Edge a, Edge b) {
+        const Edge polarity = (a ^ b) & 1;
+        a &= ~Edge{1}; b &= ~Edge{1};
+        if (a == b) return polarity;
+        if (!a) return b ^ polarity;
+        if (!b) return a ^ polarity;
+        if (a > b) std::swap(a, b);
+        return lor(land(a, b ^ 1), land(a ^ 1, b)) ^ polarity;
+    }
     Edge mux(Edge c, Edge t, Edge f) {
         if (t == f) return t;
         if (c <= 1) return c ? t : f;
@@ -119,7 +129,140 @@ public:
         if (t == 0 || t == (c ^ 1)) return land(c ^ 1, f);
         if (f == 0 || f == c) return land(c, t);
         if (f == 1 || f == (c ^ 1)) return lor(c ^ 1, t);
+        if (t == (f ^ 1)) return lxor(c, f);
         return lor(land(c, t), land(c ^ 1, f));
+    }
+
+    // Inspect at most three AND levels. Complemented edges implement NOT,
+    // OR/De Morgan without expanding into alternating rewrite directions.
+    Edge localAnd(Edge a, Edge b) {
+        std::vector<Edge> factors;
+        std::function<void(Edge, unsigned)> collect = [&](Edge e, unsigned depth) {
+            if (depth < 3 && e > 1 && !(e & 1) && !nodes[e / 2].input) {
+                const Node n = nodes[e / 2];
+                collect(n.a, depth + 1); collect(n.b, depth + 1);
+            } else factors.push_back(e);
+        };
+        collect(a, 1); collect(b, 1);
+        std::sort(factors.begin(), factors.end());
+        bool redundant = false;
+        for (std::size_t i = 1; i < factors.size(); ++i) {
+            if (factors[i] == (factors[i - 1] ^ 1)) return 0;
+            redundant |= factors[i] == factors[i - 1];
+        }
+        if (redundant) {
+            factors.erase(std::unique(factors.begin(), factors.end()), factors.end());
+            Edge result = 1;
+            for (Edge e : factors) result = land(result, e);
+            return result;
+        }
+        // Recover the mux hidden in an AIG: !((s&t)|(!s&f)).
+        if (a > 1 && b > 1 && (a & 1) && (b & 1) &&
+            !nodes[a / 2].input && !nodes[b / 2].input) {
+            const Node lhs = nodes[a / 2], rhs = nodes[b / 2];
+            for (auto l : {std::make_pair(lhs.a, lhs.b), std::make_pair(lhs.b, lhs.a)})
+                for (auto r : {std::make_pair(rhs.a, rhs.b), std::make_pair(rhs.b, rhs.a)})
+                    if (l.first == (r.first ^ 1)) return mux(l.first, l.second, r.second) ^ 1;
+        }
+        return land(a, b);
+    }
+
+    void rewriteLocal(std::vector<Edge>& roots) {
+        // Node IDs are topological; appended nodes are deferred to the next
+        // sweep. Never mutate an existing node or invalidate its unique key.
+        for (unsigned round = 0; round < 4; ++round) {
+            const std::size_t count = nodes.size();
+            std::vector<Edge> mapped(count);
+            for (std::size_t id = 1; id < count; ++id) {
+                const Node n = nodes[id];
+                mapped[id] = n.input ? id * 2 :
+                    localAnd(mapped[n.a / 2] ^ (n.a & 1), mapped[n.b / 2] ^ (n.b & 1));
+            }
+            bool changed = false;
+            for (auto& root : roots) {
+                const Edge replacement = mapped[root / 2] ^ (root & 1);
+                changed |= replacement != root;
+                root = replacement;
+            }
+            if (!changed) break;
+        }
+    }
+
+    // The imported Boolean representation is already an AIG (AND + inverted
+    // edges). Rebuild it in topological order to propagate constants, share
+    // identical gates and balance associative regions without copying fanout.
+    void optimizeAig(std::vector<Edge>& roots, const std::vector<bool>& outputs) {
+        for (unsigned round = 0; round < 3; ++round) {
+            std::vector<bool> boundary(nodes.size()), live(nodes.size());
+            std::vector<Edge> pending;
+            for (std::size_t i = 0; i < roots.size(); ++i) if (outputs[i]) {
+                boundary[roots[i] / 2] = true;
+                pending.push_back(roots[i]);
+            }
+            while (!pending.empty()) {
+                const auto id = pending.back() / 2; pending.pop_back();
+                if (!id || live[id]) continue;
+                live[id] = true;
+                if (!nodes[id].input) {
+                    pending.push_back(nodes[id].a); pending.push_back(nodes[id].b);
+                }
+            }
+            std::vector<unsigned> fanout(nodes.size());
+            for (std::size_t id = 1; id < nodes.size(); ++id)
+                if (live[id] && !nodes[id].input) {
+                    ++fanout[nodes[id].a / 2]; ++fanout[nodes[id].b / 2];
+                }
+            Dag next;
+            std::vector<Edge> mapped(nodes.size());
+            std::vector<unsigned> depth(1, 0);
+            auto level = [&](Edge edge) {
+                while (depth.size() < next.nodes.size()) {
+                    const Node& n = next.nodes[depth.size()];
+                    depth.push_back(n.input ? 0 : 1 + std::max(depth[n.a / 2], depth[n.b / 2]));
+                }
+                return depth[edge / 2];
+            };
+            bool balanced = false;
+            for (std::size_t id = 1; id < nodes.size(); ++id) {
+                if (!live[id]) continue;
+                const Node n = nodes[id];
+                if (n.input) { mapped[id] = next.input(n.operand); continue; }
+                auto translate = [&](Edge e) { return mapped[e / 2] ^ (e & 1); };
+                Edge result = next.land(translate(n.a), translate(n.b));
+                std::vector<Edge> leaves;
+                std::function<void(Edge, unsigned)> collect = [&](Edge e, unsigned distance) {
+                    if (leaves.size() > 64) return;
+                    const auto child = e / 2;
+                    if (e > 1 && !(e & 1) && !nodes[child].input &&
+                        fanout[child] == 1 && !boundary[child] && distance < 8) {
+                        collect(nodes[child].a, distance + 1);
+                        collect(nodes[child].b, distance + 1);
+                    } else leaves.push_back(translate(e));
+                };
+                collect(n.a, 1); collect(n.b, 1);
+                if (leaves.size() > 2 && leaves.size() <= 64) {
+                    using Item = std::pair<unsigned, Edge>;
+                    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> queue;
+                    for (Edge leaf : leaves) queue.push({level(leaf), leaf});
+                    while (queue.size() > 1) {
+                        Edge a = queue.top().second; queue.pop();
+                        Edge b = queue.top().second; queue.pop();
+                        Edge joined = next.land(a, b);
+                        queue.push({level(joined), joined});
+                    }
+                    const Edge candidate = queue.top().second;
+                    // Equal-depth alternatives are not rewritten back and forth.
+                    if (level(candidate) < level(result)) {
+                        result = candidate;
+                        balanced = true;
+                    }
+                }
+                mapped[id] = result;
+            }
+            for (auto& root : roots) root = mapped[root / 2] ^ (root & 1);
+            *this = std::move(next);
+            if (!balanced) break;
+        }
     }
 
     // Exact truth table of a bounded cut. Only single-fanout, non-output
@@ -266,11 +409,13 @@ inline bool normalizeBooleanControl(MutableProgram& graph) {
         else if (op.op == OpCode::BitOr || op.op == OpCode::LogicOr)
             result = dag.lor(get(0), get(1));
         else {
-            result = dag.mux(get(0), get(1) ^ 1, get(1));
+            result = dag.lxor(get(0), get(1));
             if (op.op == OpCode::Eq) result ^= 1;
         }
         values[id] = result;
     }
+    dag.rewriteLocal(values);
+    dag.optimizeAig(values, output);
     // Prune the temporary DAG before cut analysis; dead original logic must
     // neither count as shared fanout nor consume the truth-table budget.
     const std::size_t initial = dag.nodes.size();

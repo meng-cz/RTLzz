@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/beir.hpp"
+#include "backend/beopt_width.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -1063,11 +1064,15 @@ inline bool sinkPredicates(MutableProgram& graph,
     }
     // Share formula construction while the graph is unchanged. Avoid the
     // fingerprint-only structural truth memo used by the old demand analysis.
-    predicate_detail::PredicateRelations relations(program, true, limits);
-    std::vector<std::pair<NodeId, bool>> rewrites;
+    std::optional<predicate_detail::PredicateRelations> relations;
+    relations.emplace(program, true, limits);
+    bool changed = false;
+    const auto order = width_detail::topologicalOrder(program);
     std::vector<std::size_t> visited(program.signals.size(), 0);
     std::size_t candidate_count = 0, total_edges = 0;
-    for (const auto& signal : program.signals) {
+    // Consumers first. Commit each proven rewrite before examining producers.
+    for (auto position = order.rbegin(); position != order.rend(); ++position) {
+        auto& signal = program.signal(*position);
         if (graph.isObservable(signal) || !signal.driver ||
             signal.driver->kind != OperationKind::Ite || signal.driver->operands.size() != 3)
             continue;
@@ -1130,30 +1135,43 @@ inline bool sinkPredicates(MutableProgram& graph,
                 always_false &= !boundary.when_true;
             } else {
                 if (always_true)
-                    always_true = relations.impliesDetailed(context, {guard, true}) ==
+                    always_true = relations->impliesDetailed(context, {guard, true}) ==
                                   predicate_detail::ProofOutcome::Proven;
                 if (always_false)
-                    always_false = relations.impliesDetailed(context, {guard, false}) ==
+                    always_false = relations->impliesDetailed(context, {guard, false}) ==
                                    predicate_detail::ProofOutcome::Proven;
             }
             if (!always_true && !always_false) break;
         }
-        if (always_true || always_false) rewrites.emplace_back(signal.id, always_true);
-    }
-    for (const auto& [id, take_true] : rewrites) {
-        Signal& signal = program.signal(id);
+        if (!always_true && !always_false) continue;
+        const NodeId id = signal.id;
+        const bool take_true = always_true;
         Operation& op = *signal.driver;
+        // Remove obsolete guard/data use edges before installing the Assign.
+        // Otherwise upstream candidates would still see the removed boundary.
+        for (const auto& operand : op.operands) {
+            if (operand.kind != OperandKind::Symbol || operand.node >= users.size()) continue;
+            auto& uses = users[operand.node];
+            uses.erase(std::remove_if(uses.begin(), uses.end(),
+                        [&](const Use& use) { return use.consumer == id; }), uses.end());
+        }
         const ValueType type = op.type;
         Operand value = op.operands[take_true ? 1 : 2];
+        if (value.kind == OperandKind::Symbol && value.node < users.size())
+            users[value.node].push_back({id, 0});
         predicate_detail::setAssign(op, std::move(value), type,
                                     take_true
                                         ? "sank predicate guard and omitted unreachable false branch"
                                         : "sank predicate guard and omitted unreachable true branch",
                                     program);
         signal.debug = op.debug;
+        changed = true;
+        // The old formula cache describes a different graph. Never reuse it
+        // after mutating a condition or one of its dependencies.
+        relations.emplace(program, true, limits);
     }
-    if (!rewrites.empty()) graph.markValueFactsDirty();
-    return !rewrites.empty();
+    if (changed) graph.markValueFactsDirty();
+    return changed;
 }
 
 } // namespace pred::beir::opt
