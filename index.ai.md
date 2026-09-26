@@ -469,3 +469,15 @@ done
 
 ### `testv2/case_guard_analysis.md`
 - 记录 Case 路径消冗余、128 路优先级前缀、随机布尔穷举与 FPUArithmetic 实际生成结果；FMA_SUM1 条件恢复为单个状态比较，并注明图深度统计方法和验证范围。
+
+### `testv2/predicate_chain_test.cpp`
+- signed narrowing 的常量/已知位传递、小位宽穷举、跨 limb 和部分已知位回归。
+- AIG 嵌套 mux 共用默认值归并；非恒定默认值、共享输出、状态排除条件消除及随机网络等价检查。
+
+### `testv2/fixtures/predicate_chain.logic.cpp` / `signed_narrow_facts.logic.cpp`
+- 长状态条件链的非恒定默认值与共享 inner 输出，以及 signed narrowing 的端到端 C++/RTL 差分 fixtures。
+
+### `testv2/adaptive_control_test.cpp` / `adaptive_control_analysis.md`
+- 按 DAG 深度自适应的布尔蕴含、共享 Eq/Ne decoder facts，以及精确匹配的 wen/wdata 输出需求上下文。
+- 数组逐索引配对和跨索引反例、共享与别名保护、布尔规范化三次调度回归。
+- `testv2/fixtures/write_port_groups/` 使用独立 SV oracle 检查使能有效时的写数据，穷举 262144 组组合。

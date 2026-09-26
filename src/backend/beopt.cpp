@@ -119,31 +119,29 @@ Program optimizeProgram(Program program,
                      options.max_bit_range_updates, options.max_bit_compose_pieces);
         }
         if (options.algebraic_identities) run_pass("simplifyAlgebraicIdentities", simplifyAlgebraicIdentities);
-        if (options.boolean_control_normalization)
-            run_pass("normalizeBooleanControl", normalizeBooleanControl);
         if (options.width_simplification) run_pass("simplifyWidthOperations", simplifyWidthOperations);
         if (options.common_subexpressions) run_pass("mergeCommonExpressions", mergeCommonExpressions);
         if (options.fold_assign_chains) run_pass("foldAssignChains", foldAssignChains);
         if (options.dead_node_elimination) run_pass("eliminateDeadNodes", eliminateDeadNodes);
         if (iteration == iter_before_predicate_sinking) {
             if (options.predicate_sinking) {
+                if (options.boolean_control_normalization)
+                    run_pass("normalizeBooleanControl", normalizeBooleanControl);
                 if (iteration_callback) iteration_callback(iter_msg + ": sinkPredicates");
                 sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms});
-            }
-            if (options.boolean_control_normalization) {
-                run_pass("normalizeBooleanControl", normalizeBooleanControl);
+                if (options.boolean_control_normalization)
+                    run_pass("normalizeBooleanControl", normalizeBooleanControl);
             }
             if (options.exclusive_muxes) {
                 run_pass("parallelizeExclusiveMuxes", parallelizeExclusiveMuxes, options.max_mux_branches);
                 run_pass("simplifyCaseGuards", [](MutableProgram& graph) { simplifyCaseGuards(graph); });
             }
-            if (options.boolean_control_normalization) {
-                run_pass("normalizeBooleanControl", normalizeBooleanControl);
-            }
             if (options.balance_trees) {
                 run_pass("balanceAssociativeTrees", balanceAssociativeTrees, options.max_tree_leaves);
             }
         }
+        if (iteration == options.max_iterations && options.boolean_control_normalization)
+            run_pass("normalizeBooleanControl", normalizeBooleanControl);
     }
     return graph.finish();
 }

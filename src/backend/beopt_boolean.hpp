@@ -65,7 +65,26 @@ class InputRelations {
     std::vector<Operand> operands_;
     std::set<std::pair<Edge, Edge>> implications_;
     std::map<Edge, Edge> aliases_;
+    struct DecoderFact { Operand selector; std::vector<std::uint64_t> value; bool equal; };
+    std::map<Edge, DecoderFact> decoders_;
+    std::size_t decoder_revision_ = 0;
 public:
+    std::size_t decoderRevision() const { return decoder_revision_; }
+    bool equalityDecoder(Edge edge) const {
+        auto it = decoders_.find(edge & ~Edge{1});
+        return it != decoders_.end() && (it->second.equal != bool(edge & 1));
+    }
+    // A positive equality fixes the entire selector. Eq/Ne decoder queries
+    // sharing that exact typed selector need no generic implication search.
+    std::optional<bool> decoderValue(Edge assumption, Edge query) const {
+        if (!equalityDecoder(assumption)) return {};
+        auto q = decoders_.find(query & ~Edge{1});
+        if (q == decoders_.end()) return {};
+        const auto& a = decoders_.at(assumption & ~Edge{1});
+        if (!predicate_detail::sameOperand(a.selector, q->second.selector)) return {};
+        bool equal = a.value == q->second.value;
+        return (q->second.equal ? equal : !equal) != bool(query & 1);
+    }
     Edge input(const Operand& operand) {
         auto found = ids_.find(operand);
         if (found != ids_.end()) return found->second;
@@ -76,7 +95,7 @@ public:
         implications_.emplace(a, b);
         implications_.emplace(b ^ 1, a ^ 1); // Contrapositive.
     }
-    bool empty() const { return implications_.empty(); }
+    bool empty() const { return implications_.empty() && decoders_.empty(); }
     bool implies(Edge a, Edge b) const {
         return a == b || implications_.count({a,b});
     }
@@ -144,6 +163,18 @@ public:
         return result;
     }
     void prove(const Program& program) {
+        ++decoder_revision_;
+        decoders_.clear();
+        for (std::size_t i = 0; i < operands_.size(); ++i) {
+            auto c = comparison(operands_[i], program);
+            if (!c || (c->mask != 2 && c->mask != 5)) continue;
+            if (c->a.kind == OperandKind::Literal) std::swap(c->a, c->b);
+            if (c->a.kind == OperandKind::Literal || c->b.kind != OperandKind::Literal) continue;
+            auto bits = c->b.constant.limbs;
+            bits.resize((c->b.type.width + 63) / 64, 0);
+            if (c->b.type.width % 64) bits.back() &= (std::uint64_t{1} << (c->b.type.width % 64)) - 1;
+            decoders_.emplace((i + 1) * 2, DecoderFact{c->a, std::move(bits), c->mask == 2});
+        }
         // Index every visited signal in each input's three-level driving cone.
         // There is no pair-count cap: all pairs with a common signal are tried.
         std::map<Operand,std::vector<std::size_t>,decltype(&predicate_detail::operandLess)>
@@ -251,7 +282,50 @@ class Dag {
     std::map<std::pair<Edge, Edge>, Edge> unique_;
     std::map<Operand, Edge, decltype(&predicate_detail::operandLess)> inputs_{
         &predicate_detail::operandLess};
+    mutable std::vector<std::size_t> depths_{0};
+    mutable std::size_t decoder_revision_ = 0;
+    mutable std::map<Edge, std::unordered_map<std::size_t, int>> decoder_values_;
 public:
+    std::size_t depth(Edge root) const {
+        // Nodes are immutable and topologically appended. Cache their actual
+        // depths so proof setup does not repeatedly traverse shared cones.
+        while (depths_.size() < nodes.size()) {
+            const auto& n = nodes[depths_.size()];
+            depths_.push_back(n.input ? 0 : 1 + std::max(depths_[n.a / 2], depths_[n.b / 2]));
+        }
+        return depths_[root / 2];
+    }
+    std::optional<bool> decoderImplies(Edge a, Edge b) const {
+        if (a <= 1 || !nodes[a / 2].input) return {};
+        const Edge fact = nodes[a / 2].fact ^ (a & 1);
+        if (!relations_->equalityDecoder(fact)) return {};
+        // Three-valued cofactor of a shared decoder DAG, on an explicit stack.
+        // Its linear work is separate from the generic recursive proof budget.
+        if (decoder_revision_ != relations_->decoderRevision()) {
+            decoder_values_.clear(); decoder_revision_ = relations_->decoderRevision();
+        }
+        auto& known = decoder_values_[fact];
+        known.emplace(0, 0);
+        std::vector<std::pair<std::size_t, bool>> pending{{b / 2, false}};
+        auto value = [&](Edge e) { int v = known.at(e / 2); return v < 0 ? -1 : v ^ int(e & 1); };
+        while (!pending.empty()) {
+            auto [id, expanded] = pending.back(); pending.pop_back();
+            if (known.count(id)) continue;
+            const Node n = nodes[id];
+            if (n.input) {
+                auto v = relations_->decoderValue(fact, n.fact);
+                known[id] = v ? int(*v) : -1;
+            } else if (!expanded) {
+                pending.push_back({id, true});
+                pending.push_back({n.b / 2, false}); pending.push_back({n.a / 2, false});
+            } else {
+                const int x = value(n.a), y = value(n.b);
+                known[id] = (x == 0 || y == 0) ? 0 : (x == 1 && y == 1) ? 1 : -1;
+            }
+        }
+        const int result = value(b);
+        return result < 0 ? std::optional<bool>{} : std::optional<bool>{result != 0};
+    }
     explicit Dag(std::shared_ptr<InputRelations> relations = std::make_shared<InputRelations>())
         : relations_(std::move(relations)) {}
     const auto& relations() const { return relations_; }
@@ -276,27 +350,41 @@ public:
         return result;
     }
     bool implies(Edge a, Edge b) const {
-        unsigned budget = 128;
-        return impliesWithin(a, b, 0, budget);
+        if (auto decoded = decoderImplies(a, b)) return *decoded;
+        const std::size_t max_depth = depth(a) + depth(b) + 1;
+        // A DAG-aware allowance grows quadratically with actual depth, rather than
+        // rejecting the ninth level of an otherwise inexpensive proof.
+        std::size_t budget = 4 * (max_depth + 1) * (depth(a) + depth(b) + 2);
+        std::map<std::pair<Edge, Edge>, bool> memo;
+        return impliesWithin(a, b, max_depth, budget, memo);
     }
-    bool impliesWithin(Edge a, Edge b, unsigned depth, unsigned& budget) const {
-        if (!budget) return false;
-        --budget;
+    bool impliesWithin(Edge a, Edge b, std::size_t remaining_depth, std::size_t& budget,
+                       std::map<std::pair<Edge, Edge>, bool>& memo) const {
         if (!a || b == 1 || a == b) return true;
-        if (a <= 1 || b <= 1 || depth >= 8) return false;
+        if (a <= 1 || b <= 1) return false;
         const Node x = nodes[a / 2], y = nodes[b / 2];
-        if (x.input && y.input)
+        if (x.input && y.input) {
+            if (auto decoded = relations_->decoderValue(x.fact ^ (a & 1), y.fact ^ (b & 1)))
+                return *decoded;
             return relations_->implies(x.fact ^ (a & 1), y.fact ^ (b & 1));
-        // Conjunction/disjunction implications lift input facts through the DAG.
-        if (!y.input && !(b & 1))
-            return impliesWithin(a,y.a,depth+1,budget) && impliesWithin(a,y.b,depth+1,budget);
-        if (!x.input && (a & 1))
-            return impliesWithin(x.a^1,b,depth+1,budget) && impliesWithin(x.b^1,b,depth+1,budget);
-        if (!x.input && !(a & 1) &&
-            (impliesWithin(x.a,b,depth+1,budget) || impliesWithin(x.b,b,depth+1,budget))) return true;
-        if (!y.input && (b & 1) &&
-            (impliesWithin(a,y.a^1,depth+1,budget) || impliesWithin(a,y.b^1,depth+1,budget))) return true;
-        return false;
+        }
+        // A recursive generic query may itself reach a decoder root.
+        // Resolve that entire decoder cofactor before charging generic work.
+        if (auto decoded = decoderImplies(a, b)) return *decoded;
+        const auto key = std::make_pair(a, b);
+        if (auto found = memo.find(key); found != memo.end()) return found->second;
+        if (!budget || !remaining_depth) return false;
+        --budget;
+        auto prove = [&](Edge lhs, Edge rhs) { return impliesWithin(lhs, rhs, remaining_depth - 1, budget, memo); };
+        bool result = false;
+        if (!y.input && !(b & 1)) result = prove(a, y.a) && prove(a, y.b);
+        else if (!x.input && (a & 1)) result = prove(x.a ^ 1, b) && prove(x.b ^ 1, b);
+        else {
+            if (!x.input && !(a & 1)) result = prove(x.a, b) || prove(x.b, b);
+            if (!result && !y.input && (b & 1)) result = prove(a, y.a ^ 1) || prove(a, y.b ^ 1);
+        }
+        memo.emplace(key, result);
+        return result;
     }
     Edge land(Edge a, Edge b, unsigned depth = 0) {
         if (a > b) std::swap(a, b);
@@ -352,7 +440,38 @@ public:
         if (a > b) std::swap(a, b);
         return lor(land(a, b ^ 1), land(a ^ 1, b)) ^ polarity;
     }
-    Edge mux(Edge c, Edge t, Edge f) {
+    // Decode a mux represented as an AND/inverter network. Return values,
+    // never references: reconstruction can append to nodes and reallocate it.
+    std::optional<std::array<Edge, 3>> decodeMux(Edge root) const {
+        if (root <= 1 || nodes[root / 2].input) return {};
+        const Node top = nodes[root / 2];
+        if (!(top.a & 1) || !(top.b & 1) || top.a <= 1 || top.b <= 1 ||
+            nodes[top.a / 2].input || nodes[top.b / 2].input) return {};
+        const Node a = nodes[top.a / 2], b = nodes[top.b / 2];
+        for (auto x : {std::make_pair(a.a, a.b), std::make_pair(a.b, a.a)})
+            for (auto y : {std::make_pair(b.a, b.b), std::make_pair(b.b, b.a)})
+                if (x.first == (y.first ^ 1)) {
+                    const Edge invert = (root & 1) ^ 1;
+                    return std::array<Edge, 3>{x.first, x.second ^ invert, y.second ^ invert};
+                }
+        return {};
+    }
+    Edge mux(Edge c, Edge t, Edge f, unsigned nesting = 0) {
+        // mux(c, mux(d,x,z), z) = mux(c & d,x,z), and the dual
+        // false-arm form. Expose the conjunction to input-relation proofs.
+        // Shared inner muxes are left intact for their other consumers.
+        if (nesting < 4) {
+            if (auto inner = decodeMux(t)) {
+                auto [d, x, z] = *inner;
+                if (x == f) { std::swap(x, z); d ^= 1; }
+                if (z == f) return mux(land(c, d), x, f, nesting + 1);
+            }
+            if (auto inner = decodeMux(f)) {
+                auto [d, x, z] = *inner;
+                if (x == t) { std::swap(x, z); d ^= 1; }
+                if (z == t) return mux(land(c ^ 1, d), x, t, nesting + 1);
+            }
+        }
         if (t == f) return t;
         if (c <= 1) return c ? t : f;
         if (t == 1 || t == c) return lor(c, f);

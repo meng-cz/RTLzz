@@ -746,6 +746,21 @@ static ValueFacts factsSlice(const ValueFacts& src, int lo, int out_width) {
     return out;
 }
 
+// Signed narrowing preserves the source sign bit, not the low destination
+// sign bit. Match rtlgen's {src[M-1], src[N-2:0]}, including N == 1.
+static ValueFacts factsSignedTrunc(const ValueFacts& src, int width) {
+    if (width <= 0 || src.width <= width) return factsUnknown(width);
+    ValueFacts out = factsUnknown(width);
+    for (int bit = 0; bit < width; ++bit) {
+        const int source_bit = bit == width - 1 ? src.width - 1 : bit;
+        if (factsGetBit(src.known_zero, source_bit)) factsSetBit(out.known_zero, bit);
+        if (factsGetBit(src.known_one, source_bit)) factsSetBit(out.known_one, bit);
+    }
+    if (src.constant)
+        out = factsFromConstant(factsMakeConstant(out.known_one, width, src.value.signed_view), width);
+    return out;
+}
+
 static ValueFacts factsBitSelect(const ValueFacts& src, int bit) {
     ValueFacts out = factsUnknown(1);
     if (src.width <= 0) return out;
@@ -910,11 +925,8 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
     if (op.kind == OperationKind::ZExt) return operands.empty() ? factsUnknown(width) : factsZExt(operands[0], width);
     if (op.kind == OperationKind::SExt) return operands.empty() ? factsUnknown(width) : factsSExt(operands[0], width);
     if (op.kind == OperationKind::Trunc) {
-        // Signed narrowing replaces the destination sign bit with the source
-        // sign bit, so it is not an ordinary low-bit truncation.  Keep value
-        // facts conservative until that transform has a dedicated transfer
-        // function.
-        if (op.signed_truncation) return factsUnknown(width);
+        if (op.signed_truncation)
+            return operands.empty() ? factsUnknown(width) : factsSignedTrunc(operands[0], width);
         return operands.empty() ? factsUnknown(width) : factsTrunc(operands[0], width);
     }
     if (op.kind == OperationKind::Slice) return operands.empty() ? factsUnknown(width) : factsSlice(operands[0], op.lo, width);

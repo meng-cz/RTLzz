@@ -89,3 +89,14 @@ Run `build/testv2/beopt-boolean-test` for exhaustive small-network equivalence
 checks of Boolean normalization.
 Run `build/testv2/beir-case-test` for Case value-fact, constant-folding, width,
 algebraic, text-IR, and RTL-emission checks.
+
+Boolean implication search scales its depth and work allowance with actual DAG
+depth; shared constant Eq/Ne decoders use separate typed selector facts.
+Boolean normalization runs immediately before and after predicate sinking and
+at the end of the final optimizer iteration (only the final call when sinking
+is disabled). Exact output pairs `wen_NAME` / `wdata_NAME` declare a write-port
+contract: data is observable only when its corresponding enable is true. Array
+ports must have matching shapes and pair element by element; enables at other
+indices never qualify a write. Predicate sinking models virtual masked observers
+without emitting extra ports, and retains all other observable uses. See
+`testv2/adaptive_control_analysis.md` for tests and resource semantics.

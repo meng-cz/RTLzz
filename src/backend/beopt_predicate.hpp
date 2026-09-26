@@ -1051,6 +1051,47 @@ inline std::optional<bool> guardedDefaultSelection(const Operation& op,
 inline bool sinkPredicates(MutableProgram& graph,
                            predicate_detail::PredicateLimits limits = {}) {
     Program& program = graph.program();
+    // Virtual output observers: _out_x = ITE(wen_x, wdata_x, 0).
+    // They add demand boundaries without changing ports or emitting hardware.
+    // Only exact output-port pairs (including matching array element indices)
+    // carry this write-port contract. All other observable uses remain total.
+    std::map<NodeId, Operand> write_guards;
+    auto pair = [&](NodeId data, NodeId enable) {
+        if (data >= program.signals.size() || enable >= program.signals.size()) return;
+        const auto& en = program.signal(enable);
+        if (en.type.width != 1 || en.type.isArray() ||
+            program.signal(data).type.isArray() || data == enable) return;
+        Operand guard;
+        guard.kind = OperandKind::Symbol; guard.node = enable;
+        guard.text = en.name; guard.type = en.type;
+        write_guards.emplace(data, std::move(guard));
+    };
+    for (const auto& data : program.ports) {
+        if (data.direction != PortDirection::Output || data.name.rfind("wdata_", 0) != 0) continue;
+        for (const auto& en : program.ports) {
+            if (en.direction != PortDirection::Output || en.name != "wen_" + data.name.substr(6) ||
+                en.type.width != 1 || en.type.array_dims != data.type.array_dims ||
+                en.element_nodes.size() != data.element_nodes.size()) continue;
+            for (std::size_t i = 0; i < data.element_nodes.size(); ++i)
+                pair(data.element_nodes[i], en.element_nodes[i]);
+        }
+    }
+    // A node also exposed through a different port is an unconditional
+    // observation; do not silently replace that observation with a write guard.
+    std::map<NodeId, unsigned> port_uses;
+    for (const auto& port : program.ports) for (NodeId node : port.element_nodes) ++port_uses[node];
+    for (const auto& entry : port_uses) if (entry.second > 1) write_guards.erase(entry.first);
+    // Hand-built scalar BEIR may use outputs without a Port table.
+    if (program.ports.empty()) {
+        std::map<std::string, NodeId> outputs;
+        for (const auto& signal : program.signals)
+            if (std::find(program.outputs.begin(), program.outputs.end(), signal.name) != program.outputs.end())
+                outputs.emplace(signal.name, signal.id);
+        for (const auto& entry : outputs) if (entry.first.rfind("wdata_", 0) == 0) {
+            auto en = outputs.find("wen_" + entry.first.substr(6));
+            if (en != outputs.end()) pair(entry.second, en->second);
+        }
+    }
     // Preserve operand positions, including multiple uses by the same ITE.
     struct Use { NodeId consumer; std::size_t operand; };
     std::vector<std::vector<Use>> users(program.signals.size());
@@ -1073,7 +1114,7 @@ inline bool sinkPredicates(MutableProgram& graph,
     // Consumers first. Commit each proven rewrite before examining producers.
     for (auto position = order.rbegin(); position != order.rend(); ++position) {
         auto& signal = program.signal(*position);
-        if (graph.isObservable(signal) || !signal.driver ||
+        if ((graph.isObservable(signal) && !write_guards.count(signal.id)) || !signal.driver ||
             signal.driver->kind != OperationKind::Ite || signal.driver->operands.size() != 3)
             continue;
         if (candidate_count >= limits.max_candidate_ites ||
@@ -1088,10 +1129,18 @@ inline bool sinkPredicates(MutableProgram& graph,
             const NodeId id = pending[cursor];
             // An observable intermediate remains an unprotected use even if
             // it also has guarded consumers. Conservatively reject dead ends.
-            if (graph.isObservable(program.signal(id)) || users[id].empty()) {
+            auto write_guard = write_guards.find(id);
+            if (graph.isObservable(program.signal(id))) {
+                if (write_guard == write_guards.end()) { blocked = true; break; }
+                predicate_detail::appendContext(boundaries,
+                    predicate_detail::guardedContext(write_guard->second, true));
+                if (boundaries.size() > limits.max_contexts_per_candidate) { blocked = true; break; }
+            } else if (users[id].empty()) {
                 blocked = true;
                 break;
             }
+            // Keep walking other uses: an unguarded shared output or use in
+            // wen itself must prevent a globally unsafe rewrite.
             for (const auto& use : users[id]) {
                 if (edges >= limits.max_consumer_edges_per_candidate ||
                     total_edges >= limits.max_total_consumer_edges) {
