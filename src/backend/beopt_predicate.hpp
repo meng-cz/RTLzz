@@ -4,6 +4,7 @@
 #include "backend/beopt_width.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -182,6 +183,10 @@ struct PredicateLimits {
     std::size_t max_contexts_per_candidate = 1024; // Unique first-ITE boundary conditions.
     std::size_t max_consumer_edges_per_candidate = 65536;
     std::size_t max_total_consumer_edges = 4194304;
+    // Bound partial-proof traversal and implication queries independently.
+    std::size_t max_partial_nodes_per_candidate = 1024;
+    std::size_t max_partial_proofs_per_candidate = 4096;
+    std::size_t max_total_partial_proofs = 65536;
 };
 
 inline Proof asProof(ProofOutcome outcome) {
@@ -1046,11 +1051,171 @@ inline std::optional<bool> guardedDefaultSelection(const Operation& op,
     return std::nullopt;
 }
 
+// AIG connectives are AND and inversion. Wide comparisons, bit selects and
+// other non-Boolean operations are atoms; aliases are transparent boundaries.
+inline bool hasPredicateAigForm(const Program& program) {
+    for (const auto& signal : program.signals) {
+        if (signal.type.width != 1 || signal.type.isArray() || !signal.driver) continue;
+        const auto& op = *signal.driver;
+        const bool boolean_inputs = std::all_of(op.operands.begin(), op.operands.end(),
+            [](const Operand& v) { return v.type.width == 1 && !v.type.isArray(); });
+        // A narrowed data mux may have a 1-bit result but wide data operands.
+        // Like a wide comparison, it is an opaque AIG atom, not a connective.
+        if (boolean_inputs && (op.kind == OperationKind::Ite || op.kind == OperationKind::Case)) return false;
+        if (op.kind != OperationKind::Binary || op.operands.size() != 2) continue;
+        if (boolean_inputs && (op.op == OpCode::LogicOr || op.op == OpCode::BitOr ||
+                              op.op == OpCode::BitXor || op.op == OpCode::Eq || op.op == OpCode::Ne))
+            return false;
+    }
+    return true;
+}
+
+// Prove and simplify on an immutable snapshot, then copy only the changed
+// Boolean cone. Existing guard drivers are never rewritten or erased. The root
+// may be complemented by swapping the existing data ITE's branches instead of
+// allocating a NOT. Shared subexpressions in the plan are emitted only once.
+class PartialPredicatePlan {
+    enum class Kind { Leaf, Constant, Forward, Not, And };
+    struct Guard {
+        Operand value;
+        Kind kind = Kind::Leaf;
+        std::size_t a = 0, b = 0;
+        bool constant = false, changed = false;
+    };
+public:
+    struct Result { Operand value; bool inverted = false; };
+private:
+    const Program& program_;
+    const PredicateLimits& limits_;
+    const std::function<std::optional<bool>(const Operand&)>& prove_;
+    std::vector<Guard> guards_;
+    std::map<Operand, std::size_t, decltype(&operandLess)> memo_{&operandLess};
+    std::size_t visited_ = 0;
+    std::vector<std::optional<Result>> emitted_;
+    std::vector<std::optional<Operand>> positive_;
+
+    std::size_t visit(const Operand& value, bool root = false) {
+        if (auto it = memo_.find(value); it != memo_.end()) return it->second;
+        const std::size_t id = guards_.size();
+        guards_.push_back(Guard{value});
+        memo_.emplace(value, id);
+        if (value.kind == OperandKind::Literal) {
+            guards_[id].kind = Kind::Constant;
+            guards_[id].constant = !value.constant.isZero();
+            return id;
+        }
+        if (visited_++ >= limits_.max_partial_nodes_per_candidate) return id;
+        if (!root) if (auto truth = prove_(value)) {
+            guards_[id].kind = Kind::Constant;
+            guards_[id].constant = *truth;
+            guards_[id].changed = true;
+            return id;
+        }
+        const auto* driver = symbolDriver(value, program_);
+        if (!driver) return id;
+        const auto& op = *driver;
+        const auto is_bool = [](const Operand& v) { return v.type.width == 1 && !v.type.isArray(); };
+        Kind kind;
+        if (op.kind == OperationKind::Assign && op.operands.size() == 1 && is_bool(op.operands[0]))
+            kind = Kind::Forward;
+        else if (op.kind == OperationKind::Unary && op.operands.size() == 1 && is_bool(op.operands[0]) &&
+                 (op.op == OpCode::LogicNot || op.op == OpCode::BitNot)) kind = Kind::Not;
+        else if (op.kind == OperationKind::Binary && op.operands.size() == 2 &&
+                 is_bool(op.operands[0]) && is_bool(op.operands[1]) &&
+                 (op.op == OpCode::BitAnd || op.op == OpCode::LogicAnd)) kind = Kind::And;
+        else return id; // Comparison/data atom: do not split through it.
+        const std::size_t a = visit(op.operands[0]);
+        const std::size_t b = kind == Kind::And ? visit(op.operands[1]) : a;
+        if (!guards_[a].changed && !guards_[b].changed) return id;
+        guards_[id].kind = kind; guards_[id].a = a; guards_[id].b = b;
+        guards_[id].changed = true;
+        if (kind == Kind::Forward || kind == Kind::Not) {
+            if (guards_[a].kind == Kind::Constant) {
+                guards_[id].kind = Kind::Constant;
+                guards_[id].constant = guards_[a].constant != (kind == Kind::Not);
+            }
+        } else if ((guards_[a].kind == Kind::Constant && !guards_[a].constant) ||
+                   (guards_[b].kind == Kind::Constant && !guards_[b].constant)) {
+            guards_[id].kind = Kind::Constant; guards_[id].constant = false;
+        } else if (guards_[a].kind == Kind::Constant) {
+            guards_[id].kind = Kind::Forward; guards_[id].a = b;
+        } else if (guards_[b].kind == Kind::Constant) {
+            guards_[id].kind = Kind::Forward;
+        }
+        return id;
+    }
+    static Operand constant(bool truth) {
+        Operand value;
+        value.kind = OperandKind::Literal; value.type = {1, {}};
+        value.constant.width = 1; value.constant.limbs = {truth ? 1u : 0u};
+        return value;
+    }
+    Operand positive(std::size_t id, Program& program) {
+        if (positive_[id]) return *positive_[id];
+        auto result = emit(id, program);
+        if (result.inverted) {
+            Operation op;
+            op.kind = OperationKind::Unary; op.op = OpCode::LogicNot;
+            op.operands = {result.value};
+            result.value = width_detail::appendTemp(program, {1, {}}, std::move(op),
+                                                    "copied simplified predicate inversion");
+        }
+        positive_[id] = result.value;
+        return result.value;
+    }
+    Result emit(std::size_t id, Program& program) {
+        if (emitted_[id]) return *emitted_[id];
+        const auto& node = guards_[id];
+        Result result{node.value, false};
+        switch (node.kind) {
+        case Kind::Leaf: break;
+        case Kind::Constant: result.value = constant(node.constant); break;
+        case Kind::Forward: result = emit(node.a, program); break;
+        case Kind::Not:
+            result = emit(node.a, program);
+            if (result.value.kind == OperandKind::Literal)
+                result.value = constant(result.value.constant.isZero());
+            else result.inverted = !result.inverted;
+            break;
+        case Kind::And: {
+            auto a = positive(node.a, program), b = positive(node.b, program);
+            if (sameOperand(a, b)) result.value = a;
+            else {
+                Operation op;
+                op.kind = OperationKind::Binary; op.op = OpCode::BitAnd;
+                op.operands = {a, b};
+                result.value = width_detail::appendTemp(program, {1, {}}, std::move(op),
+                                                        "copied simplified predicate AND");
+            }
+            break;
+        }
+        }
+        emitted_[id] = result;
+        return result;
+    }
+public:
+    PartialPredicatePlan(const Program& program, const PredicateLimits& limits,
+                         const std::function<std::optional<bool>(const Operand&)>& prove)
+        : program_(program), limits_(limits), prove_(prove) {}
+    std::optional<std::size_t> build(const Operand& guard) {
+        if (!limits_.max_partial_nodes_per_candidate) return {};
+        const auto root = visit(guard, true);
+        if (!guards_[root].changed) return {};
+        emitted_.resize(guards_.size()); positive_.resize(guards_.size());
+        return root;
+    }
+    Result materialize(std::size_t root, Program& program) {
+        return emit(root, program);
+    }
+};
+
 } // namespace predicate_detail
 
 inline bool sinkPredicates(MutableProgram& graph,
                            predicate_detail::PredicateLimits limits = {}) {
     Program& program = graph.program();
+    assert(predicate_detail::hasPredicateAigForm(program) &&
+           "sinkPredicates requires normalized Boolean AIG connectives");
     // Virtual output observers: _out_x = ITE(wen_x, wdata_x, 0).
     // They add demand boundaries without changing ports or emitting hardware.
     // Only exact output-port pairs (including matching array element indices)
@@ -1110,7 +1275,7 @@ inline bool sinkPredicates(MutableProgram& graph,
     bool changed = false;
     const auto order = width_detail::topologicalOrder(program);
     std::vector<std::size_t> visited(program.signals.size(), 0);
-    std::size_t candidate_count = 0, total_edges = 0;
+    std::size_t candidate_count = 0, total_edges = 0, total_partial_proofs = 0;
     // Consumers first. Commit each proven rewrite before examining producers.
     for (auto position = order.rbegin(); position != order.rend(); ++position) {
         auto& signal = program.signal(*position);
@@ -1175,45 +1340,76 @@ inline bool sinkPredicates(MutableProgram& graph,
             }
         }
         if (blocked || boundaries.empty()) continue;
-        bool always_true = true, always_false = true;
-        const auto& guard = signal.driver->operands[0];
-        for (const auto& context : boundaries) {
-            const auto& boundary = context.predicates.front();
-            if (predicate_detail::sameOperand(boundary.guard, guard)) {
-                always_true &= boundary.when_true;
-                always_false &= !boundary.when_true;
-            } else {
-                if (always_true)
-                    always_true = relations->impliesDetailed(context, {guard, true}) ==
-                                  predicate_detail::ProofOutcome::Proven;
-                if (always_false)
-                    always_false = relations->impliesDetailed(context, {guard, false}) ==
-                                   predicate_detail::ProofOutcome::Proven;
-            }
-            if (!always_true && !always_false) break;
-        }
-        if (!always_true && !always_false) continue;
         const NodeId id = signal.id;
-        const bool take_true = always_true;
-        Operation& op = *signal.driver;
-        // Remove obsolete guard/data use edges before installing the Assign.
-        // Otherwise upstream candidates would still see the removed boundary.
-        for (const auto& operand : op.operands) {
-            if (operand.kind != OperandKind::Symbol || operand.node >= users.size()) continue;
+        const Operation original = *signal.driver;
+        std::size_t partial_proofs = 0;
+        auto prove = [&](const Operand& guard, bool partial) -> std::optional<bool> {
+            bool always_true = true, always_false = true;
+            for (const auto& context : boundaries) {
+                const auto& boundary = context.predicates.front();
+                if (predicate_detail::sameOperand(boundary.guard, guard)) {
+                    always_true &= boundary.when_true;
+                    always_false &= !boundary.when_true;
+                } else {
+                    auto query = [&](bool truth) {
+                        if (partial) {
+                            if (partial_proofs >= limits.max_partial_proofs_per_candidate ||
+                                total_partial_proofs >= limits.max_total_partial_proofs) return false;
+                            ++partial_proofs; ++total_partial_proofs;
+                        }
+                        return relations->impliesDetailed(context, {guard, truth}) ==
+                               predicate_detail::ProofOutcome::Proven;
+                    };
+                    if (always_true) always_true = query(true);
+                    if (always_false) always_false = query(false);
+                }
+                if (!always_true && !always_false) return {};
+            }
+            if (always_true) return true;
+            if (always_false) return false;
+            return {};
+        };
+        Operation replacement = original;
+        const std::size_t old_size = program.signals.size();
+        if (auto truth = prove(original.operands[0], false)) {
+            predicate_detail::setAssign(replacement, original.operands[*truth ? 1 : 2], original.type,
+                                        "sank predicate guard and omitted unreachable branch", program);
+        } else {
+            const std::function<std::optional<bool>(const Operand&)> prove_subtree =
+                [&](const Operand& guard) { return prove(guard, true); };
+            predicate_detail::PartialPredicatePlan plan(program, limits, prove_subtree);
+            auto root = plan.build(original.operands[0]);
+            if (!root) continue;
+            auto result = plan.materialize(*root, program);
+            if (result.value.kind == OperandKind::Literal) {
+                const bool truth = !result.value.constant.isZero() != result.inverted;
+                predicate_detail::setAssign(replacement, original.operands[truth ? 1 : 2], original.type,
+                                            "partial AIG proofs eliminated ITE", program);
+            } else {
+                replacement.operands[0] = result.value;
+                if (result.inverted) std::swap(replacement.operands[1], replacement.operands[2]);
+                addDebugMessage(replacement.debug, "redirected ITE to simplified predicate copy");
+            }
+        }
+        // Appending Boolean nodes may relocate signals. Reacquire the ITE and
+        // update use edges; the original predicate cone is left entirely intact.
+        users.resize(program.signals.size()); visited.resize(program.signals.size());
+        for (const auto& operand : original.operands) {
+            if (operand.kind != OperandKind::Symbol) continue;
             auto& uses = users[operand.node];
             uses.erase(std::remove_if(uses.begin(), uses.end(),
                         [&](const Use& use) { return use.consumer == id; }), uses.end());
         }
-        const ValueType type = op.type;
-        Operand value = op.operands[take_true ? 1 : 2];
-        if (value.kind == OperandKind::Symbol && value.node < users.size())
-            users[value.node].push_back({id, 0});
-        predicate_detail::setAssign(op, std::move(value), type,
-                                    take_true
-                                        ? "sank predicate guard and omitted unreachable false branch"
-                                        : "sank predicate guard and omitted unreachable true branch",
-                                    program);
-        signal.debug = op.debug;
+        program.signal(id).driver = std::move(replacement);
+        program.signal(id).debug = program.signal(id).driver->debug;
+        auto add_uses = [&](NodeId consumer) {
+            const auto& op = *program.signal(consumer).driver;
+            for (std::size_t i = 0; i < op.operands.size(); ++i)
+                if (op.operands[i].kind == OperandKind::Symbol)
+                    users[op.operands[i].node].push_back({consumer, i});
+        };
+        add_uses(id);
+        for (std::size_t node = old_size; node < program.signals.size(); ++node) add_uses(node);
         changed = true;
         // The old formula cache describes a different graph. Never reuse it
         // after mutating a condition or one of its dependencies.

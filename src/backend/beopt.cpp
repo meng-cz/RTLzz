@@ -128,13 +128,21 @@ Program optimizeProgram(Program program,
                 if (options.boolean_control_normalization)
                     run_pass("normalizeBooleanControl", normalizeBooleanControl);
                 if (iteration_callback) iteration_callback(iter_msg + ": sinkPredicates");
-                sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms});
+                // --no-boolean may leave OR/XOR/Boolean ITEs in the input.
+                // Do not invoke an AIG-only pass when that precondition is absent.
+                if (options.boolean_control_normalization ||
+                    predicate_detail::hasPredicateAigForm(graph.program()))
+                    sinkPredicates(graph, {options.max_predicate_formulas, options.max_predicate_atoms});
+                else if (iteration_callback)
+                    iteration_callback(iter_msg + ": skipped sinkPredicates (non-AIG Boolean input)");
+                if (options.dead_node_elimination) run_pass("eliminateDeadNodes", eliminateDeadNodes);
                 if (options.boolean_control_normalization)
                     run_pass("normalizeBooleanControl", normalizeBooleanControl);
             }
             if (options.exclusive_muxes) {
                 run_pass("parallelizeExclusiveMuxes", parallelizeExclusiveMuxes, options.max_mux_branches);
                 run_pass("simplifyCaseGuards", [](MutableProgram& graph) { simplifyCaseGuards(graph); });
+                if (options.dead_node_elimination) run_pass("eliminateDeadNodes", eliminateDeadNodes);
             }
             if (options.balance_trees) {
                 run_pass("balanceAssociativeTrees", balanceAssociativeTrees, options.max_tree_leaves);

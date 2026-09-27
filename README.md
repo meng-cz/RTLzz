@@ -100,3 +100,24 @@ ports must have matching shapes and pair element by element; enables at other
 indices never qualify a write. Predicate sinking models virtual masked observers
 without emitting extra ports, and retains all other observable uses. See
 `testv2/adaptive_control_analysis.md` for tests and resource semantics.
+
+Predicate sinking requires Boolean AIG connectives (AND/inversion, with aliases
+and data/comparison atoms) and asserts this invariant at entry. A narrowed data
+mux with wide operands remains an opaque atom even when its result is one bit.
+If a complete ITE guard cannot be proved constant in every consumer context,
+the pass recursively simplifies its AIG subexpressions under those contexts.
+It reuses unchanged operands and constants, copies only the simplified Boolean
+AND/inversion cone, and redirects the original ITE to that copy. A complemented
+root can swap the original ITE's branches. All original predicate drivers remain
+unchanged, including single-use nodes; their reclamation belongs to DCE. The pass
+never adds or splits data ITEs. Memoization preserves sharing in the copied cone;
+traversal and implication queries are bounded by `PredicateLimits`. DCE runs
+after predicate sinking and after Case rewriting when `dead_node_elimination`
+is enabled, before the following optimizer iteration.
+With Boolean normalization disabled, the scheduler skips sinking on non-AIG
+input. Run `build/testv2/partial-predicate-test` for structural and exhaustive
+truth-table checks, including shared/private guards, inversion, array write
+boundaries, preservation of original predicate drivers, Boolean-only allocation
+and resource limits. For RTL/C++ differential
+validation, run `scripts/differential_rtl.py
+testv2/fixtures/partial_predicate.logic.cpp --top hls_main --cases 1024`.
