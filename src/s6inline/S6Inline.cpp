@@ -327,9 +327,16 @@ S3StmtPtr remapStmt(const FunctionCFG& fn, const S3StmtPtr& stmt, const SymbolMa
     out->target = remapLValue(fn, stmt->target, map);
     out->value = applyOperandBinding(fn, stmt->value, map);
     for (std::size_t index = 0; index < out->op.operands.size(); ++index) {
+        // S3 records signedness at each use, including explicit signed casts.
+        // Rebinding a parameter must preserve it for the operations that accept
+        // signed views; the fresh symbol's declared type is not sufficient.
+        const auto binary_op = out->op.binary_op;
         const bool preserve_signed_view =
             out->op.kind == OpExpr::Kind::Binary &&
-            out->op.binary_op == BinaryOp::Shr && index == 0;
+            ((binary_op == BinaryOp::Shr && index == 0) ||
+             binary_op == BinaryOp::Mul || binary_op == BinaryOp::Lt ||
+             binary_op == BinaryOp::Le || binary_op == BinaryOp::Gt ||
+             binary_op == BinaryOp::Ge);
         out->op.operands[index] = applyOperandBinding(
             fn, out->op.operands[index], map, preserve_signed_view);
     }
