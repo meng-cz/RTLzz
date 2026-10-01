@@ -478,7 +478,7 @@ Value normalizeUnary(Context& ctx,
 }
 
 int addResultWidth(const S8Operand& lhs, const S8Operand& rhs) {
-    return std::max(lhs.type.width, rhs.type.width) + 1;
+    return std::max(lhs.type.width, rhs.type.width);
 }
 
 int subResultWidth(const S8Operand& lhs, const S8Operand& rhs) {
@@ -1076,9 +1076,9 @@ Value normalizeHardware(Context& ctx,
     case S7HardwareOp::AddCarry:
         checkArity(op, operands.size(), 3);
         rejectSignedView("AddCarry", operands, op.debug_loc);
-        if (target_type.width <= 1 || operands[0].type.width != target_type.width ||
-            operands[1].type.width != target_type.width || operands[2].type.width != 1)
-            fail("AddCarry requires two Width-bit operands and a one-bit carry", op.debug_loc);
+        if (target_type.width <= 1 || operands[0].type.width + 1 != target_type.width ||
+            operands[1].type.width + 1 != target_type.width || operands[2].type.width != 1)
+            fail("AddCarry requires two equal-width operands, a one-bit carry, and a result one bit wider", op.debug_loc);
         break;
     case S7HardwareOp::ZExt:
         checkArity(op, operands.size(), 1);

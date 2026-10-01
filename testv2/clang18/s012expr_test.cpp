@@ -67,7 +67,7 @@ bool sel;
 Int<8> out_value;
 
 void hls_main() {
-    Int<9> sum = a + b;
+    Int<8> sum = a + b;
     Int<8> narrowed = Int<8>(sum);
     bool flag = sel ? true : false;
     Pair pair{narrowed, b};
@@ -222,7 +222,7 @@ int main() {
     auto sum = buildRequired(context, collector.vars.at("sum"));
     CHECK(sum->kind == pred::v2::ExprKind::BinaryOp);
     CHECK(sum->op == "+");
-    CHECK(sum->type.width == 9);
+    CHECK(sum->type.width == 8);
 
     auto narrowed = buildRequired(context, collector.vars.at("narrowed"));
     CHECK(narrowed->kind == pred::v2::ExprKind::Cast);

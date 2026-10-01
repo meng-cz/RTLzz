@@ -798,12 +798,12 @@ inline int assignedWidthFromOperation(const Program& program, const Operation& o
         else computed = out_width;
         break;
     case OperationKind::AddCarry:
-        computed = std::max(operand_width(0), operand_width(1)) + 2;
+        computed = std::max(operand_width(0), operand_width(1)) + 1;
         break;
     case OperationKind::Binary: {
         int lhs = operand_width(0);
         int rhs = operand_width(1);
-        if (op.op == OpCode::Add) computed = std::max(lhs, rhs) + 1;
+        if (op.op == OpCode::Add) computed = std::max(lhs, rhs);
         else if (op.op == OpCode::Sub) computed = out_width;
         else if (op.op == OpCode::Mul) computed = lhs + rhs;
         else if (op.op == OpCode::BitAnd) computed = std::min(lhs, rhs);

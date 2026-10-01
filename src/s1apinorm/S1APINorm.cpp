@@ -741,8 +741,16 @@ private:
         }
 
         if (callee == "AddCarry") {
-            if (args.size() != 3 || expr.type.width <= 1)
-                fail("AddCarry requires three operands and Width > 1", expr.debug_loc);
+            if ((args.size() != 2 && args.size() != 3) || expr.type.width <= 1)
+                fail("AddCarry requires two or three operands and result width > 1", expr.debug_loc);
+            if (args.size() == 2) {
+                auto carry = std::make_shared<S1Expr>();
+                carry->kind = S1ExprKind::Literal;
+                carry->type = make_hw_type("bool", 1, false);
+                carry->debug_loc = expr.debug_loc;
+                carry->literal_value = "0";
+                args.push_back(std::move(carry));
+            }
             auto out = makeHardware(S1HardwareOp::AddCarry, expr.type, expr.debug_loc);
             out->parts = std::move(args);
             ++stats.normalized_calls;

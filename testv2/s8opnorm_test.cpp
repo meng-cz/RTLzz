@@ -190,10 +190,9 @@ static void addUsesFixintWidthThenCastsToTarget() {
     fn.blocks[0].stmts.push_back(opStmt(4, std::move(add)));
 
     auto debug = normalizeDebug(std::move(program));
-    CHECK(debug.find("ZExt<9>(a<u8>)") != std::string::npos);
-    CHECK(debug.find("ZExt<9>(b<u4>)") != std::string::npos);
-    CHECK(debug.find("Add<9>(") != std::string::npos);
-    CHECK(debug.find("op out8 = Trunc<8>(__s8_norm_add_") != std::string::npos);
+    CHECK(debug.find("ZExt<8>(b<u4>)") != std::string::npos);
+    CHECK(debug.find("Add<8>(") != std::string::npos);
+    CHECK(debug.find("assign out8 = __s8_norm_add_") != std::string::npos);
 }
 
 static void multiplyUsesOperandWidthSum() {
@@ -406,7 +405,7 @@ static void negativeConstantDivisorUsesUnsignedBitPattern() {
 static void sourcePipelineRunsThroughS8() {
     auto debug = runSourceToS8("testv2/fixtures/s7flatten/source_flatten.logic.cpp");
     CHECK(debug.find("s8opnorm") != std::string::npos);
-    CHECK(debug.find("Add<9>(") != std::string::npos);
+    CHECK(debug.find("Add<8>(") != std::string::npos);
     CHECK(debug.find("lookup ") != std::string::npos);
     CHECK(debug.find("lookupwrite [arr__idx_0") != std::string::npos);
 }

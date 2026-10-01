@@ -54,7 +54,7 @@ S8 输入为 S7 的 `s7flatten::S7FlattenedProgram`，其中已经没有 aggrega
 除非 AST 已能稳定给出 width/signedness；遇到无法识别的 builtin integer 直接报错。
 
 16. 所有算术是否采用固定宽度 two's-complement wraparound？
-否，算术计算宽度信息以 fixint.hpp API 为准：加法返回 (max(lhs.width, rhs.width) + 1)，乘法返回 (lhs.width + rhs.width)，其他算术操作都按 fixint.hpp 规则 wraparound。
+否，算术计算宽度信息以 fixint.hpp API 为准：加法返回 max(lhs.width, rhs.width)，AddCarry 返回输入宽度 + 1，乘法返回 (lhs.width + rhs.width)，其他算术操作都按 fixint.hpp 规则 wraparound。
 
 17. signedness 是否影响存储位模式？
 不影响位存储，只影响 signed compare、arithmetic right shift、sign extension、literal interpretation、cast，以及常量 RHS 的 Div/Mod lowering。

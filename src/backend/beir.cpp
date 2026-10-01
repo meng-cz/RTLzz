@@ -1005,16 +1005,14 @@ static ValueFacts factsInferOperation(const Operation& op, const Program& progra
             auto sum = factsAddBits(factsAddBits(lhs, rhs, width), carry, width);
             return factsConstantBits(sum, width, false);
         }
-        // The third input can add one more carry bit beyond a+b.  Infer only
-        // high zeros that hold for every possible value of all three inputs.
+        // The carry input can fill the extra bit above equal-width operands.
         auto possible_bits = [&](const ValueFacts& value) {
             int bits = std::min(width, value.width);
             while (bits > 0 && factsGetBit(value.known_zero, bits - 1)) --bits;
             return bits;
         };
-        int highest_possible = std::max({possible_bits(operands[0]),
-                                         possible_bits(operands[1]),
-                                         possible_bits(operands[2])}) + 2;
+        int highest_possible = std::max(possible_bits(operands[0]),
+                                        possible_bits(operands[1])) + 1;
         ValueFacts out = factsUnknown(width);
         for (int bit = highest_possible; bit < width; ++bit) factsSetBit(out.known_zero, bit);
         return out;
