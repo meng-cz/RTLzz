@@ -508,9 +508,9 @@ PipelineResult compile(const PipelineConfig& config) {
             // BEIR lowering. Avoid the BEIR passes whose proof/search cost is
             // disproportionate on the CIRCT path; retain the local canonical
             // and width simplifications needed to produce compact legal IR.
-            optimization_options.predicate_sinking = false;
-            optimization_options.exclusive_muxes = false;
-            optimization_options.max_iterations = std::min(optimization_options.max_iterations, 8);
+            // optimization_options.predicate_sinking = false;
+            // optimization_options.exclusive_muxes = false;
+            // optimization_options.max_iterations = std::min(optimization_options.max_iterations, 8);
         }
         beir_program = beir::opt::optimizeProgram(
             std::move(beir_program),

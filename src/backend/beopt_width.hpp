@@ -1056,7 +1056,11 @@ inline bool rewriteNarrowedLogicalShrToSlice(Operation& op,
     if (width <= 0 || lhs_width <= 0 || lo < 0 || lo + width > lhs_width) {
         return false;
     }
-    setSlice(op, lhs, lo, width, op.type,
+    // The caller has narrowed the signal, but the driver still has its old
+    // result type. Keep the slice result type consistent with its bit range.
+    ValueType slice_type = op.type;
+    slice_type.width = width;
+    setSlice(op, lhs, lo, width, slice_type,
              "narrowed logical right shift into slice", program);
     return true;
 }
@@ -1094,6 +1098,15 @@ inline bool normalizeOperationOperands(Operation& op, Program& program, const st
         } else if (lowBitClosedBinary(op.op)) {
             normalize_operand(0, out_width);
             normalize_operand(1, out_width);
+        } else if (op.op == OpCode::Shl || op.op == OpCode::Shr) {
+            // Shift semantics include the ORIGINAL left operand width, even
+            // when its high bits are known zero and its producer is narrowed.
+            // Restore that width before shifting: zext(x << n) is not the same
+            // as zext(x) << n. Keep the source width for right shifts as well
+            // (sign fill and the amount >= source-width zero rule depend on it).
+            const int source_width = widthOf(op.operands[0].type);
+            normalize_operand(0, source_width);
+            normalize_operand(1, assigned_operand(1));
         } else if (op.op == OpCode::Eq || op.op == OpCode::Ne ||
                    op.op == OpCode::Lt || op.op == OpCode::Le ||
                    op.op == OpCode::Gt || op.op == OpCode::Ge) {
