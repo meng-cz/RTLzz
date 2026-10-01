@@ -8,12 +8,19 @@ failed=0
 
 while read -r file; do
     echo "=== Running: $file ==="
-
     if python3 scripts/differential_rtl.py "$file" --top hls_main --cases 100; then
         echo "[PASS] $file"
         ((passed++))
     else
         echo "[FAIL] $file"
+        ((failed++))
+    fi
+
+    if python3 scripts/differential_rtl.py "$file" --top hls_main --cases 100 --circt; then
+        echo "[PASS] $file --circt"
+        ((passed++))
+    else
+        echo "[FAIL] $file --circt"
         ((failed++))
     fi
 

@@ -6,6 +6,14 @@
 
 ## 回归测试流程
 
+总回归测试脚本：
+
+```bash
+source regression.sh
+```
+
+分别执行单项回归测试：
+
 ```bash
 cmake -S . -B build
 cmake --build build --target predicate-expand -j2
@@ -371,22 +379,16 @@ done
 
 ### `testv2/fixtures/int_misc.logic.cpp`
 - End-to-end integer/fixint API fixture：arithmetic、bit op、shift、compare、slice、pick、cat/repeat/reduce、cast、enum、standard integer mixing；乘法覆盖左右混合符号、双有符号、不同位宽和结果截断。
-- 合并动态位段/单 bit 写入顺序、RHS/LHS 自增求值顺序、128 位常量循环、运行时数据静态切片、`i * 4` 重叠写入、首尾及整宽覆盖回归。
-
-### `testv2/fixtures/constant_rom.logic.cpp`
-- AES SBOX 常量 ROM fixture，覆盖两个动态索引读取；用于 case 查表的 C++/RTL 差分验证。
+- 合并动态位段/单 bit 写入顺序、RHS/LHS 自增求值顺序、128 位常量循环、运行时数据静态切片、相邻/重叠/稀疏位段更新、位宽截断、符号窄化与宽位移回归。
 
 ### `testv2/fixtures/flatten_misc.logic.cpp`
-- End-to-end struct/array/aggregate/dynamic index/constant lookup fixture。
+- End-to-end struct/array/aggregate/dynamic index/constant lookup fixture；包含 AES SBOX 常量 ROM 的两个动态索引读取。
 
 ### `testv2/fixtures/controlflow_misc.logic.cpp`
-- End-to-end nested if/switch/loop、dynamic break/continue、early-return fixture。
+- End-to-end nested if/switch/loop、dynamic break/continue、early-return fixture；包含互斥/优先级选择、谓词链、六路分支判断与短路求值。
 
 ### `testv2/fixtures/inline_misc.logic.cpp`
-- End-to-end helper/lambda inline、overload、parameter/return fixture。
-
-### `testv2/fixtures/port_lift_large_array.logic.cpp`
-- End-to-end 32×64-bit array global-port lift、嵌套 helper const-ref alias、RTL/C++ 差分 fixture；防止 helper 内联为每个读取调用复制完整数组。
+- End-to-end helper/lambda inline、overload、parameter/return fixture；包含 32×64-bit 大数组端口经嵌套 helper 读取与有符号比较 helper。
 
 ### `testv2/fixtures/s*/...`
 - Stage-specific C++ fixtures used by integration tests.
@@ -452,20 +454,11 @@ done
 ### `testv2/beopt_boolean_test.cpp`
 - 穷举验证短路 phi、吸收律、consensus、一般 ITE 和优先级 Case；覆盖多输出共享、死逻辑清理、多位输入边界及连续调用稳定性。400 个随机多输出图各穷举 16 组输入，覆盖 XOR/Eq/Ne/ITE/Case。
 
-### `testv2/fixtures/backend_structure.logic.cpp`
-- 8/128 位互斥选择、优先级选择、结合运算及嵌套谓词的端到端 C++/RTL 差分回归。
-
-### `testv2/fixtures/branch_decision.logic.cpp`
-- 软件风格控制转移判断 fixture：外层 legal/jal/jalr/branch 条件、六路 if/else-if 分支比较、布尔变量反复赋值，以及 JALR/PC target 选择；覆盖有符号和无符号 64 位比较。
-
 ### `testv2/branch_decision_analysis.md`
 - 记录该 fixture 的语义差分和结构深度结果：完整路径 guard 可证明互斥，taken 的六级串行更新被一个原生 Case 替代；布尔归一化继续移除一位短路/phi Ite，使 control_valid 与 taken 的 Ite 深度降为 0。
 
 ### `testv2/beopt_bit_updates_test.cpp`
 - 独立 BEIR 求值器验证相邻、重叠、稀疏和全覆盖写入；覆盖 Assign 别名穿透、共享中间节点边界、规模限制及选项解析。
-
-### `testv2/fixtures/bit_update_coalescing.logic.cpp`
-- 相邻、重叠和带空洞静态位段更新的端到端 C++/RTL 差分 fixture。
 
 ### `testv2/case_guard_analysis.md`
 - 记录 Case 路径消冗余、128 路优先级前缀、随机布尔穷举与 FPUArithmetic 实际生成结果；FMA_SUM1 条件恢复为单个状态比较，并注明图深度统计方法和验证范围。
@@ -473,9 +466,6 @@ done
 ### `testv2/predicate_chain_test.cpp`
 - signed narrowing 的常量/已知位传递、小位宽穷举、跨 limb 和部分已知位回归。
 - AIG 嵌套 mux 共用默认值归并；非恒定默认值、共享输出、状态排除条件消除及随机网络等价检查。
-
-### `testv2/fixtures/predicate_chain.logic.cpp` / `signed_narrow_facts.logic.cpp`
-- 长状态条件链的非恒定默认值与共享 inner 输出，以及 signed narrowing 的端到端 C++/RTL 差分 fixtures。
 
 ### `testv2/adaptive_control_test.cpp` / `adaptive_control_analysis.md`
 - 按 DAG 深度自适应的布尔蕴含、共享 Eq/Ne decoder facts，以及精确匹配的 wen/wdata 输出需求上下文。

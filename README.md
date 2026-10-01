@@ -80,10 +80,10 @@ priority muxes whose branches cannot be represented by these identities remain
 as `Ite` nodes.
 
 Run `build/testv2/beopt-structure-test` for structural and BEIR equivalence checks,
-and `scripts/differential_rtl.py testv2/fixtures/backend_structure.logic.cpp
+and `scripts/differential_rtl.py testv2/fixtures/controlflow_misc.logic.cpp
 --top hls_main --cases 256` for RTL differential validation.
 Run `build/testv2/beopt-bit-updates-test` and use
-`testv2/fixtures/bit_update_coalescing.logic.cpp` for bit-update structural and
+`testv2/fixtures/int_misc.logic.cpp` for bit-update structural and
 RTL differential validation.
 Run `build/testv2/beopt-boolean-test` for exhaustive small-network equivalence
 checks of Boolean normalization.
@@ -120,4 +120,4 @@ truth-table checks, including shared/private guards, inversion, array write
 boundaries, preservation of original predicate drivers, Boolean-only allocation
 and resource limits. For RTL/C++ differential
 validation, run `scripts/differential_rtl.py
-testv2/fixtures/partial_predicate.logic.cpp --top hls_main --cases 1024`.
+testv2/fixtures/controlflow_misc.logic.cpp --top hls_main --cases 1024`.

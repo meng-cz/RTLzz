@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <array>
 #include <fixint.hpp>
 
@@ -198,6 +199,64 @@ Int<8> explicitly_initialized_array(Int<8> value) {
     return local[0] ^ local[1];
 }
 
+// Integrated regression from inline_signed_compare.logic.cpp
+
+#pragma input_port signed_compare_a
+Int<64> signed_compare_a;
+#pragma input_port signed_compare_b
+Int<64> signed_compare_b;
+#pragma output_port signed_compare_lt
+bool signed_compare_lt;
+#pragma output_port signed_compare_le
+bool signed_compare_le;
+#pragma output_port signed_compare_gt
+bool signed_compare_gt;
+#pragma output_port signed_compare_ge
+bool signed_compare_ge;
+#pragma output_port signed_compare_unsigned_lt
+bool signed_compare_unsigned_lt;
+#pragma output_port signed_compare_pack_scale
+Int<32> signed_compare_pack_scale;
+#pragma output_port signed_compare_product
+Int<32> signed_compare_product;
+#pragma output_port signed_compare_shifted
+Int<64> signed_compare_shifted;
+
+bool signed_compare_signed_lt_helper(uint64_t x, uint64_t y) {
+    return static_cast<int64_t>(x) < static_cast<int64_t>(y);
+}
+bool signed_compare_nested_signed_lt(uint64_t x, uint64_t y) {
+    return signed_compare_signed_lt_helper(x, y);
+}
+void signed_compare_refs(uint64_t x, uint64_t y, bool &greater, bool &greater_equal) {
+    greater = static_cast<int64_t>(x) > static_cast<int64_t>(y);
+    greater_equal = static_cast<int64_t>(x) >= static_cast<int64_t>(y);
+}
+int32_t signed_compare_target_scale(int32_t exponent) {
+    return exponent >= -1022 ? exponent : -1022;
+}
+int32_t signed_compare_signed_product(int16_t x, int16_t y) {
+    return static_cast<int32_t>(x) * static_cast<int32_t>(y);
+}
+int64_t signed_compare_signed_shift(uint64_t x) {
+    return static_cast<int64_t>(x) >> 3;
+}
+
+// Integrated regression from port_lift_large_array.logic.cpp
+#pragma input_port port_lift_register_file
+std::array<Int<64>, 32> port_lift_register_file;
+
+#pragma output_port port_lift_snapshot
+std::array<Int<64>, 32> port_lift_snapshot;
+
+Int<64> port_lift_read_register_inner(uint32_t index) {
+    return port_lift_register_file[index];
+}
+
+Int<64> port_lift_read_register(uint32_t index) {
+    return port_lift_read_register_inner(index);
+}
+
 void hls_main() {
     Int<8> chain = mix_helper(a, b);
     helper_chain = chain;
@@ -339,4 +398,56 @@ void hls_main() {
     Int<8> lambda_array_0 = lambda_array_ports.template operator()<0>(a);
     Int<8> lambda_array_1 = lambda_array_ports.template operator()<1>(b);
     lambda_template_array_read = lambda_array_0 + lambda_array_1;
+
+    // inline_signed_compare.logic.cpp
+    {
+    uint64_t x = signed_compare_a.to<uint64_t>();
+    uint64_t y = signed_compare_b.to<uint64_t>();
+    signed_compare_lt = signed_compare_nested_signed_lt(x, y);
+    auto compare = [](uint64_t lhs, uint64_t rhs) {
+        return static_cast<int64_t>(lhs) <= static_cast<int64_t>(rhs);
+    };
+    signed_compare_le = compare(x, y);
+    signed_compare_refs(x, y, signed_compare_gt, signed_compare_ge);
+    signed_compare_unsigned_lt = x < y;
+    signed_compare_pack_scale = Int<32>(signed_compare_target_scale(static_cast<int32_t>(x)));
+    signed_compare_product = Int<32>(signed_compare_signed_product(static_cast<int16_t>(x), static_cast<int16_t>(y)));
+    signed_compare_shifted = Int<64>(signed_compare_signed_shift(x));
+    }
+
+    // port_lift_large_array.logic.cpp
+    {
+    port_lift_snapshot[0] = port_lift_read_register(0);
+    port_lift_snapshot[1] = port_lift_read_register(1);
+    port_lift_snapshot[2] = port_lift_read_register(2);
+    port_lift_snapshot[3] = port_lift_read_register(3);
+    port_lift_snapshot[4] = port_lift_read_register(4);
+    port_lift_snapshot[5] = port_lift_read_register(5);
+    port_lift_snapshot[6] = port_lift_read_register(6);
+    port_lift_snapshot[7] = port_lift_read_register(7);
+    port_lift_snapshot[8] = port_lift_read_register(8);
+    port_lift_snapshot[9] = port_lift_read_register(9);
+    port_lift_snapshot[10] = port_lift_read_register(10);
+    port_lift_snapshot[11] = port_lift_read_register(11);
+    port_lift_snapshot[12] = port_lift_read_register(12);
+    port_lift_snapshot[13] = port_lift_read_register(13);
+    port_lift_snapshot[14] = port_lift_read_register(14);
+    port_lift_snapshot[15] = port_lift_read_register(15);
+    port_lift_snapshot[16] = port_lift_read_register(16);
+    port_lift_snapshot[17] = port_lift_read_register(17);
+    port_lift_snapshot[18] = port_lift_read_register(18);
+    port_lift_snapshot[19] = port_lift_read_register(19);
+    port_lift_snapshot[20] = port_lift_read_register(20);
+    port_lift_snapshot[21] = port_lift_read_register(21);
+    port_lift_snapshot[22] = port_lift_read_register(22);
+    port_lift_snapshot[23] = port_lift_read_register(23);
+    port_lift_snapshot[24] = port_lift_read_register(24);
+    port_lift_snapshot[25] = port_lift_read_register(25);
+    port_lift_snapshot[26] = port_lift_read_register(26);
+    port_lift_snapshot[27] = port_lift_read_register(27);
+    port_lift_snapshot[28] = port_lift_read_register(28);
+    port_lift_snapshot[29] = port_lift_read_register(29);
+    port_lift_snapshot[30] = port_lift_read_register(30);
+    port_lift_snapshot[31] = port_lift_read_register(31);
+    }
 }

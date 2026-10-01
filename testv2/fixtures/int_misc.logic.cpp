@@ -224,6 +224,102 @@ int32_t signed_shift_identity(int32_t value) {
     return value;
 }
 
+// Integrated regression from bit_update_coalescing.logic.cpp
+#pragma input_port bit_updates_base
+Int<32> bit_updates_base;
+#pragma input_port bit_updates_a
+Int<8> bit_updates_a;
+#pragma input_port bit_updates_b
+Int<8> bit_updates_b;
+#pragma input_port bit_updates_c
+Int<8> bit_updates_c;
+#pragma output_port bit_updates_adjacent
+Int<32> bit_updates_adjacent;
+#pragma output_port bit_updates_overlap
+Int<32> bit_updates_overlap;
+#pragma output_port bit_updates_sparse
+Int<32> bit_updates_sparse;
+
+// Integrated regression from width_truncation.logic.cpp
+struct NarrowFields {
+    Int<5> five;
+    Int<17> seventeen;
+};
+
+#pragma input_port width_wide
+Int<32> width_wide;
+#pragma input_port width_shift
+Int<6> width_shift;
+
+#pragma output_port width_mask4
+Int<4> width_mask4;
+#pragma output_port width_trunc5
+Int<5> width_trunc5;
+#pragma output_port width_trunc17
+Int<17> width_trunc17;
+#pragma output_port width_left5
+Int<5> width_left5;
+#pragma output_port width_logical17
+Int<17> width_logical17;
+#pragma output_port width_arithmetic17
+Int<17> width_arithmetic17;
+#pragma output_port width_constant_left5
+Int<5> width_constant_left5;
+#pragma output_port width_constant_arithmetic17
+Int<17> width_constant_arithmetic17;
+#pragma output_port width_signed_trunc5
+Int<5> width_signed_trunc5;
+#pragma output_port width_field5
+Int<5> width_field5;
+#pragma output_port width_field17
+Int<17> width_field17;
+
+// Integrated regression from narrowed_shift_slice.logic.cpp
+#pragma input_port width_narrowed_pc
+Int<64> width_narrowed_pc;
+#pragma output_port width_narrowed_index
+Int<6> width_narrowed_index;
+#pragma output_port width_narrowed_hit
+bool width_narrowed_hit;
+#pragma output_port width_narrowed_tag
+Int<56> width_narrowed_tag;
+
+// Integrated regression from signed_narrow_facts.logic.cpp
+#pragma input_port width_signed_narrow_wide
+Int<128> width_signed_narrow_wide;
+#pragma output_port width_signed_narrow_sign
+Int<1> width_signed_narrow_sign;
+#pragma output_port width_signed_narrow_narrow
+Int<65> width_signed_narrow_narrow;
+#pragma output_port width_signed_narrow_positive_sign
+Int<1> width_signed_narrow_positive_sign;
+#pragma output_port width_signed_narrow_negative_constant
+Int<7> width_signed_narrow_negative_constant;
+#pragma output_port width_signed_narrow_zero_constant
+Int<1> width_signed_narrow_zero_constant;
+
+// Integrated regression from widened_shift.logic.cpp
+#pragma input_port width_widened_value
+Int<32> width_widened_value;
+#pragma input_port width_widened_index
+Int<3> width_widened_index;
+#pragma input_port width_widened_amount
+Int<8> width_widened_amount;
+#pragma output_port width_widened_shifted
+Int<128> width_widened_shifted;
+#pragma output_port width_widened_shifted_constant
+Int<8> width_widened_shifted_constant;
+#pragma output_port width_widened_shifted_small
+Int<4> width_widened_shifted_small;
+#pragma output_port width_widened_variable_wide
+Int<128> width_widened_variable_wide;
+#pragma output_port width_widened_wide_arithmetic
+Int<128> width_widened_wide_arithmetic;
+#pragma output_port width_widened_narrow_arithmetic
+Int<16> width_widened_narrow_arithmetic;
+#pragma output_port width_widened_variable_small
+Int<4> width_widened_variable_small;
+
 void hls_main() {
     constexpr int LOW_BITS = 8;
     constexpr int MID_LO = 8;
@@ -330,4 +426,73 @@ void hls_main() {
     wide_reduce_parity = ReduceXor(wide_mix);
 
     test_pick_writes();
+
+    // bit_update_coalescing.logic.cpp
+    {
+    Int<32> value = bit_updates_base;
+    value.at<7, 0>() = bit_updates_a;
+    value.at<15, 8>() = bit_updates_b;
+    value.at<23, 16>() = bit_updates_c;
+    bit_updates_adjacent = value;
+
+    value = bit_updates_base;
+    value.pick<12>(0) = Int<12>(bit_updates_a);
+    value.pick<12>(4) = Int<12>(bit_updates_b);
+    bit_updates_overlap = value;
+
+    value = bit_updates_base;
+    value.at<7, 0>() = bit_updates_a;
+    value.at<31, 24>() = bit_updates_c;
+    bit_updates_sparse = value;
+    }
+
+    // width_truncation.logic.cpp
+    {
+    uint32_t address = width_wide.template to<uint32_t>();
+    width_mask4 = Int<4>(1U << (address & 3U));
+
+    width_trunc5 = Int<5>(width_wide);
+    width_trunc17 = Int<17>(width_wide);
+    width_left5 = Int<5>(width_wide << width_shift);
+    width_logical17 = Int<17>(width_wide >> width_shift);
+    width_arithmetic17 = Int<17>(width_wide.sint() >> width_shift);
+    width_constant_left5 = Int<5>(width_wide << 32);
+    width_constant_arithmetic17 = Int<17>(width_wide.sint() >> 32);
+    width_signed_trunc5 = Int<5>(width_wide.sint());
+
+    NarrowFields fields;
+    fields.five = Int<5>(width_wide << width_shift);
+    fields.seventeen = Int<17>(width_wide.sint() >> width_shift);
+    width_field5 = fields.five;
+    width_field17 = fields.seventeen;
+
+    // narrowed_shift_slice.logic.cpp
+    {
+    width_narrowed_index = Int<6>(width_narrowed_pc >> 2U);
+    width_narrowed_hit = Int<6>(width_narrowed_pc >> 2U) == Int<6>(17);
+    width_narrowed_tag = Int<56>(width_narrowed_pc >> 8U);
+    }
+
+    // signed_narrow_facts.logic.cpp
+    {
+    width_signed_narrow_sign = Int<1>(width_signed_narrow_wide.sint());
+    width_signed_narrow_narrow = Int<65>(width_signed_narrow_wide.sint());
+    Int<128> positive = width_signed_narrow_wide & Int<128>(Int<64>(~Int<64>(0)));
+    width_signed_narrow_positive_sign = Int<1>(positive.sint());
+    width_signed_narrow_negative_constant = Int<7>(Int<32>(-128).sint());
+    width_signed_narrow_zero_constant = Int<1>(Int<32>(0).sint());
+    }
+
+    // widened_shift.logic.cpp
+    {
+    width_widened_shifted = Int<128>(width_widened_value) << (width_widened_index.to<uint32_t>() * 16U);
+    width_widened_shifted_constant = Int<8>(width_widened_index) << 4U;
+    width_widened_shifted_small = Int<4>(width_widened_index << 4U);
+    width_widened_variable_wide = Int<128>(width_widened_value) << width_widened_amount;
+    Int<128> sign_extended = Int<128>(width_widened_value.sint());
+    width_widened_wide_arithmetic = sign_extended.sint() >> width_widened_amount;
+    width_widened_narrow_arithmetic = Int<16>(sign_extended.sint() >> width_widened_amount);
+    width_widened_variable_small = Int<4>(width_widened_index << width_widened_amount);
+    }
+    }
 }
