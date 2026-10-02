@@ -12,6 +12,7 @@ The script:
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import re
 import random
@@ -65,6 +66,26 @@ def type_width(t: dict[str, Any]) -> int:
 
 def mask(width: int) -> int:
     return (1 << width) - 1 if width > 0 else 0
+
+
+def write_data_guards(program: dict[str, Any]) -> dict[str, str]:
+    """Match the backend's exact wen/wdata output contract, element by element."""
+    ports = program["ports"]
+    uses = Counter(symbol for port in ports for symbol in port["element_symbols"])
+    outputs = {port["name"]: port for port in ports if port["direction"] == "Output"}
+    guards = {}
+    for name, data in outputs.items():
+        if not name.startswith("wdata_"):
+            continue
+        enable = outputs.get("wen_" + name[len("wdata_"):])
+        if (enable is None or type_width(enable["type"]) != 1 or
+                enable["type"].get("array_dims", []) != data["type"].get("array_dims", []) or
+                len(enable["element_symbols"]) != len(data["element_symbols"])):
+            continue
+        for value, valid in zip(data["element_symbols"], enable["element_symbols"]):
+            if value != valid and uses[value] == 1:
+                guards[value] = valid
+    return guards
 
 
 def split_top_level_commas(text: str) -> list[str]:
@@ -664,6 +685,7 @@ def main() -> int:
             rtl_args.append("--circt")
         run(rtl_args, cwd=ROOT)
         program = json.loads(portmeta.read_text())
+        write_guards = write_data_guards(program)
         resolved_top = program.get("function", args.top)
         try:
             input_config = args.input_config.resolve() if args.input_config else None
@@ -718,6 +740,10 @@ def main() -> int:
             expected = parse_key_values(oracle_run.stdout)
             actual = parse_key_values(run([str(rtl_exe)] + argv, cwd=ROOT).stdout)
             for name, exp in expected.items():
+                # Disabled write data is unobservable. Enable outputs themselves
+                # and all resetvalue outputs are still compared unconditionally.
+                if name in write_guards and expected[write_guards[name]] == 0:
+                    continue
                 got = actual.get(name)
                 width = type_width(next(
                     p["type"] for p in program["ports"]

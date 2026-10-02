@@ -803,7 +803,10 @@ inline int assignedWidthFromOperation(const Program& program, const Operation& o
     case OperationKind::Binary: {
         int lhs = operand_width(0);
         int rhs = operand_width(1);
-        if (op.op == OpCode::Add) computed = std::max(lhs, rhs);
+        // Effective operand widths may shrink, but their sum still needs a carry bit.
+        // Keep the original result width as the modulo boundary.
+        if (op.op == OpCode::Add) computed = std::max(lhs, rhs) < out_width
+            ? std::max(lhs, rhs) + 1 : out_width;
         else if (op.op == OpCode::Sub) computed = out_width;
         else if (op.op == OpCode::Mul) computed = lhs + rhs;
         else if (op.op == OpCode::BitAnd) computed = std::min(lhs, rhs);

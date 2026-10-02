@@ -2,7 +2,7 @@
 
 本文档是当前代码树的逐文件索引。项目现在只保留 V2 编译路径：
 
-`S0 native AST -> S1 API norm -> S2 validate -> S3 statementize -> S4 CFG -> S5 unroll -> S6 inline -> S7 flatten -> S8 op norm -> S9 SSA -> S10 predicate -> S11 BEIR -> BEOPT -> RTL (native or CIRCT)`
+`S0 Clang18 AST -> S1 API norm -> S2 validate -> S3 statementize -> S4 CFG -> S5 unroll -> S6 inline -> S7 flatten -> S8 op norm -> S9 SSA -> S10 predicate -> S11 BEIR -> BEOPT -> RTL (native or CIRCT)`
 
 ## 回归测试流程
 
@@ -86,7 +86,13 @@ done
 ### `src/debug/RTLZZException.cpp`
 - 实现 debug context stack、异常格式化与 guard push/pop。
 
-## S0 Native AST
+## S0 Clang18 production frontend
+
+`src/pipelinev2/PipelineV2.cpp` 使用 `src/s0clang18/s018bridge.cpp` 的 `buildS0ProgramWithClang18` 进入生产流水线。`src/s0clang18/s014init.cpp` 处理显式 `{}`、聚合和数组初始化，保留无初始化器声明的区别；S7 将显式空构造展平为各叶子的零赋值。
+
+## S0 compatibility AST / native builder
+
+以下 native builder 入口仍供兼容与阶段测试使用，生产编译入口使用上述 Clang18 前端。
 
 ### `src/s0ast/S0AST.h`
 - 声明 S0 parse result、diagnostic、S0 internal program shape，以及 `parseProgram`、`surfaceAST`、`debugPrint`。
@@ -332,7 +338,7 @@ done
 
 ### `src/backend/circt_bridge.hpp` / `src/backend/circt_bridge.cpp`
 - 将 BEOPT 后的纯组合 BEIR lower 为 CIRCT HW/Comb IR，调用 `circt-opt --canonicalize --cse --hw-cleanup --lower-hw-to-sv --export-verilog`，并提取导出的 Verilog module 或 module body。
-- 支持标量组合运算、首真优先 Case、Aggregate-backed signal Lookup、动态位/片选择和动态位/片写入；动态操作被 lower 为明确的组合选择网络。
+- 支持标量组合运算、首真优先 Case、Aggregate-backed signal Lookup、动态位/片选择和动态位/片写入；module-body 端口绑定按 row-major 还原全部数组维度（包括单元素数组）；动态操作被 lower 为明确的组合选择网络。
 - `--circt` / `CompileOptions::use_circt` 显式启用。CIRCT 缺失、IR 不支持或优化失败均为编译错误，不回退 native emitter；非 release 调用保留输入 MLIR、导出输出和 stderr 以供诊断。
 - RTL emission 将全常量 Aggregate 的 Lookup/ArrayAccess 输出为组合 case 查表函数；按元素类型、表长及规范化常量位值建立哈希索引，以完整比较处理哈希冲突，同一模块内相同表复用函数；可追踪赋值及无符号宽度转换链，省略不再被使用的数组，运行时表项保持数组读取。
 
@@ -395,14 +401,9 @@ done
 
 ## Scripts
 
-### `testv2/regression.sh`
-- 一键递归运行 `testv2/fixtures/**/*.logic.cpp` 的 C++/RTL 随机差分；每个 fixture 分别使用 native emitter 与 `--circt` CIRCT emitter 验证。自动构建 `predicate-expand`，从 `testv2/regression.json` 读取输入域约束，区分 `PASS`、预期负向测试 `XFAIL`、`FAIL` 与 `XPASS`，并在逐项日志和 `summary.tsv` 中记录后端。
-
-### `testv2/regression.json`
-- 全量差分的 fixture 配置清单；`input_ranges` 以 raw port value 的闭区间 `[MIN, MAX]` 限制随机输入，避免 C++ oracle 执行 fixture 前置条件之外的未定义行为。
-
 ### `scripts/differential_rtl.py`
 - V2 RTL differential harness。
+- `write_data_guards(...)` 按后端约定匹配同名后缀、相同维度的一位 wen 输出，仅在对应使能为零时跳过 wdata 比较；复位值与使能始终严格比较。`scripts/differential_rtl_test.py` 验证标量/数组配对、维度与方向拒绝以及其他观察者保护。
 - `--circt` 仅让 RTL 生成阶段走 CIRCT；端口元数据仍来自同一 BEIR 程序，因此 C++ oracle、随机输入和比较规则与 native 后端完全相同。
 - 生成 port metadata、RTL、C++ oracle 和 Verilator testbench；oracle 直接写入源文件全局 input port、调用无参 top、读取全局 output port，并比较随机输入下的输出。
 - `--input-config` 加载 fixture manifest，重复的 `--input-range NAME=MIN:MAX` 可覆盖单个输入范围；配置会校验输入名、闭区间顺序和端口位宽。oracle 异常退出会报告 case、signal/exit code 与完整触发输入。
@@ -444,30 +445,3 @@ done
 - `parallelizeExclusiveMuxes` 遍历等宽 Ite 的 true/false 两臂，收集完整路径谓词并转换为一个有序 Case，保留显式默认值。叶路径在分叉处包含相反条件，结构性保证互斥并保留原优先级语义；共享节点和 signed-view 边界保持为叶子。默认最多 1024 个分叉（硬上限 4096），超限候选不修改。
 - `balanceAssociativeTrees` 支持等宽无 signed-view 的 AND/OR/XOR/模加法；默认最多 1024 叶（硬上限 4096），只展开单用户同类节点，不穿越截断/扩展。按到达时间优先合并早到输入，且仅在估计延迟严格下降时重构。
 - 两个 pass 按可观察输出遍历活跃图，修改后使 value facts 失效。
-
-### `testv2/beopt_structure_test.cpp`
-- 独立 BEIR 求值器验证 mux 到 Case 的默认值和等价性、非互斥拒绝、8 输入结合树及模加法语义；覆盖完整父上下文、查询失效、共享节点、位宽边界、晚到输入、下沉后再次简化及选项解析。
-
-### `testv2/beir_case_test.cpp`
-- 构造原生 Case 验证首真分支布局、共同已知位和值事实、常量传播、恒真/恒假和同值代数折叠、位宽需求传播、谓词分支上下文、CSE/DCE、BEIR 文本及 `always_comb case` RTL 发射。
-
-### `testv2/beopt_boolean_test.cpp`
-- 穷举验证短路 phi、吸收律、consensus、一般 ITE 和优先级 Case；覆盖多输出共享、死逻辑清理、多位输入边界及连续调用稳定性。400 个随机多输出图各穷举 16 组输入，覆盖 XOR/Eq/Ne/ITE/Case。
-
-### `testv2/branch_decision_analysis.md`
-- 记录该 fixture 的语义差分和结构深度结果：完整路径 guard 可证明互斥，taken 的六级串行更新被一个原生 Case 替代；布尔归一化继续移除一位短路/phi Ite，使 control_valid 与 taken 的 Ite 深度降为 0。
-
-### `testv2/beopt_bit_updates_test.cpp`
-- 独立 BEIR 求值器验证相邻、重叠、稀疏和全覆盖写入；覆盖 Assign 别名穿透、共享中间节点边界、规模限制及选项解析。
-
-### `testv2/case_guard_analysis.md`
-- 记录 Case 路径消冗余、128 路优先级前缀、随机布尔穷举与 FPUArithmetic 实际生成结果；FMA_SUM1 条件恢复为单个状态比较，并注明图深度统计方法和验证范围。
-
-### `testv2/predicate_chain_test.cpp`
-- signed narrowing 的常量/已知位传递、小位宽穷举、跨 limb 和部分已知位回归。
-- AIG 嵌套 mux 共用默认值归并；非恒定默认值、共享输出、状态排除条件消除及随机网络等价检查。
-
-### `testv2/adaptive_control_test.cpp` / `adaptive_control_analysis.md`
-- 按 DAG 深度自适应的布尔蕴含、共享 Eq/Ne decoder facts，以及精确匹配的 wen/wdata 输出需求上下文。
-- 数组逐索引配对和跨索引反例、共享与别名保护、布尔规范化三次调度回归。
-- `testv2/fixtures/write_port_groups/` 使用独立 SV oracle 检查使能有效时的写数据，穷举 262144 组组合。

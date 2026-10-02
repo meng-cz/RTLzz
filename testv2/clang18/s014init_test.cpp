@@ -48,10 +48,14 @@ static Fixture buildFixture() {
 #include <array>
 #include <fixint.hpp>
 
+enum class Mode { ACTIVE = 7, STOPPED = 9 };
 struct Pair {
     Int<8> lo;
     Int<8> hi;
 };
+
+struct Nested { Mode mode; bool flag; std::array<Pair, 2> pairs; };
+using Matrix = std::array<std::array<Nested, 2>, 2>;
 
 #pragma input_port a
 Int<8> a;
@@ -61,6 +65,8 @@ Int<8> b;
 Int<8> out_value;
 
 void hls_main() {
+    Mode mode{};
+    Matrix matrix{};
     Int<8> uninit;
     Int<8> copy = a;
     Int<8> direct(a);
@@ -262,6 +268,17 @@ int main() {
         CHECK(arg != nullptr);
         CHECK(arg->kind == pred::v2::ExprKind::Literal);
         CHECK(arg->literal_value == "0");
+    }
+
+    auto mode = buildInit(fixture, context, collector.vars.at("mode"));
+    CHECK(mode.init_args.size() == 1);
+    CHECK(mode.init_args[0]->kind == pred::v2::ExprKind::Literal);
+    CHECK(mode.init_args[0]->literal_value == "0");
+    auto matrix = buildInit(fixture, context, collector.vars.at("matrix"));
+    CHECK(matrix.init_args.size() == 24);
+    for (const auto& arg : matrix.init_args) {
+        CHECK(arg && arg->kind == pred::v2::ExprKind::Literal);
+        CHECK(arg->literal_value == "0" || arg->literal_value == "false");
     }
 
     std::cout << "s014init_test passed\n";

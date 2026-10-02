@@ -1,4 +1,6 @@
 #include "s0ast/S0AST.h"
+#include "s0clang18/s018bridge.hpp"
+#include "pipelinev2/PipelineV2.h"
 #include "s1apinorm/S1APINorm.h"
 #include "s2validate/S2Validate.h"
 #include "s3statementize/S3Statementize.h"
@@ -774,7 +776,28 @@ static void astPipelineFlattensAggregateLambdaCalls() {
     CHECK(debug.find(".lanes") == std::string::npos);
 }
 
+static void registerZeroInitializationUsesProductionFrontend() {
+    const std::string file = "testv2/fixtures/register_zero_init.logic.cpp";
+    s0clang18::Clang18Options options;
+    options.source_name = file;
+    options.top_function = "hls_main";
+    options.clang_args = {"-std=c++20", "-Ithird_party/vulsim/vullib"};
+    auto ast = s0clang18::buildS0ProgramWithClang18(options);
+    CHECK(ast.ok());
+    auto debug = runASTToS7(s0ast::surfaceAST(*ast.program));
+    CHECK(debug.find("reg__idx_0__child__mode") != std::string::npos);
+    CHECK(debug.find("reg__idx_1__child__wide") != std::string::npos);
+    pipelinev2::PipelineConfig config;
+    config.source_name = file;
+    config.top_function = "hls_main";
+    config.clang_args = options.clang_args;
+    auto result = pipelinev2::compile(config);
+    if (!result.ok()) std::cerr << result.error << "\n";
+    CHECK(result.ok()); // Includes S9 verification of all read leaves.
+}
+
 int main() {
+    registerZeroInitializationUsesProductionFrontend();
     leafSymbolLimitIsOptionalAndConfigurable();
     fieldReadAndAggregateCopyFlatten();
     staticAndDynamicArrayAccessFlatten();

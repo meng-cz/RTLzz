@@ -177,7 +177,7 @@ private:
     }
 
     std::string portName(const beir::Port& port, std::size_t element) const {
-        if (port.element_nodes.size() == 1) return sanitize(port.name);
+        if (port.type.array_dims.empty()) return sanitize(port.name);
         // CIRCT currently receives flattened scalar ports. Keep names free of
         // BEIR's internal "__idx_" marker because the SV exporter canonicalizes
         // that marker differently for input and output ports.
@@ -189,7 +189,7 @@ private:
         if (module_body_ && found == bindings_.end())
             throw std::runtime_error("CIRCT bridge missing module-body binding for port '" + port.name + "'");
         const std::string base = found == bindings_.end() ? sanitize(port.name) : found->second;
-        return port.element_nodes.size() == 1 ? base : base + "[" + std::to_string(element) + "]";
+        return arrayPortRef(port, element, base);
     }
 
     void collectPorts() {
@@ -692,8 +692,9 @@ private:
         }
     }
 
-    std::string arrayPortRef(const beir::Port& port, std::size_t flat_index) const {
-        std::string ref = sanitize(port.name);
+    std::string arrayPortRef(const beir::Port& port, std::size_t flat_index,
+                             std::string ref = {}) const {
+        if (ref.empty()) ref = sanitize(port.name);
         std::size_t remainder = flat_index;
         std::vector<int> indices(port.type.array_dims.size(), 0);
         for (std::size_t i = port.type.array_dims.size(); i > 0; --i) {
@@ -702,6 +703,7 @@ private:
             indices[i - 1] = static_cast<int>(remainder % static_cast<std::size_t>(dimension));
             remainder /= static_cast<std::size_t>(dimension);
         }
+        if (remainder != 0) throw std::runtime_error("CIRCT bridge array port element index out of range");
         for (int index : indices) ref += "[" + std::to_string(index) + "]";
         return ref;
     }

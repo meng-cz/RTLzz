@@ -186,7 +186,11 @@ Summary hoistBranchLocalCombinational(s8opnorm::S8NormProgram& program) {
                 if (!totalCombinational(stmt) || stmt.target < 0 ||
                     fn.symbols[static_cast<std::size_t>(stmt.target)].role == s8opnorm::S8SymbolRole::Port ||
                     operandsDefinedIn(stmt, local_defs)) {
-                    if (stmt.target >= 0) local_defs.insert(stmt.target);
+                    if (stmt.kind == s8opnorm::S8StmtKind::LookupWrite) {
+                        local_defs.insert(stmt.lookup_write_targets.begin(), stmt.lookup_write_targets.end());
+                    } else if (stmt.target >= 0) {
+                        local_defs.insert(stmt.target);
+                    }
                     continue;
                 }
                 const SymbolId old = stmt.target;
@@ -237,7 +241,9 @@ Summary hoistBranchLocalCombinational(s8opnorm::S8NormProgram& program) {
                 ++summary.renamed_symbols;
             }
             child.stmts.erase(std::remove_if(child.stmts.begin(), child.stmts.end(),
-                [](const s8opnorm::S8Stmt& stmt) { return stmt.target < 0; }), child.stmts.end());
+                [](const s8opnorm::S8Stmt& stmt) {
+                    return stmt.kind == s8opnorm::S8StmtKind::Assign && stmt.target < 0;
+                }), child.stmts.end());
         }
     }
     return summary;
