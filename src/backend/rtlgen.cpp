@@ -968,6 +968,21 @@ private:
                     return width + "'((" + multiplyOperand(ops[0]) + " * " +
                            multiplyOperand(ops[1]) + "))";
                 }
+                // BEIR width normalization can leave a bitwise operand wider
+                // than the operation result (for example after lowering a
+                // narrow slice of a wide packed value). Size both operands
+                // before applying the operator so Verilator and other SV
+                // tools do not infer a wide intermediate and truncate it
+                // implicitly at the destination.
+                if (op.op == beir::OpCode::BitAnd || op.op == beir::OpCode::BitOr ||
+                    op.op == beir::OpCode::BitXor) {
+                    const int result_width = widthOf(op.type);
+                    auto bitwiseOperand = [&](const beir::Operand& value) {
+                        return resizeExpr(operand(value), widthOf(value.type), result_width, false);
+                    };
+                    return "(" + bitwiseOperand(ops[0]) + " " + svBinaryOp(op.op) + " " +
+                           bitwiseOperand(ops[1]) + ")";
+                }
                 bool signed_context =
                     ops[0].signed_view || ops[1].signed_view ||
                     ops[0].constant.signed_view || ops[1].constant.signed_view;
