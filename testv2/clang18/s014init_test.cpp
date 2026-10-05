@@ -56,6 +56,7 @@ struct Pair {
 
 struct Nested { Mode mode; bool flag; std::array<Pair, 2> pairs; };
 using Matrix = std::array<std::array<Nested, 2>, 2>;
+struct Defaults { uint32_t word = 37; bool flag = true; };
 
 #pragma input_port a
 Int<8> a;
@@ -72,6 +73,14 @@ void hls_main() {
     Int<8> direct(a);
     Int<8> value{};
     Pair pair{a, b};
+    Pair untouched;
+    Pair direct_pair{};
+    Pair list_pair = {};
+    Pair copy_pair = Pair{};
+    Pair partial_pair{a};
+    Pair raw_matrix[2][2]{};
+    Int<72> wide_zero{};
+    std::array<Defaults, 2> defaults{};
     Pair designated{.hi = b};
     std::array<Int<8>, 2> cleared = {};
     std::array<Pair, 2> table = {};
@@ -247,6 +256,39 @@ int main() {
     CHECK(pair.init_args.size() == 2);
     CHECK(containsVar(pair.init_args[0], "a"));
     CHECK(containsVar(pair.init_args[1], "b"));
+
+    auto untouched = buildInit(fixture, context, collector.vars.at("untouched"));
+    CHECK(untouched.form == pred::s0clang18::InitForm::None);
+    CHECK(untouched.init_args.empty() && !untouched.init_expr);
+    for (const char* name : {"direct_pair", "list_pair", "copy_pair", "raw_matrix"}) {
+        auto zero = buildInit(fixture, context, collector.vars.at(name));
+        std::vector<pred::v2::ExprPtr> leaves = zero.init_args;
+        if (zero.init_expr) {
+            auto expr = *zero.init_expr;
+            while (expr->kind == pred::v2::ExprKind::Cast) expr = expr->cast_expr;
+            CHECK(expr->kind == pred::v2::ExprKind::Call);
+            leaves = expr->args;
+        }
+        CHECK(leaves.size() == (std::string(name) == "raw_matrix" ? 8U : 2U));
+        for (const auto& leaf : leaves) {
+            CHECK(leaf->kind == pred::v2::ExprKind::Literal);
+            CHECK(leaf->literal_value == "0" && leaf->type.width == 8);
+        }
+    }
+    auto partial = buildInit(fixture, context, collector.vars.at("partial_pair"));
+    CHECK(partial.init_args.size() == 2);
+    CHECK(containsVar(partial.init_args[0], "a"));
+    CHECK(partial.init_args[1]->literal_value == "0");
+    auto defaults = buildInit(fixture, context, collector.vars.at("defaults"));
+    CHECK(defaults.init_args.size() == 4);
+    CHECK(defaults.init_args[0]->literal_value == "37");
+    CHECK(defaults.init_args[1]->literal_value == "true");
+    CHECK(defaults.init_args[2]->literal_value == "37");
+    CHECK(defaults.init_args[3]->literal_value == "true");
+    auto wide_zero = buildInit(fixture, context, collector.vars.at("wide_zero"));
+    auto wide_leaf = wide_zero.init_expr ? *wide_zero.init_expr : wide_zero.init_args.at(0);
+    CHECK(wide_leaf->literal_value == "0");
+    CHECK(wide_leaf->type.width == 72);
 
     auto designated = buildInit(fixture, context, collector.vars.at("designated"));
     CHECK(designated.form == pred::s0clang18::InitForm::Designated);

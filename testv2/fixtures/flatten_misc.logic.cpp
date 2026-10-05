@@ -165,6 +165,59 @@ Int<8> rom_value;
 #pragma output_port rom_next_value
 Int<8> rom_next_value;
 
+enum class BraceMode : uint8_t { Active = 7, Stopped = 9 };
+struct BraceInner { int32_t count; bool valid; };
+struct BraceRecord {
+    uint32_t word;
+    bool enable;
+    Int<72> wide;
+    BraceMode mode;
+    BraceInner inner;
+    BraceInner raw[2];
+    std::array<BraceInner, 2> array;
+};
+struct BraceDefaults { uint32_t word = 37; bool flag = true; };
+struct BraceDefaultBox { BraceDefaults values[2]; };
+
+BraceRecord make_zero() { return BraceRecord{}; }
+uint32_t consume_zero(BraceRecord value) { return value.word; }
+bool check_zero(BraceRecord value) {
+    return value.word == 0 && !value.enable && value.wide == 0 &&
+           static_cast<uint8_t>(value.mode) == 0 && value.inner.count == 0 &&
+           !value.inner.valid;
+}
+
+
+#pragma input_port input
+uint32_t input;
+#pragma input_port choose
+bool choose;
+#pragma output_port copy_word
+uint32_t copy_word;
+#pragma output_port direct_wide
+Int<72> direct_wide;
+#pragma output_port list_mode
+uint8_t list_mode;
+#pragma output_port nested_count
+int32_t nested_count;
+#pragma output_port arrays_zero
+uint32_t arrays_zero;
+#pragma output_port temporary_word
+uint32_t temporary_word;
+#pragma output_port member_defaults
+uint32_t member_defaults;
+#pragma output_port partial_value
+uint32_t partial_value;
+#pragma output_port complex_check
+bool complex_check;
+#pragma output_port matrix_defaults
+uint32_t matrix_defaults;
+#pragma output_port protected_lookup
+bool protected_lookup;
+#pragma output_port array_copy_defaults
+uint32_t array_copy_defaults;
+
+
 void hls_main() {
     int lane_idx = 0;
     int tap_idx = 0;
@@ -349,4 +402,39 @@ void hls_main() {
     rom_value = SBOX[rom_index.to<uint8_t>()];
     rom_next_value = SBOX[static_cast<uint8_t>(rom_index.to<uint8_t>() + 1)];
     }
+
+    // Aggregate brace initialization coverage.
+    BraceRecord direct{};
+        BraceRecord list = {};
+        BraceRecord copy = BraceRecord{};
+        copy_word = copy.word;
+        direct_wide = direct.wide;
+        list_mode = static_cast<uint8_t>(list.mode);
+        nested_count = direct.inner.count;
+        arrays_zero = direct.raw[1].count + list.array[1].count;
+        BraceRecord overwritten;
+        overwritten.word = input;
+        overwritten = BraceRecord{};
+        BraceRecord returned = make_zero();
+        temporary_word = overwritten.word + returned.word + consume_zero(BraceRecord{});
+        BraceDefaultBox defaults{};
+        std::array<BraceDefaults, 2> default_array{};
+        std::array<BraceDefaults, 2> default_array_copy = std::array<BraceDefaults, 2>{};
+        BraceDefaults defaults_copy = BraceDefaults{};
+        BraceDefaults defaults_list = {};
+        BraceDefaults raw_matrix[2][2] = {{{input}}};
+        std::array<std::array<BraceDefaults, 2>, 2> default_matrix{};
+        BraceDefaults partial{input};
+        member_defaults = defaults.values[1].word + default_array[1].word +
+                          defaults_copy.word + defaults_list.word;
+        array_copy_defaults = default_array_copy[1].word;
+        matrix_defaults = raw_matrix[1][1].word + default_matrix[1][1].word +
+                          raw_matrix[0][0].word;
+        uint32_t scalar = uint32_t{};
+        partial_value = partial.word + (partial.flag ? 1U : 0U) + scalar;
+        direct.word = input;
+        complex_check = check_zero(copy) && (choose ? check_zero(list) : !direct.enable) &&
+                        (direct.word == input || direct.inner.valid);
+        uint32_t table[4]{1, 2, 3, 4};
+        protected_lookup = input >= 4 || table[input] != 0;
 }

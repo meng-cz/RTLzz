@@ -71,6 +71,9 @@ void hls_main() {
     Int<8> narrowed = Int<8>(sum);
     bool flag = sel ? true : false;
     Pair pair{narrowed, b};
+    Pair zero_pair{};
+    Pair copy_pair = Pair{};
+    bool zero_flag = bool{};
     Int<8> field = pair.lo;
     Int<8> call_value = helper(field);
     Int<8> indexed = (&pair.lo)[0];
@@ -235,8 +238,23 @@ int main() {
 
     auto pair = buildRequired(context, collector.vars.at("pair"));
     CHECK(pair->kind == pred::v2::ExprKind::Call);
-    CHECK(pair->callee == "__init_list");
+    CHECK(pair->callee == "Pair");
     CHECK(pair->args.size() == 2);
+
+    for (const char* name : {"zero_pair", "copy_pair"}) {
+        auto zero = buildRequired(context, collector.vars.at(name));
+        while (zero->kind == pred::v2::ExprKind::Cast) zero = zero->cast_expr;
+        CHECK(zero->kind == pred::v2::ExprKind::Call);
+        CHECK(zero->callee == "Pair" && zero->args.size() == 2);
+        for (const auto& leaf : zero->args) {
+            CHECK(leaf->kind == pred::v2::ExprKind::Literal);
+            CHECK(leaf->literal_value == "0" && leaf->type.width == 8);
+        }
+    }
+    auto zero_flag = buildRequired(context, collector.vars.at("zero_flag"));
+    while (zero_flag->kind == pred::v2::ExprKind::Cast) zero_flag = zero_flag->cast_expr;
+    CHECK(zero_flag->kind == pred::v2::ExprKind::Literal);
+    CHECK(zero_flag->literal_value == "false");
 
     auto field = buildRequired(context, collector.vars.at("field"));
     CHECK(containsField(field, "lo"));

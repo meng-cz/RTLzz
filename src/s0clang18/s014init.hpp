@@ -43,4 +43,8 @@ InitBuildResult buildAggregateInitializer(const ExprBuildContext& context,
 
 bool hasSyntacticInitializer(const clang::VarDecl* decl);
 
+ExprBuildResult buildInitializationExpr(const ExprBuildContext& context,
+                                       const clang::Expr* expr,
+                                       const pred::v2::TypeInfo& target_type);
+
 } // namespace pred::s0clang18

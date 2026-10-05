@@ -776,8 +776,8 @@ static void astPipelineFlattensAggregateLambdaCalls() {
     CHECK(debug.find(".lanes") == std::string::npos);
 }
 
-static void registerZeroInitializationUsesProductionFrontend() {
-    const std::string file = "testv2/fixtures/register_zero_init.logic.cpp";
+static void braceInitializationUsesProductionFrontend() {
+    const std::string file = "testv2/fixtures/flatten_misc.logic.cpp";
     s0clang18::Clang18Options options;
     options.source_name = file;
     options.top_function = "hls_main";
@@ -785,8 +785,9 @@ static void registerZeroInitializationUsesProductionFrontend() {
     auto ast = s0clang18::buildS0ProgramWithClang18(options);
     CHECK(ast.ok());
     auto debug = runASTToS7(s0ast::surfaceAST(*ast.program));
-    CHECK(debug.find("reg__idx_0__child__mode") != std::string::npos);
-    CHECK(debug.find("reg__idx_1__child__wide") != std::string::npos);
+    CHECK(debug.find("direct__wide") != std::string::npos);
+    CHECK(debug.find("list__array__idx_1__count") != std::string::npos);
+    CHECK(debug.find("defaults__values__idx_1__word") != std::string::npos);
     pipelinev2::PipelineConfig config;
     config.source_name = file;
     config.top_function = "hls_main";
@@ -794,10 +795,36 @@ static void registerZeroInitializationUsesProductionFrontend() {
     auto result = pipelinev2::compile(config);
     if (!result.ok()) std::cerr << result.error << "\n";
     CHECK(result.ok()); // Includes S9 verification of all read leaves.
+
+    config.source_name = file;
+    config.source_text = R"cpp(
+#include <cstdint>
+struct PendingRecord { uint32_t word; };
+#pragma output_port out
+uint32_t out;
+void hls_main() { PendingRecord record; out = record.word; }
+)cpp";
+    auto uninitialized = pipelinev2::compile(config);
+    CHECK(!uninitialized.ok());
+    CHECK(uninitialized.error.find("Read before definition") != std::string::npos);
+    config.source_name = file;
+    config.source_text = R"cpp(
+#include <cstdint>
+struct ConstructedRecord {
+    uint32_t word;
+    ConstructedRecord() : word(5) {}
+};
+#pragma output_port out
+uint32_t out;
+void hls_main() { ConstructedRecord record{}; out = record.word; }
+)cpp";
+    auto constructor = pipelinev2::compile(config);
+    CHECK(!constructor.ok());
+    CHECK(constructor.error.find("Nontrivial default constructor") != std::string::npos);
 }
 
 int main() {
-    registerZeroInitializationUsesProductionFrontend();
+    braceInitializationUsesProductionFrontend();
     leafSymbolLimitIsOptionalAndConfigurable();
     fieldReadAndAggregateCopyFlatten();
     staticAndDynamicArrayAccessFlatten();

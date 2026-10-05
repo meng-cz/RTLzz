@@ -1,4 +1,5 @@
 #include "s0clang18/s012expr.hpp"
+#include "s0clang18/s014init.hpp"
 
 #include <clang/AST/Decl.h>
 #include <clang/AST/DeclCXX.h>
@@ -860,6 +861,15 @@ ExprBuildResult buildExprImpl(const ExprBuildContext& context,
     }
 
     if (const auto* construct = llvm::dyn_cast<clang::CXXConstructExpr>(expr)) {
+        if (construct->getNumArgs() == 0 && exprType(context, expr, loc).is_hw_int &&
+            (construct->requiresZeroInitialization() || construct->isListInitialization())) {
+            return buildInitializationExpr(context, expr, exprType(context, expr, loc));
+        }
+        if (construct->getNumArgs() == 0 && !exprType(context, expr, loc).is_hw_int &&
+            !construct->getConstructor()->isTrivial()) {
+            return failExpr(context, expr,
+                "Nontrivial default constructor is not supported for initialization");
+        }
         ExprBuildResult result;
         auto out = std::make_shared<pred::v2::Expr>();
         out->kind = pred::v2::ExprKind::Call;
@@ -876,21 +886,13 @@ ExprBuildResult buildExprImpl(const ExprBuildContext& context,
         return result;
     }
 
-    if (const auto* init_list = llvm::dyn_cast<clang::InitListExpr>(expr)) {
-        ExprBuildResult result;
-        auto out = std::make_shared<pred::v2::Expr>();
-        out->kind = pred::v2::ExprKind::Call;
-        out->type = exprType(context, expr, loc);
-        out->callee = typeLabel(out->type);
-        out->debug_loc = loc;
-        for (const clang::Expr* init : init_list->inits()) {
-            auto built = buildChild(context, init);
-            appendDiagnostics(result, built);
-            if (built.expr) out->args.push_back(std::move(built.expr));
-        }
-        if (hasError(result.diagnostics)) return result;
-        result.expr = std::move(out);
-        return result;
+    if (llvm::isa<clang::InitListExpr>(expr) ||
+        llvm::isa<clang::ImplicitValueInitExpr>(expr) ||
+        llvm::isa<clang::CXXScalarValueInitExpr>(expr)) {
+        return buildInitializationExpr(context, expr, exprType(context, expr, loc));
+    }
+    if (const auto* member_default = llvm::dyn_cast<clang::CXXDefaultInitExpr>(expr)) {
+        return buildChild(context, member_default->getExpr());
     }
 
     (void)lvalue;

@@ -397,6 +397,57 @@ static void readonlyCheckRejectsGuardedReadOutsideCoverage() {
     CHECK(failed);
 }
 
+static void readonlyCheckProvesBoolMuxWithoutWideningCoverage() {
+    for (bool unsafe_else : {false, true}) {
+        s10predicate::S10PredicateProgram program;
+        program.name = "bool_mux_coverage";
+        for (int i = 0; i < 6; ++i) {
+            const auto type = i < 4 ? boolType() : intType(8);
+            program.base_symbols.push_back(s10predicate::S10Symbol{
+                i, type, "v" + std::to_string(i), {}, s10predicate::S10SymbolRole::Local});
+            program.values.push_back(predS10Value(i, i, 0, type,
+                i < 2 ? s10predicate::S10ValueKind::Initial :
+                        s10predicate::S10ValueKind::Statement, "v" + std::to_string(i)));
+        }
+        auto add_op = [&](int target, s10predicate::S10OpKind kind,
+                          std::vector<s10predicate::S10Operand> operands) {
+            s10predicate::S10Definition def;
+            def.kind = s10predicate::S10DefKind::Op;
+            def.target = target;
+            def.guard = predLiteral(1, boolType());
+            def.op.kind = kind;
+            def.op.result_width = 1;
+            def.op.operands = std::move(operands);
+            program.definitions.push_back(std::move(def));
+        };
+        add_op(2, s10predicate::S10OpKind::Mux,
+               {predValue(0, boolType()), predValue(1, boolType()),
+                predLiteral(unsafe_else, boolType())});
+        add_op(3, s10predicate::S10OpKind::BoolAnd,
+               {predValue(0, boolType()), predValue(1, boolType())});
+        s10predicate::S10Definition x;
+        x.kind = s10predicate::S10DefKind::Assign;
+        x.target = 4;
+        x.guard = predValue(3, boolType());
+        x.value = predLiteral(7, intType(8));
+        program.definitions.push_back(std::move(x));
+        s10predicate::S10Definition output;
+        output.kind = s10predicate::S10DefKind::Assign;
+        output.target = 5;
+        output.guard = predValue(2, boolType());
+        output.value = predValue(4, intType(8));
+        program.definitions.push_back(std::move(output));
+        bool failed = false;
+        try {
+            s10predicate::verifyPredicateProgram(program);
+        } catch (const RTLZZException& ex) {
+            failed = true;
+            CHECK(std::string(ex.what()).find("guarded read outside value definition coverage") != std::string::npos);
+        }
+        CHECK(failed == unsafe_else);
+    }
+}
+
 static void readonlyCheckDoesNotAcceptComplexUnprovenGuard() {
     s10predicate::S10PredicateProgram program;
     program.name = "complex_bad";
@@ -479,6 +530,7 @@ int main() {
     switchBuildsCaseAndDefaultGuards();
     sourcePipelineRunsThroughS10();
     readonlyCheckRejectsGuardedReadOutsideCoverage();
+    readonlyCheckProvesBoolMuxWithoutWideningCoverage();
     readonlyCheckDoesNotAcceptComplexUnprovenGuard();
     return 0;
 }

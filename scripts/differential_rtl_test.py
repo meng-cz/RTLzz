@@ -2,7 +2,7 @@
 import copy
 import unittest
 
-from differential_rtl import write_data_guards
+from differential_rtl import cpp_value_expr, write_data_guards
 
 
 def port(name, width, dims=(), symbols=None, direction='Output'):
@@ -12,6 +12,11 @@ def port(name, width, dims=(), symbols=None, direction='Output'):
 
 
 class WriteDataGuardsTest(unittest.TestCase):
+    def test_normalized_integer_output_uses_original_cpp_type(self):
+        normalized = {'name': 'Int<32>', 'width': 32, 'hw_kind': 'Int'}
+        self.assertNotIn('.template to', cpp_value_expr('result', normalized, 'uint32_t'))
+        self.assertIn('.template to', cpp_value_expr('result', normalized, 'Int<32>'))
+
     def test_scalar_and_array_pairs(self):
         program = {'ports': [port('wdata_r', 32), port('wen_r', 1),
                              port('wdata_a', 8, (2, 2), ['d0', 'd1', 'd2', 'd3']),

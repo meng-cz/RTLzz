@@ -1138,7 +1138,7 @@ struct BoolBDDManager {
         if (node == 1) return 0;
         auto it = not_cache.find(node);
         if (it != not_cache.end()) return it->second;
-        const auto& info = nodes[static_cast<std::size_t>(node)];
+        const auto info = nodes[static_cast<std::size_t>(node)];
         int out = makeNode(info.var, negate(info.low), negate(info.high));
         not_cache.emplace(node, out);
         return out;
@@ -1282,6 +1282,13 @@ BoolExprPtr boolExprForValue(const ReadonlyContext& ctx,
             out = ctx.bool_expr_factory.logicalOr(
                 boolExprForOperand(ctx, def->op.operands[0], expanding),
                 boolExprForOperand(ctx, def->op.operands[1], expanding));
+        } else if (def->op.kind == S10OpKind::Mux && def->op.operands.size() == 3) {
+            const auto condition = boolExprForOperand(ctx, def->op.operands[0], expanding);
+            out = ctx.bool_expr_factory.logicalOr(
+                ctx.bool_expr_factory.logicalAnd(condition,
+                    boolExprForOperand(ctx, def->op.operands[1], expanding)),
+                ctx.bool_expr_factory.logicalAnd(ctx.bool_expr_factory.logicalNot(condition),
+                    boolExprForOperand(ctx, def->op.operands[2], expanding)));
         }
     }
     return finish(out);

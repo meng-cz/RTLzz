@@ -250,8 +250,8 @@ def assign_from_argv(expr: str, t: dict[str, Any], argv_index: int,
     return f"{expr} = static_cast<{scalar}>(std::strtoull(argv[{argv_index}], nullptr, 0));"
 
 
-def cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
-    scalar = cxx_scalar_type(t)
+def cpp_value_expr(expr: str, t: dict[str, Any], source_type: str | None = None) -> str:
+    scalar = cxx_scalar_type(t, source_type)
     if scalar == "bool":
         return f"({expr} ? 1ULL : 0ULL)"
     int_width = int_width_from_scalar(scalar)
@@ -445,10 +445,11 @@ def generate_harness(source: Path, top: str, program: dict[str, Any], path: Path
         if port["direction"] != "Output":
             continue
         var = port["name"]
+        source_type = source_types.get(port["name"])
         for flat, element in enumerate(port["element_symbols"]):
             expr = access_indices(var, element_indices(port, flat))
             lines.append(
-                f'  std::cout << "{element}=" << {cpp_value_expr(expr, port["type"])} << "\\n";'
+                f'  std::cout << "{element}=" << {cpp_value_expr(expr, port["type"], source_type)} << "\\n";'
             )
 
     lines += [

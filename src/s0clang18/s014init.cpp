@@ -148,30 +148,6 @@ std::size_t leafCountForType(const ExprBuildContext& context,
     return 1;
 }
 
-void appendLeafTypes(const ExprBuildContext& context,
-                     const pred::v2::TypeInfo& type,
-                     std::vector<pred::v2::TypeInfo>& out) {
-    if (type.is_array) {
-        std::size_t elements = 1;
-        for (int dim : type.array_dims) {
-            if (dim <= 0) return;
-            elements *= static_cast<std::size_t>(dim);
-        }
-        pred::v2::TypeInfo elem = scalarElementType(type);
-        for (std::size_t i = 0; i < elements; ++i) {
-            appendLeafTypes(context, elem, out);
-        }
-        return;
-    }
-    if (const RecordMetadata* record = recordForType(context, type)) {
-        for (const RecordField& field : record->fields) {
-            appendLeafTypes(context, field.type, out);
-        }
-        return;
-    }
-    out.push_back(type);
-}
-
 std::size_t leafCountForExpr(const ExprBuildContext& context,
                              const pred::v2::ExprPtr& expr) {
     if (!expr) return 0;
@@ -236,12 +212,14 @@ std::vector<pred::v2::TypeInfo> childTypesForAggregate(
     const pred::v2::TypeInfo& type) {
     std::vector<pred::v2::TypeInfo> children;
     if (type.is_array) {
-        std::size_t elements = 1;
-        for (int dim : type.array_dims) {
-            if (dim <= 0) return children;
-            elements *= static_cast<std::size_t>(dim);
-        }
+        if (type.array_dims.empty() || type.array_dims.front() <= 0) return children;
+        const std::size_t elements = static_cast<std::size_t>(type.array_dims.front());
         pred::v2::TypeInfo elem = scalarElementType(type);
+        if (type.array_dims.size() > 1) {
+            elem.is_array = true;
+            elem.array_dims.assign(type.array_dims.begin() + 1, type.array_dims.end());
+            elem.array_size = elem.array_dims.front();
+        }
         children.reserve(elements);
         for (std::size_t i = 0; i < elements; ++i) {
             children.push_back(elem);
@@ -272,6 +250,13 @@ void appendListLeaves(const ExprBuildContext& context,
     const clang::InitListExpr* semantic = list->isSemanticForm()
         ? list
         : (list->getSemanticForm() ? list->getSemanticForm() : list);
+    // std::array has an extra semantic list for its backing C array. Use
+    // each list's own type instead of treating that wrapper as element zero.
+    if (context.type_context) {
+        auto lowered = lowerQualType(*context.type_context, semantic->getType(),
+                                     exprLoc(context, semantic));
+        if (lowered.ok() && lowered.value) expected_type = lowered.value->type;
+    }
     std::vector<pred::v2::TypeInfo> child_types;
     if (expected_type) child_types = childTypesForAggregate(context, *expected_type);
     std::size_t index = 0;
@@ -280,6 +265,18 @@ void appendListLeaves(const ExprBuildContext& context,
         if (index < child_types.size()) child_type = child_types[index];
         appendExprLeaves(context, init, std::move(child_type), out, diagnostics);
         ++index;
+    }
+    // Clang stores omitted array elements as a filler, rather than additional
+    // initializers. A filler may contain nonzero member default initializers.
+    if (semantic->hasArrayFiller()) {
+        for (; index < child_types.size(); ++index) {
+            appendExprLeaves(context, semantic->getArrayFiller(), child_types[index],
+                             out, diagnostics);
+        }
+    }
+    if (semantic->getNumInits() == 0 && child_types.empty() && expected_type &&
+        !recordForType(context, *expected_type) && !expected_type->is_array) {
+        appendDefaultLeaves(context, *expected_type, exprLoc(context, semantic), out);
     }
 }
 
@@ -290,14 +287,25 @@ void appendExprLeaves(const ExprBuildContext& context,
                       std::vector<Diagnostic>& diagnostics) {
     expr = unwrapTransparentExpr(expr);
     if (!expr) return;
-    if (llvm::isa<clang::ImplicitValueInitExpr>(expr)) {
+    if (const auto* member_default = llvm::dyn_cast<clang::CXXDefaultInitExpr>(expr)) {
+        appendExprLeaves(context, member_default->getExpr(), std::move(expected_type),
+                         out, diagnostics);
+        return;
+    }
+    if (llvm::isa<clang::ImplicitValueInitExpr>(expr) ||
+        llvm::isa<clang::CXXScalarValueInitExpr>(expr)) {
+        if (context.type_context) {
+            auto lowered = lowerQualType(*context.type_context, expr->getType(),
+                                         exprLoc(context, expr));
+            if (lowered.ok() && lowered.value) expected_type = lowered.value->type;
+        }
         if (expected_type) {
             appendDefaultLeaves(context, *expected_type, exprLoc(context, expr), out);
         }
         return;
     }
     if (const auto* construct = llvm::dyn_cast<clang::CXXConstructExpr>(expr)) {
-        if (expected_type && construct->getNumArgs() == 0 &&
+        if (expected_type && expected_type->is_hw_int && construct->getNumArgs() == 0 &&
             (construct->requiresZeroInitialization() ||
              construct->isListInitialization())) {
             appendDefaultLeaves(context, *expected_type, exprLoc(context, construct), out);
@@ -407,6 +415,33 @@ bool hasSyntacticInitializer(const clang::VarDecl* decl) {
     return decl->hasInit();
 }
 
+ExprBuildResult buildInitializationExpr(const ExprBuildContext& context,
+                                       const clang::Expr* expr,
+                                       const pred::v2::TypeInfo& target_type) {
+    ExprBuildResult result;
+    std::vector<pred::v2::ExprPtr> args;
+    appendExprLeaves(context, expr, target_type, args, result.diagnostics);
+    if (hasError(result.diagnostics)) return result;
+    const bool aggregate = target_type.is_array || recordForType(context, target_type);
+    if (!aggregate && args.size() == 1) {
+        result.expr = std::move(args.front());
+        return result;
+    }
+    if (leafCountForExprList(context, args) != leafCountForType(context, target_type)) {
+        result.diagnostics.push_back(makeError(context, exprLoc(context, expr),
+            "Initialization leaf count does not match target type"));
+        return result;
+    }
+    auto value = std::make_shared<pred::v2::Expr>();
+    value->kind = pred::v2::ExprKind::Call;
+    value->callee = target_type.struct_name.empty() ? target_type.name : target_type.struct_name;
+    value->type = target_type;
+    value->args = std::move(args);
+    value->debug_loc = exprLoc(context, expr);
+    result.expr = std::move(value);
+    return result;
+}
+
 InitBuildResult buildAggregateInitializer(const ExprBuildContext& context,
                                           const InitBuildInput& input) {
     InitBuildResult result;
@@ -421,16 +456,10 @@ InitBuildResult buildAggregateInitializer(const ExprBuildContext& context,
                      result.diagnostics);
     if (hasError(result.diagnostics)) return result;
 
-    std::size_t expected = leafCountForType(context, input.target_type);
-    if (expected > 0) {
-        std::vector<pred::v2::TypeInfo> leaf_types;
-        appendLeafTypes(context, input.target_type, leaf_types);
-        std::size_t current = leafCountForExprList(context, result.init_args);
-        while (current < expected && current < leaf_types.size()) {
-            result.init_args.push_back(
-                defaultValueForScalar(leaf_types[current], input.loc));
-            ++current;
-        }
+    if (leafCountForExprList(context, result.init_args) !=
+        leafCountForType(context, input.target_type)) {
+        result.diagnostics.push_back(makeError(context, input.loc,
+            "Initialization leaf count does not match target type"));
     }
 
     result.default_constructed = isExplicitValueInitialization(input.decl, init);
