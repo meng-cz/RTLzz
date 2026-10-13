@@ -6,7 +6,9 @@ Restricted VUL-style C++ to synthesizable SystemVerilog through the V2 pipeline.
 
 - `src/`: V2 compiler stages, shared debug support, and BEIR/SystemVerilog backend.
 - `main/`: `predicate-expand` command line entry point.
-- `testv2/`: stage unit/integration tests and V2 fixture programs.
+- `testv2/`: stage unit/integration tests.
+- `testv2/unit_fixtures/`: stage-specific positive/negative fixtures, excluded from RTL differential regression.
+- `testv2/fixtures/`: combinational regression sources; `pipeline_misc/` holds named pipeline coverage cases.
 - `scripts/`: V2 differential RTL test harness.
 - `third_party/vulsim/vullib/`: bundled VUL headers used by parsing and tests.
 
@@ -48,8 +50,14 @@ python3 scripts/differential_rtl.py testv2/fixtures/inline_misc.logic.cpp --top 
 ```
 
 Pass `--circt` to run the same C++/RTL differential test through the CIRCT
-backend. `testv2/regression.sh` runs every fixture with both the native and
-CIRCT emitters and records the backend in its per-fixture logs and `summary.tsv`.
+backend. `regression.sh` scans combinational fixtures with both native and CIRCT emitters,
+then scans `testv2/fixtures/pipeline_misc/` with the native backend at every
+internal register count from 1 through 8. Unit fixtures are kept in
+`testv2/unit_fixtures/` and are only read by their stage tests. The summary counts
+each source/backend/latency combination; any failure gives a nonzero exit status.
+Run `bash regression.sh` or `source regression.sh` from this directory. The
+differential harness resolves actual RTL port declarations, including CIRCT
+keyword renaming, while retaining the original source names in the oracle.
 
 Use `--release` (or `-r`) with RTL output to suppress all debug sidecar files,
 including error snapshots. It takes precedence over `--rtl-debug-file`, regardless
@@ -120,7 +128,7 @@ bindings. It must reference the same clock used by the external boundary registe
 The CLI exposes the basic configuration:
 
 ```bash
-build/predicate-expand testv2/fixtures/pipeline_misc.logic.cpp \
+build/predicate-expand testv2/fixtures/pipeline_misc/arithmetic_mux_lookup.logic.cpp \
   --top hls_main --vullib third_party/vulsim/vullib \
   --latency 2 --clock-name clk --format rtl -o /tmp/pipeline.sv
 ```

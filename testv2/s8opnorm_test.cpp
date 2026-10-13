@@ -403,7 +403,7 @@ static void negativeConstantDivisorUsesUnsignedBitPattern() {
 }
 
 static void sourcePipelineRunsThroughS8() {
-    auto debug = runSourceToS8("testv2/fixtures/s7flatten/source_flatten.logic.cpp");
+    auto debug = runSourceToS8("testv2/unit_fixtures/s7flatten/source_flatten.logic.cpp");
     CHECK(debug.find("s8opnorm") != std::string::npos);
     CHECK(debug.find("Add<8>(") != std::string::npos);
     CHECK(debug.find("lookup ") != std::string::npos);

@@ -7,6 +7,12 @@ The script:
   2. builds a tiny C++ oracle harness that includes and calls the source top,
   3. builds a Verilator C++ testbench around the generated RTL,
   4. compares RTL outputs against the C++ oracle for random inputs.
+
+With --latency N, insert N internal register boundaries and send all cases in a
+single continuous simulation. Model external input-register Q updates after
+edges and output-register D captures before edges; compare transaction k at
+external cycle k+N+1, skip initial filling, and drain the final N+1 cycles.
+Without --latency, retain the single-case combinational comparison.
 """
 
 from __future__ import annotations
@@ -503,9 +509,48 @@ def rtl_cpp_assign_from_argv(expr: str, t: dict[str, Any], argv_index: int,
     )
 
 
+def rtl_port_names(top: str, program: dict[str, Any], rtl_text: str) -> dict[str, str]:
+    """Resolve actual ANSI port names, including backend keyword renaming.
+
+    Both emitters retain metadata order within each direction, even when CIRCT
+    groups inputs before outputs or combines adjacent declarations of one type.
+    Keep C++ oracle names and element labels unchanged.
+    """
+    text = strip_cxx_comments(rtl_text)
+    header = re.search(r"\bmodule\s+" + re.escape(sanitize_identifier(top)) +
+                       r"\s*\((.*?)\);", text, re.S)
+    if not header:
+        raise RuntimeError(f"cannot find RTL port header for {top}")
+    actual: dict[str, list[str]] = {"Input": [], "Output": []}
+    direction = None
+    for declaration in header.group(1).split(","):
+        explicit = re.match(r"\s*(input|output)\b", declaration)
+        if explicit:
+            direction = "Input" if explicit.group(1) == "input" else "Output"
+        name = re.search(r"([A-Za-z_][A-Za-z0-9_$]*)\s*(?:\[[^]]+\]\s*)*$", declaration)
+        if direction is None or not name:
+            raise RuntimeError(f"unrecognized RTL port declaration: {declaration.strip()}")
+        actual[direction].append(name.group(1))
+    names: dict[str, str] = {}
+    for direction in actual:
+        expected = [p["name"] for p in program["ports"] if p["direction"] == direction]
+        if direction == "Input" and program.get("pipeline", {}).get("register_stages", 0):
+            expected.append(program["pipeline"]["clock_name"])
+        if len(expected) != len(actual[direction]):
+            raise RuntimeError(f"RTL {direction} port count mismatch: expected {len(expected)}, got {len(actual[direction])}")
+        names.update(zip(expected, actual[direction]))
+    return names
+
+
 def generate_verilator_harness(top: str, program: dict[str, Any], path: Path,
-                               stream: bool = False) -> list[str]:
+                               stream: bool = False,
+                               port_names: dict[str, str] | None = None) -> list[str]:
     class_name = verilator_class_name(top)
+    port_names = port_names or {}
+
+    def member(name: str) -> str:
+        return verilator_member_name(port_names.get(name, name))
+
     input_order: list[str] = []
     lines = [
         "#include <cstdlib>",
@@ -566,11 +611,11 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path,
             input_order.append(element)
             if is_array:
                 expr = access_indices(
-                    f"top->{verilator_member_name(port['name'])}",
+                    f"top->{member(port['name'])}",
                     element_indices(port, flat),
                 )
             else:
-                expr = f"top->{verilator_member_name(port['name'])}"
+                expr = f"top->{member(port['name'])}"
             lines.append("  " + rtl_cpp_assign_from_argv(expr, port["type"], arg_index))
             stream_input_assignments.append("  " + rtl_cpp_assign_from_argv(
                 expr, port["type"], arg_index, argv_name="row_args.data()"))
@@ -587,11 +632,11 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path,
         for flat, element in enumerate(port["element_symbols"]):
             if is_array:
                 expr = access_indices(
-                    f"top->{verilator_member_name(port['name'])}",
+                    f"top->{member(port['name'])}",
                     element_indices(port, flat),
                 )
             else:
-                expr = f"top->{verilator_member_name(port['name'])}"
+                expr = f"top->{member(port['name'])}"
             lines.append(
                 f'  std::cout << "{element}=" << {rtl_cpp_value_expr(expr, port["type"])} << "\\n";'
             )
@@ -599,7 +644,7 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path,
     if stream or program.get("pipeline"):
         outputs = lines[output_start:]
         n = program.get("pipeline", {}).get("register_stages", 0)
-        clock = verilator_member_name(program.get("pipeline", {}).get("clock_name", "clk"))
+        clock = member(program.get("pipeline", {}).get("clock_name", "clk"))
         lines = lines[:argc_check_index]
         lines += [
             "  if (argc != 1) return 97;",
@@ -713,7 +758,10 @@ def main() -> int:
     ap.add_argument("--top", required=True, help="Top function name or '*' wildcard pattern")
     ap.add_argument("--build-dir", type=Path, default=ROOT / "build")
     ap.add_argument("--cases", type=int, default=100)
-    ap.add_argument("--latency", type=int, default=None, help="internal pipeline register stages; enables continuous-cycle comparison")
+    ap.add_argument(
+        "--latency", type=int, default=None, metavar="N",
+        help="insert N internal register boundaries and verify continuous inputs at N+1 external cycles; 0 tests combinational boundary timing",
+    )
     ap.add_argument("--clock-name", default="clk")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--cxx", default=default_cxx())
@@ -735,6 +783,8 @@ def main() -> int:
     args = ap.parse_args()
     if args.latency is not None and args.latency < 0:
         ap.error("--latency must be non-negative")
+    if args.circt and args.latency is not None and args.latency > 0:
+        ap.error("positive --latency requires the native backend (omit --circt)")
     if args.cases <= 0:
         ap.error("--cases must be positive")
 
@@ -782,7 +832,9 @@ def main() -> int:
         ], cwd=ROOT)
 
         rtl_tb_cpp = work / "rtl_tb.cpp"
-        rtl_input_order = generate_verilator_harness(resolved_top, program, rtl_tb_cpp, stream=args.latency is not None)
+        rtl_input_order = generate_verilator_harness(
+            resolved_top, program, rtl_tb_cpp, stream=args.latency is not None,
+            port_names=rtl_port_names(resolved_top, program, rtl.read_text()))
         if rtl_input_order != oracle_input_order:
             raise RuntimeError(
                 f"input order mismatch: rtl={rtl_input_order} oracle={oracle_input_order}"

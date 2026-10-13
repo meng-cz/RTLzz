@@ -255,7 +255,7 @@
 ## 12. 测试范围
 
 1. 测试目录放哪里？
-   - 推荐：`testv2/s6inline_test.cpp`、`testv2/s6inline_integration_test.cpp`，fixtures 放在 `testv2/fixtures/s6inline`。
+   - 推荐：`testv2/s6inline_test.cpp`、`testv2/s6inline_integration_test.cpp`，fixtures 放在 `testv2/unit_fixtures/s6inline`。
 
 2. 最小正向单元测试应覆盖哪些？
    - helper value 参数 inline

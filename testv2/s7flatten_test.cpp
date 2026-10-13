@@ -709,7 +709,7 @@ static void multiDynamicIndexReadAndWriteFlatten() {
 }
 
 static void sourcePipelineFlattensStructAndArray() {
-    auto debug = runSourceToS7("testv2/fixtures/s7flatten/source_flatten.logic.cpp");
+    auto debug = runSourceToS7("testv2/unit_fixtures/s7flatten/source_flatten.logic.cpp");
     CHECK(debug.find(" a__n\n") != std::string::npos);
     CHECK(debug.find(" a__m\n") != std::string::npos);
     CHECK(debug.find(" b__n\n") != std::string::npos);
@@ -726,7 +726,7 @@ static void sourcePipelineFlattensStructAndArray() {
 
 static void sourcePipelineFlattensDynamicAggregateConstruct() {
     auto debug = runSourceToS7(
-        "testv2/fixtures/s1apinorm/source_aggregate_decl_init.logic.cpp");
+        "testv2/unit_fixtures/s1apinorm/source_aggregate_decl_init.logic.cpp");
     CHECK(debug.find(" from_index__n\n") != std::string::npos);
     CHECK(debug.find(" from_index__m\n") != std::string::npos);
     CHECK(debug.find("lookup(idx, arr__idx_0__n, arr__idx_1__n)") !=
@@ -738,7 +738,7 @@ static void sourcePipelineFlattensDynamicAggregateConstruct() {
 }
 
 static void sourcePipelineFlattensComplexAggregateCalls() {
-    auto debug = runSourceToS7("testv2/fixtures/s7flatten/source_complex_aggregates.logic.cpp");
+    auto debug = runSourceToS7("testv2/unit_fixtures/s7flatten/source_complex_aggregates.logic.cpp");
     CHECK(debug.find(" pkt__lanes__idx_0__n\n") != std::string::npos);
     CHECK(debug.find(" pkt__lanes__idx_0__m\n") != std::string::npos);
     CHECK(debug.find(" pkt__lanes__idx_1__n\n") != std::string::npos);

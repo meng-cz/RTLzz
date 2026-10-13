@@ -24,6 +24,13 @@ python3 scripts/differential_rtl.py testv2/fixtures/flatten_misc.logic.cpp --top
 python3 scripts/differential_rtl.py testv2/fixtures/controlflow_misc.logic.cpp --top hls_main --cases 100
 python3 scripts/differential_rtl.py testv2/fixtures/inline_misc.logic.cpp --top hls_main --cases 100
 
+# 流水线回归：每个用例验证 1–8 个内部寄存器级，外部采样延迟为 N+1。
+for src in testv2/fixtures/pipeline_misc/*.logic.cpp; do
+  for stages in {1..8}; do
+    python3 scripts/differential_rtl.py "$src" --top hls_main --cases 100 --latency "$stages"
+  done
+done
+
 # 真实硬件模块摘出的组合逻辑 example 回归；每个文件使用一个 LogicSubModule_* top。
 for src in testv2/example/*.logic.cpp; do
   python3 scripts/differential_rtl.py "$src" --top 'LogicSubModule_*' --cases 100
@@ -400,15 +407,12 @@ done
 ### `testv2/fixtures/inline_misc.logic.cpp`
 - End-to-end helper/lambda inline、overload、parameter/return fixture；包含 32×64-bit 大数组端口经嵌套 helper 读取与有符号比较 helper。
 
-### `testv2/fixtures/s*/...`
-- Stage-specific C++ fixtures used by integration tests.
-
 ## Scripts
 
 ### `scripts/differential_rtl.py`
 - V2 RTL differential harness。
 - `write_data_guards(...)` 按后端约定匹配同名后缀、相同维度的一位 wen 输出，仅在对应使能为零时跳过 wdata 比较；复位值与使能始终严格比较。`scripts/differential_rtl_test.py` 验证标量/数组配对、维度与方向拒绝以及其他观察者保护。
-- `--circt` 仅让 RTL 生成阶段走 CIRCT；端口元数据仍来自同一 BEIR 程序，因此 C++ oracle、随机输入和比较规则与 native 后端完全相同。
+- `--circt` 仅让 RTL 生成阶段走 CIRCT；端口元数据仍来自同一 BEIR 程序，因此 C++ oracle、随机输入和比较规则与 native 后端完全相同。驱动读取实际顶层 RTL 端口声明，对齐 CIRCT 的关键字改名（例如 `input` → `input_0`），保持 oracle 的源码端口名及比较标签不变。
 - 生成 port metadata、RTL、C++ oracle 和 Verilator testbench；oracle 直接写入源文件全局 input port、调用无参 top、读取全局 output port，并比较随机输入下的输出。
 - `--input-config` 加载 fixture manifest，重复的 `--input-range NAME=MIN:MAX` 可覆盖单个输入范围；配置会校验输入名、闭区间顺序和端口位宽。oracle 异常退出会报告 case、signal/exit code 与完整触发输入。
 
@@ -426,9 +430,6 @@ done
 ### `roadmap.md`
 - V2 pipeline stage responsibilities and long-term compiler route。
 
-### `scripts/check_unrolled_pick.py`
-- 针对 `int_misc.logic.cpp` 的 `pick_*` 输出逐个遍历 BEIR 依赖，检查静态化、运行时索引对照及 RTL 中的 128 位常量折叠，再执行完整 int_misc 的 100 组 C++/RTL 差分。
-- `python3 scripts/check_unrolled_pick.py --build-dir <build>`；任一结构或数值检查失败均返回非零。
 
 ### `src/backend/beopt_slices.hpp`
 - 常量传播后，将范围合法的常量索引 DynamicSlice/DynamicWriteSlice 静态化；静态 WriteSlice 保留范围元数据，交给 bit-range update pass 收集整条更新链。
@@ -469,9 +470,3 @@ done
 - `src/pipelinev2/PipelineV2.cpp`: config validation, optional post-BEOPT scheduling, native sequential emission, report and separate clock metadata. CIRCT rejects positive pipeline stages.
 - `src/backend/rtlgen.cpp`: pipeline overloads emit register nodes as nonblocking `always_ff`; constant-table recognition stops at register boundaries.
 - `main/main.cpp`: `--latency N` / `--clock-name NAME`; operation costs and timing allowance configured through the API.
-
-### Verification
-- `testv2/pipeline_test.cpp`: timing/area tradeoff, cost overrides, shared delay chains, cycle counts, API/body binding and invalid configurations.
-- `testv2/fixtures/pipeline_misc.logic.cpp`: continuous changing data/control, unequal paths, dynamic lookup, signed multiply, multidimensional arrays and constant outputs.
-- `scripts/differential_rtl.py --latency N`: one continuous simulation, external Q/D boundary timing, warm-up and drain; compares N+1-cycle results with the oracle. N=0 also tests external boundaries.
-- `scripts/pipeline_regression.sh`: focused fixture at N=0/1/2/4/8 plus all main fixtures at N=2.

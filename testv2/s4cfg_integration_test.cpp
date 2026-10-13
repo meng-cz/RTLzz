@@ -99,7 +99,7 @@ static void expectInOrder(const std::string& text, const std::vector<std::string
 
 static void sourceHelpersBuildFunctionCFGs() {
     auto debug = buildS4DebugFromSource(
-        "testv2/fixtures/s4cfg/source_helpers.logic.cpp");
+        "testv2/unit_fixtures/s4cfg/source_helpers.logic.cpp");
 
     expectContains(debug, "s4cfg\n");
     expectContains(debug, "top hls_main entry=bb0 exit=bb2");
@@ -119,7 +119,7 @@ static void sourceHelpersBuildFunctionCFGs() {
 
 static void sourceLoopsSwitchBuildsEdgesAndFallthrough() {
     auto debug = buildS4DebugFromSource(
-        "testv2/fixtures/s4cfg/source_loops_switch.logic.cpp");
+        "testv2/unit_fixtures/s4cfg/source_loops_switch.logic.cpp");
 
     expectContains(debug, "loop 0 pre_test");
     expectContains(debug, "condition_prelude=bb");

@@ -203,5 +203,5 @@
    - 根据参数，打印 helper/lambda 列表、call graph、struct 合法性、top params。
 
 4. 是否需要单独测试 fixture？
-   - 需要，至少覆盖合法 top/helper/lambda、递归错误、struct 引用字段错误、未知 call、非法 top param。放置在目录testv2/fixtures/s2validate 中
+   - 需要，至少覆盖合法 top/helper/lambda、递归错误、struct 引用字段错误、未知 call、非法 top param。放置在目录testv2/unit_fixtures/s2validate 中
 

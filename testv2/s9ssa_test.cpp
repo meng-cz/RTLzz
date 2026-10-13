@@ -414,19 +414,19 @@ static void lookupWriteImplicitOldElementReadBeforeDefinitionIsRejected() {
 
 static void sourceExplicitReadBeforeDefinitionIsRejectedAtS9() {
     expectSourceToS9Error(
-        "testv2/fixtures/s9ssa/uninitialized_explicit_read.logic.cpp",
+        "testv2/unit_fixtures/s9ssa/uninitialized_explicit_read.logic.cpp",
         "Read before definition for symbol 'value'");
 }
 
 static void sourceDynamicWriteImplicitReadBeforeDefinitionIsRejectedAtS9() {
     expectSourceToS9Error(
-        "testv2/fixtures/s9ssa/uninitialized_dynamic_write.logic.cpp",
+        "testv2/unit_fixtures/s9ssa/uninitialized_dynamic_write.logic.cpp",
         "Read before definition for symbol 'arr__idx_0'",
         "lookupwrite old element");
 }
 
 static void sourcePipelineRunsThroughS9() {
-    auto debug = runSourceToS9("testv2/fixtures/s9ssa/source_ssa.logic.cpp");
+    auto debug = runSourceToS9("testv2/unit_fixtures/s9ssa/source_ssa.logic.cpp");
     CHECK(debug.find("s9ssa") != std::string::npos);
     CHECK(debug.find("out initial=out_v0") != std::string::npos);
     CHECK(debug.find("lowered_lookupwrite") != std::string::npos);

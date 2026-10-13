@@ -510,7 +510,7 @@ static void aggregateDeclarationInitFromFieldAndArrayBecomeAssigns() {
 }
 
 static void sourceAggregateDeclarationInitsFollowParsedConstructorShape() {
-    auto ast = parseFixture("testv2/fixtures/s1apinorm/source_aggregate_decl_init.logic.cpp");
+    auto ast = parseFixture("testv2/unit_fixtures/s1apinorm/source_aggregate_decl_init.logic.cpp");
     auto norm = normalizeS1Ok(ast);
 
     bool saw_from_member = false;
@@ -557,7 +557,7 @@ static void sourceAggregateDeclarationInitsFollowParsedConstructorShape() {
 }
 
 static void sourceAtAPIsPassThroughS2() {
-    auto ast = parseFixture("testv2/fixtures/s1apinorm/source_at.logic.cpp");
+    auto ast = parseFixture("testv2/unit_fixtures/s1apinorm/source_at.logic.cpp");
     auto norm = normalizeS1Ok(ast);
     auto validation = pred::s2validate::validateFunctionAST(norm);
     if (!validation.ok()) std::cerr << validation.error->formatted << "\n";
@@ -568,7 +568,7 @@ static void sourceAtAPIsPassThroughS2() {
 }
 
 static void sourcePickAPIsBecomeDynamicHardwareOps() {
-    auto ast = parseFixture("testv2/fixtures/s1apinorm/source_pick.logic.cpp");
+    auto ast = parseFixture("testv2/unit_fixtures/s1apinorm/source_pick.logic.cpp");
     auto norm = normalizeS1Ok(ast);
     auto validation = pred::s2validate::validateFunctionAST(norm);
     if (!validation.ok()) std::cerr << validation.error->formatted << "\n";

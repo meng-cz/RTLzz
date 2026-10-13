@@ -230,38 +230,38 @@ static void expectErrorContains(const FunctionAST& fn, const std::string& needle
 }
 
 int main() {
-    expectOk(parseFixture("testv2/fixtures/s2validate/legal_basic.logic.cpp"));
+    expectOk(parseFixture("testv2/unit_fixtures/s2validate/legal_basic.logic.cpp"));
     expectOk(parseFixture(
-        "testv2/fixtures/s2validate/legal_generic_lambda.logic.cpp"));
+        "testv2/unit_fixtures/s2validate/legal_generic_lambda.logic.cpp"));
     expectOk(makeLambdaProgram());
 
-    (void)parseFixture("testv2/fixtures/s2validate/illegal_struct_ref_field.logic.cpp");
+    (void)parseFixture("testv2/unit_fixtures/s2validate/illegal_struct_ref_field.logic.cpp");
     expectErrorContains(makeStructRefFieldProgram(), "reference or pointer");
     expectParseErrorContains(
-        "testv2/fixtures/s2validate/illegal_top_struct_param.logic.cpp",
+        "testv2/unit_fixtures/s2validate/illegal_top_struct_param.logic.cpp",
         "Unsupported global port type");
     expectErrorContains(
-        parseFixture("testv2/fixtures/s2validate/illegal_unknown_call.logic.cpp"),
+        parseFixture("testv2/unit_fixtures/s2validate/illegal_unknown_call.logic.cpp"),
         "Unknown function call");
     expectErrorContains(
-        parseFixture("testv2/fixtures/s2validate/illegal_legacy_proxy.logic.cpp"),
+        parseFixture("testv2/unit_fixtures/s2validate/illegal_legacy_proxy.logic.cpp"),
         "legacy proxy carrier");
     expectErrorContains(makeRepeatUndeclaredOperandProgram(), "Use of undeclared variable");
     expectErrorContains(makeRecursiveProgram(), "Recursive helper/lambda call graph");
     expectParseErrorContains(
-        "testv2/fixtures/s2validate/illegal_unmarked_global.logic.cpp",
+        "testv2/unit_fixtures/s2validate/illegal_unmarked_global.logic.cpp",
         "is not declared by #pragma");
     expectParseErrorContains(
-        "testv2/fixtures/s2validate/illegal_missing_global.logic.cpp",
+        "testv2/unit_fixtures/s2validate/illegal_missing_global.logic.cpp",
         "names no file-scope global variable");
     expectParseErrorContains(
-        "testv2/fixtures/s2validate/illegal_parameter_top.logic.cpp",
+        "testv2/unit_fixtures/s2validate/illegal_parameter_top.logic.cpp",
         "must not declare parameters");
     expectParseErrorContains(
-        "testv2/fixtures/s2validate/illegal_initialized_port.logic.cpp",
+        "testv2/unit_fixtures/s2validate/illegal_initialized_port.logic.cpp",
         "must not have an initializer");
     expectParseErrorContains(
-        "testv2/fixtures/s2validate/illegal_duplicate_pragma.logic.cpp",
+        "testv2/unit_fixtures/s2validate/illegal_duplicate_pragma.logic.cpp",
         "Duplicate or conflicting port pragma");
     return 0;
 }

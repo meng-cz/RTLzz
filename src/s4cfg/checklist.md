@@ -252,7 +252,7 @@
      - labeled successors/predecessors
 
 4. 测试目录放哪里？
-   - 建议：`testv2/fixtures/s4cfg` 和 `testv2/s4cfg_test.cpp`。
+   - 建议：`testv2/unit_fixtures/s4cfg` 和 `testv2/s4cfg_test.cpp`。
 
 5. 最小测试应覆盖哪些？
    - 建议至少覆盖：

@@ -560,7 +560,7 @@ static void indirectRecursionDetectedInS6() {
 }
 
 static void sourceIntegrationInline() {
-    auto s6 = runS6(parseFixture("testv2/fixtures/s6inline/source_helpers.logic.cpp"));
+    auto s6 = runS6(parseFixture("testv2/unit_fixtures/s6inline/source_helpers.logic.cpp"));
     expectNoCalls(s6.program->top);
     CHECK(s6.summaries.size() >= 4);
     expectContains(s6.debug_text, "callee=choose");
@@ -570,7 +570,7 @@ static void sourceIntegrationInline() {
 }
 
 static void sourceLoopCallsInlineAfterUnroll() {
-    auto s6 = runS6(parseFixture("testv2/fixtures/s6inline/source_loop_calls.logic.cpp"));
+    auto s6 = runS6(parseFixture("testv2/unit_fixtures/s6inline/source_loop_calls.logic.cpp"));
     expectNoCalls(s6.program->top);
     CHECK(countSubstring(s6.debug_text, "callee=inc") >= 3);
     CHECK(countSubstring(s6.debug_text, "callee=bump") == 3);

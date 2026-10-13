@@ -129,7 +129,7 @@ static std::size_t countSubstring(const std::string& text, const std::string& ne
 
 static void sourceLoopsUnrollThroughS5() {
     auto run = runS5FromSource(
-        "testv2/fixtures/s5unroll/source_control.logic.cpp");
+        "testv2/unit_fixtures/s5unroll/source_control.logic.cpp");
     const auto& debug = run.debug;
 
     CHECK(run.summary_count == 6);
@@ -153,7 +153,7 @@ static void sourceLoopsUnrollThroughS5() {
 
 static void sourceNestedDynamicControlUnrollsThroughS5() {
     auto run = runS5FromSource(
-        "testv2/fixtures/s5unroll/source_nested_dynamic_control.logic.cpp");
+        "testv2/unit_fixtures/s5unroll/source_nested_dynamic_control.logic.cpp");
     const auto& debug = run.debug;
 
     CHECK(run.summary_count == 2);

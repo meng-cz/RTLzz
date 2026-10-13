@@ -397,7 +397,7 @@ static void shadowedNamesUseDistinctSymbols() {
 
 static void sourceTemplateCallArgumentBinaryOperatorIsRecovered() {
     auto debug = statementizeDebug(parseFixture(
-        "testv2/fixtures/s3statementize/source_template_call_arg_binary.logic.cpp"));
+        "testv2/unit_fixtures/s3statementize/source_template_call_arg_binary.logic.cpp"));
     expectContains(debug, "op __tmp___s0_lambda_tick_");
     expectContains(debug, " = Add(");
     expectContains(debug, "call write_value");

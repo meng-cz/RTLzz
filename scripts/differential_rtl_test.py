@@ -4,7 +4,7 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from differential_rtl import cpp_value_expr, write_data_guards, generate_verilator_harness, parse_stream_results
+from differential_rtl import cpp_value_expr, write_data_guards, generate_verilator_harness, parse_stream_results, rtl_port_names
 
 
 def port(name, width, dims=(), symbols=None, direction='Output'):
@@ -45,6 +45,30 @@ class WriteDataGuardsTest(unittest.TestCase):
 
 
 class PipelineHarnessTest(unittest.TestCase):
+    def test_backend_port_renaming_keeps_oracle_labels(self):
+        program = {"ports": [port("input", 32, direction="Input"),
+                             port("bias", 32, direction="Input"), port("result", 32)]}
+        rtl = "module top(input [31:0] input_0, bias, output [31:0] result); endmodule"
+        names = rtl_port_names("top", program, rtl)
+        self.assertEqual(names, {"input": "input_0", "bias": "bias", "result": "result"})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "harness.cpp"
+            order = generate_verilator_harness("top", program, path, port_names=names)
+            generated = path.read_text()
+        self.assertEqual(order, ["input", "bias"])
+        self.assertIn("top->input_0 =", generated)
+        self.assertNotIn("top->input_ =", generated)
+
+    def test_array_and_pipeline_clock_port_names(self):
+        program = {"ports": [port("result", 8),
+                             port("values", 8, (2, 2), ["v0", "v1", "v2", "v3"], direction="Input")],
+                   "pipeline": {"register_stages": 2, "clock_name": "clk"}}
+        rtl = "module top(output logic [7:0] result, input logic [7:0] values [0:1][0:1], input logic clk); endmodule"
+        self.assertEqual(rtl_port_names("top", program, rtl),
+                         {"values": "values", "result": "result", "clk": "clk"})
+        with self.assertRaises(RuntimeError):
+            rtl_port_names("top", program, "module top(input only_one); endmodule")
+
     def test_stream_markers_do_not_split_output_names(self):
         self.assertEqual(parse_stream_results("case=0\nshowcase=7\ncase=1\nshowcase=11\n", 2),
                          [{"showcase": 7}, {"showcase": 11}])

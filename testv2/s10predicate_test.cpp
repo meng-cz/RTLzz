@@ -318,7 +318,7 @@ static void switchBuildsCaseAndDefaultGuards() {
 }
 
 static void sourcePipelineRunsThroughS10() {
-    auto debug = runSourceToS10("testv2/fixtures/s9ssa/source_ssa.logic.cpp");
+    auto debug = runSourceToS10("testv2/unit_fixtures/s9ssa/source_ssa.logic.cpp");
     CHECK(debug.find("s10predicate") != std::string::npos);
     CHECK(debug.find("lowered_lookupwrite") != std::string::npos);
     CHECK(debug.find("lookup ") != std::string::npos);

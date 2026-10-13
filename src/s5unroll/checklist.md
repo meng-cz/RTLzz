@@ -278,7 +278,7 @@
 ## 12. 测试范围
 
 1. 测试目录放哪里？
-   - 建议：`testv2/fixtures/s5unroll` 和 `testv2/s5unroll_test.cpp`，必要时再加源级 integration test。
+   - 建议：`testv2/unit_fixtures/s5unroll` 和 `testv2/s5unroll_test.cpp`，必要时再加源级 integration test。
 
 2. 最小正向测试应覆盖哪些？
    - 建议：

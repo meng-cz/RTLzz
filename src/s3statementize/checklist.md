@@ -275,7 +275,7 @@
    - 参数可选开启，打印每个函数生成的 temp、CallStmt、statementized body。
 
 4. 测试目录放哪里？
-   - `testv2/fixtures/s3statementize` 和 `testv2/s3statementize_test.cpp`。
+   - `testv2/unit_fixtures/s3statementize` 和 `testv2/s3statementize_test.cpp`。
 
 5. 最小测试应覆盖哪些？
    - 建议至少覆盖：

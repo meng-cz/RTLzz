@@ -580,7 +580,7 @@ static void groupedOutputArrayBuildsBEIRArrayPort() {
 }
 
 static void sourcePipelineRunsThroughBEIR() {
-    auto beir_program = runSourceToBEIR("testv2/fixtures/s9ssa/source_ssa.logic.cpp");
+    auto beir_program = runSourceToBEIR("testv2/unit_fixtures/s9ssa/source_ssa.logic.cpp");
     std::string text = beir::emitText(beir_program);
     CHECK(text.find("beir v1") != std::string::npos);
     CHECK(text.find("function hls_main") != std::string::npos);
@@ -592,7 +592,7 @@ static void sourcePipelineRunsThroughBEIR() {
 }
 
 static void sourcePipelinePreservesArrayPortGroupsInBEIR() {
-    auto beir_program = runSourceToBEIR("testv2/fixtures/s11beir/source_array_ports.logic.cpp");
+    auto beir_program = runSourceToBEIR("testv2/unit_fixtures/s11beir/source_array_ports.logic.cpp");
     const beir::Port* in = findPort(beir_program, "in");
     CHECK(in != nullptr);
     CHECK(in->direction == beir::PortDirection::Input);
