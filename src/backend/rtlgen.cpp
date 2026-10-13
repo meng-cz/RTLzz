@@ -1,4 +1,5 @@
 #include "backend/rtlgen.hpp"
+#include "backend/rtl_names.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -38,26 +39,7 @@ static std::vector<int> arrayDims(const beir::ValueType& type) {
     return {};
 }
 
-static std::string sanitizeIdentifier(const std::string& text) {
-    std::string out;
-    for (char ch : text) {
-        unsigned char c = static_cast<unsigned char>(ch);
-        if (std::isalnum(c) || ch == '_') out.push_back(ch);
-        else out.push_back('_');
-    }
-    if (out.empty() || std::isdigit(static_cast<unsigned char>(out.front()))) {
-        out.insert(out.begin(), '_');
-    }
-    static const std::unordered_set<std::string> keywords = {
-        "module", "endmodule", "input", "output", "inout", "logic", "wire",
-        "assign", "always", "always_comb", "if", "else", "case", "endcase",
-        "function", "endfunction", "signed", "unsigned", "localparam", "bit",
-        "byte", "shortint", "int", "longint", "reg", "integer", "time",
-        "local", "final"
-    };
-    if (keywords.count(out)) out += "_";
-    return out;
-}
+using rtl_names::sanitizeIdentifier;
 
 static std::string packedRange(const beir::ValueType& type) {
     int width = widthOf(type);
@@ -181,7 +163,20 @@ static void emitLocList(std::ostream& os, const std::vector<DebugLoc>& locs) {
 
 class Emitter {
 public:
-    explicit Emitter(const beir::Program& program) : program_(program) {
+    explicit Emitter(const beir::Program& program, const pipeline::Program* pipeline = nullptr)
+        : program_(program), pipeline_(pipeline && pipeline->options.register_stages > 0 ? pipeline : nullptr) {
+        if (pipeline_) {
+            const auto& clock = pipeline_->options.clock_name;
+            if (rtl_names::isSystemVerilogKeyword(clock) || sanitizeIdentifier(clock) != clock)
+                throw std::runtime_error("pipeline: clock_name is a reserved RTL identifier");
+            for (const auto& signal : program_.signals)
+                if (sanitizeIdentifier(signal.name) == clock)
+                    throw std::runtime_error("pipeline: sanitized signal name collides with clock");
+            for (const auto& port : program_.ports)
+                if (port.name != clock && sanitizeIdentifier(port.name) == clock)
+                    throw std::runtime_error("pipeline: sanitized data port name collides with clock");
+            for (const auto& reg : pipeline_->registers) register_nodes_.insert(reg.node);
+        }
         for (const auto& signal : program_.signals) {
             name_to_node_[signal.name] = signal.id;
         }
@@ -196,6 +191,7 @@ public:
         emitConstantLookupFunctions(os);
         emitPortElementConnections(os);
         emitSignalAssignments(os);
+        emitRegisters(os);
         os << "endmodule\n";
         return os.str();
     }
@@ -233,6 +229,7 @@ public:
         os << "\n";
         emitPortElementConnections(os);
         emitSignalAssignments(os);
+        emitRegisters(os);
         return os.str();
     }
 
@@ -287,6 +284,8 @@ public:
 
 private:
     const beir::Program& program_;
+    const pipeline::Program* pipeline_ = nullptr;
+    std::unordered_set<NodeId> register_nodes_;
     std::unordered_map<std::string, NodeId> name_to_node_;
 
     struct ConstantTable {
@@ -321,7 +320,7 @@ private:
             return resizeConstant(value.constant, widthOf(value.type));
         if (value.kind != beir::OperandKind::Symbol) return std::nullopt;
         const auto* source = program_.findSignal(value.node);
-        if (!source || !source->driver || source->type.isArray()) return std::nullopt;
+        if (!source || !source->driver || source->type.isArray() || register_nodes_.count(source->id)) return std::nullopt;
         const auto& op = *source->driver;
         if (op.operands.size() != 1 ||
             (op.kind != beir::OperationKind::Assign &&
@@ -371,7 +370,7 @@ private:
         for (std::size_t depth = 0; depth <= program_.signals.size(); ++depth) {
             if (value.kind != beir::OperandKind::Symbol) return nullptr;
             const auto* source = program_.findSignal(value.node);
-            if (!source || !source->driver) return nullptr;
+            if (!source || !source->driver || register_nodes_.count(source->id)) return nullptr;
             const auto& op = *source->driver;
             if (op.kind == beir::OperationKind::Aggregate) return &op;
             if (op.kind != beir::OperationKind::Assign || op.operands.size() != 1 ||
@@ -730,9 +729,28 @@ private:
         os << "\n";
     }
 
+    void emitRegisters(std::ostream& os) const {
+        if (!pipeline_ || pipeline_->registers.empty()) return;
+        os << "    always_ff @(posedge " << pipeline_->options.clock_name << ") begin\n";
+        for (const auto& reg : pipeline_->registers) {
+            const auto& signal = program_.signal(reg.node);
+            if (signal.type.isArray()) {
+                for (int i = 0; i < flattenedArraySize(signal.type); ++i) {
+                    auto indices = linearIndices(signal.type, static_cast<std::size_t>(i));
+                    os << "        " << indexedRef(sig(reg.node), indices) << " <= "
+                       << indexedRef(sig(reg.source), indices) << ";" << debugComment(signal.debug) << "\n";
+                }
+            } else {
+                os << "        " << sig(reg.node) << " <= " << sig(reg.source)
+                   << ";" << debugComment(signal.debug) << "\n";
+            }
+        }
+        os << "    end\n";
+    }
+
     void emitSignalAssignments(std::ostream& os) const {
         for (const auto& signal : program_.signals) {
-            if (omitted_arrays_.count(signal.id)) continue;
+            if (omitted_arrays_.count(signal.id) || register_nodes_.count(signal.id)) continue;
             auto table = constant_lookups_.find(signal.id);
             if (table != constant_lookups_.end()) {
                 emitConstantLookup(os, signal, table->second);
@@ -1209,6 +1227,16 @@ private:
 };
 
 } // namespace
+
+std::string emitSystemVerilog(const pipeline::Program& program) {
+    return Emitter(program.rtl_program, &program).emit();
+}
+
+std::string emitSystemVerilogBody(
+    const pipeline::Program& program,
+    const std::vector<std::pair<std::string, std::string>>& port_bindings) {
+    return Emitter(program.rtl_program, &program).emitBody(port_bindings);
+}
 
 std::string emitSystemVerilog(const beir::Program& program) {
     return Emitter(program).emit();

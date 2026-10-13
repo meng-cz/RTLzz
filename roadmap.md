@@ -37,3 +37,7 @@ Proxy/引用字段清理方案：旧路径中的 RegProxy/ReqHelper/Queue/BRAM p
 
   11. BuildBackendIR
      将 predicate program 转换为 backend IR/BEIR，形成后端所需的 signal、operation、assignment、register/memory/proxy effect 表示。
+
+  12. AutomaticPipeline（可选，BEOPT 后）
+      CompileOptions 提供内部寄存器级数 N、时钟名、强类型运算延迟权重覆盖以及时序容差（默认 5%）。在优化后的活跃 DAG 上调度 N+1 个组合阶段，先搜索估计时序基准，再在最长级延迟不超过基准 × (1+容差) 的约束内通过确定性局部移动减少寄存器总位数。条件、索引、数据及数组依赖均按事务对齐，跨级延迟链共享，常量不插寄存器。单个运算不拆分。
+      独立 pipeline::Program 保留组合 BEIR 和阶段/寄存器表；物化之后不运行组合 BEOPT。原生 RTL 发射器根据寄存器表生成上升沿 always_ff，输入输出仍为外部 Q/D 之间的 wire 边界，不生成边界寄存器。N=0 保持组合路径；N>0 对应端到端外部输出采样 N+1 周期。无复位或握手，CIRCT 暂不支持流水模式。

@@ -491,18 +491,20 @@ def rtl_cpp_value_expr(expr: str, t: dict[str, Any]) -> str:
     return f"hex_from_words({expr}, {width})"
 
 
-def rtl_cpp_assign_from_argv(expr: str, t: dict[str, Any], argv_index: int) -> str:
+def rtl_cpp_assign_from_argv(expr: str, t: dict[str, Any], argv_index: int,
+                             argv_name: str = "argv") -> str:
     width = type_width(t)
     if width <= 64:
-        return f"{expr} = std::strtoull(argv[{argv_index}], nullptr, 0);"
+        return f"{expr} = std::strtoull({argv_name}[{argv_index}], nullptr, 0);"
     words = (width + 31) // 32
     return (
-        f"auto words_{argv_index} = parse_words(argv[{argv_index}], {width}); "
+        f"auto words_{argv_index} = parse_words({argv_name}[{argv_index}], {width}); "
         f"for (int i = 0; i < {words}; ++i) {expr}[i] = words_{argv_index}[i];"
     )
 
 
-def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) -> list[str]:
+def generate_verilator_harness(top: str, program: dict[str, Any], path: Path,
+                               stream: bool = False) -> list[str]:
     class_name = verilator_class_name(top)
     input_order: list[str] = []
     lines = [
@@ -555,6 +557,7 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
 
     arg_index = 1
     argc_check_index = len(lines)
+    stream_input_assignments: list[str] = []
     for port in program["ports"]:
         if port["direction"] != "Input":
             continue
@@ -569,10 +572,13 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
             else:
                 expr = f"top->{verilator_member_name(port['name'])}"
             lines.append("  " + rtl_cpp_assign_from_argv(expr, port["type"], arg_index))
+            stream_input_assignments.append("  " + rtl_cpp_assign_from_argv(
+                expr, port["type"], arg_index, argv_name="row_args.data()"))
             arg_index += 1
 
     lines.insert(argc_check_index, f"  if (argc != {arg_index}) return 97;")
     lines.append("  top->eval();")
+    output_start = len(lines)
 
     for port in program["ports"]:
         if port["direction"] != "Output":
@@ -589,6 +595,51 @@ def generate_verilator_harness(top: str, program: dict[str, Any], path: Path) ->
             lines.append(
                 f'  std::cout << "{element}=" << {rtl_cpp_value_expr(expr, port["type"])} << "\\n";'
             )
+
+    if stream or program.get("pipeline"):
+        outputs = lines[output_start:]
+        n = program.get("pipeline", {}).get("register_stages", 0)
+        clock = verilator_member_name(program.get("pipeline", {}).get("clock_name", "clk"))
+        lines = lines[:argc_check_index]
+        lines += [
+            "  if (argc != 1) return 97;",
+            "  std::vector<std::vector<std::string>> rows;",
+            "  std::string line;",
+            "  while (std::getline(std::cin, line)) {",
+            "    std::istringstream in(line); std::string token;",
+            '    std::vector<std::string> row{"rtl_tb"};',
+            "    while (in >> token) row.push_back(token);",
+            f"    if (row.size() != {arg_index}) return 97;",
+            "    rows.push_back(std::move(row));",
+            "  }",
+        ]
+        if n:
+            lines += [f"  top->{clock} = 0;"]
+        lines += [
+            "  top->eval();",
+            f"  for (std::size_t cycle = 0; cycle <= rows.size() + {n}; ++cycle) {{",
+        ]
+        if n:
+            lines += [f"    top->{clock} = 0; top->eval();"]
+        lines += [
+            # Capture external output D BEFORE the edge changes internal Q.
+            # These values are the explicitly modeled external output register.
+            f"    if (cycle >= {n + 1} && cycle - {n + 1} < rows.size()) {{",
+            f'      std::cout << "case=" << (cycle - {n + 1}) << "\\n";',
+        ]
+        lines += ["    " + line for line in outputs]
+        lines += ["    }"]
+        if n:
+            lines += [f"    top->{clock} = 1; top->eval();"]
+        lines += [
+            # Drive external input Q AFTER the edge so input and internal
+            # registers sample their old D values simultaneously.
+            "    if (cycle < rows.size()) {",
+            "      std::vector<const char*> row_args;",
+            "      for (const auto& value : rows[cycle]) row_args.push_back(value.c_str());",
+        ]
+        lines += ["    " + line for line in stream_input_assignments]
+        lines += ["    }", "    top->eval();", "  }"]
 
     lines += [
         "  top->final();",
@@ -607,6 +658,22 @@ def parse_key_values(stdout: str) -> dict[str, int]:
         name, value = line.split("=", 1)
         values[name] = int(value, 0)
     return values
+
+
+def parse_stream_results(stdout: str, cases: int) -> list[dict[str, int]]:
+    results: list[dict[str, int]] = []
+    for line in stdout.splitlines():
+        if line.startswith("case="):
+            if int(line[len("case="):]) != len(results):
+                raise RuntimeError("streamed RTL case ordering mismatch")
+            results.append({})
+        elif line.strip():
+            if not results:
+                raise RuntimeError("streamed RTL output before first case")
+            results[-1].update(parse_key_values(line))
+    if len(results) != cases:
+        raise RuntimeError(f"streamed RTL returned {len(results)} cases, expected {cases}")
+    return results
 
 
 def build_verilator(verilator: str, top: str, rtl: Path, harness: Path, work: Path) -> Path:
@@ -646,6 +713,8 @@ def main() -> int:
     ap.add_argument("--top", required=True, help="Top function name or '*' wildcard pattern")
     ap.add_argument("--build-dir", type=Path, default=ROOT / "build")
     ap.add_argument("--cases", type=int, default=100)
+    ap.add_argument("--latency", type=int, default=None, help="internal pipeline register stages; enables continuous-cycle comparison")
+    ap.add_argument("--clock-name", default="clk")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--cxx", default=default_cxx())
     ap.add_argument("--verilator", default=shutil.which("verilator") or "verilator")
@@ -664,6 +733,10 @@ def main() -> int:
     )
     ap.add_argument("--keep", action="store_true")
     args = ap.parse_args()
+    if args.latency is not None and args.latency < 0:
+        ap.error("--latency must be non-negative")
+    if args.cases <= 0:
+        ap.error("--cases must be positive")
 
     source = args.source.resolve()
     build_dir = args.build_dir.resolve()
@@ -678,6 +751,8 @@ def main() -> int:
             "--vullib", str(ROOT / "third_party/vulsim/vullib"),
             "--clang-arg", f"-I{ROOT}",
         ]
+        if args.latency is not None:
+            common_args += ["--latency", str(args.latency), "--clock-name", args.clock_name]
         for opt in args.beopt:
             common_args += ["--beopt", opt]
         run(common_args + ["--format", "portmeta", "-o", str(portmeta)], cwd=ROOT)
@@ -707,7 +782,7 @@ def main() -> int:
         ], cwd=ROOT)
 
         rtl_tb_cpp = work / "rtl_tb.cpp"
-        rtl_input_order = generate_verilator_harness(resolved_top, program, rtl_tb_cpp)
+        rtl_input_order = generate_verilator_harness(resolved_top, program, rtl_tb_cpp, stream=args.latency is not None)
         if rtl_input_order != oracle_input_order:
             raise RuntimeError(
                 f"input order mismatch: rtl={rtl_input_order} oracle={oracle_input_order}"
@@ -715,8 +790,14 @@ def main() -> int:
         rtl_exe = build_verilator(args.verilator, resolved_top, rtl, rtl_tb_cpp, work)
 
         rng = random.Random(args.seed)
-        for case in range(args.cases):
-            inputs = random_inputs(program, rng, input_ranges)
+        input_cases = [random_inputs(program, rng, input_ranges) for _ in range(args.cases)]
+        streamed_results = []
+        if args.latency is not None:
+            batch = "".join(" ".join(str(values[name]) for name in rtl_input_order) + "\n"
+                            for values in input_cases)
+            result = subprocess.run([str(rtl_exe)], input=batch, text=True, capture_output=True, cwd=ROOT, check=True)
+            streamed_results = parse_stream_results(result.stdout, args.cases)
+        for case, inputs in enumerate(input_cases):
             argv = [str(inputs[name]) for name in rtl_input_order]
             try:
                 oracle_run = run([str(oracle_exe)] + argv, cwd=ROOT)
@@ -739,7 +820,7 @@ def main() -> int:
                     print(exc.stderr, file=sys.stderr, end="")
                 return 1
             expected = parse_key_values(oracle_run.stdout)
-            actual = parse_key_values(run([str(rtl_exe)] + argv, cwd=ROOT).stdout)
+            actual = streamed_results[case] if args.latency is not None else parse_key_values(run([str(rtl_exe)] + argv, cwd=ROOT).stdout)
             for name, exp in expected.items():
                 # Disabled write data is unobservable. Enable outputs themselves
                 # and all resetvalue outputs are still compared unconditionally.
@@ -760,7 +841,8 @@ def main() -> int:
                         print("rerun with --keep to inspect temporary artifacts", file=sys.stderr)
                     return 1
         backend = "CIRCT" if args.circt else "native"
-        print(f"PASS {args.cases} RTL cases for {source} ({backend} backend)")
+        timing = f", {args.latency} internal stages / {args.latency + 1} external cycles" if args.latency is not None else ""
+        print(f"PASS {args.cases} RTL cases for {source} ({backend} backend{timing})")
         return 0
     finally:
         if args.keep:

@@ -1,8 +1,10 @@
 """Regression tests for observable write-data pairing in the RTL differential harness."""
 import copy
 import unittest
+import tempfile
+from pathlib import Path
 
-from differential_rtl import cpp_value_expr, write_data_guards
+from differential_rtl import cpp_value_expr, write_data_guards, generate_verilator_harness, parse_stream_results
 
 
 def port(name, width, dims=(), symbols=None, direction='Output'):
@@ -40,6 +42,32 @@ class WriteDataGuardsTest(unittest.TestCase):
         program = {'ports': [port('wdata_r', 32), port('wen_r', 1),
                              port('query', 32, symbols=['wdata_r'])]}
         self.assertEqual(write_data_guards(program), {})
+
+
+class PipelineHarnessTest(unittest.TestCase):
+    def test_stream_markers_do_not_split_output_names(self):
+        self.assertEqual(parse_stream_results("case=0\nshowcase=7\ncase=1\nshowcase=11\n", 2),
+                         [{"showcase": 7}, {"showcase": 11}])
+        with self.assertRaises(RuntimeError):
+            parse_stream_results("case=1\nshowcase=7\n", 1)
+        with self.assertRaises(RuntimeError):
+            parse_stream_results("case=0\nshowcase=7\n", 2)
+
+    def test_streaming_preserves_array_port_named_argv(self):
+        inputs = port("argv", 8, (2,), ["a0", "a1"], direction="Input")
+        inputs["type"]["is_array"] = True
+        program = {"ports": [inputs, port("result", 8)],
+                   "pipeline": {"register_stages": 2, "clock_name": "clk"}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "harness.cpp"
+            order = generate_verilator_harness("top", program, path)
+            generated = path.read_text()
+        self.assertEqual(order, ["a0", "a1"])
+        self.assertIn("top->argv[0] = std::strtoull(row_args.data()[1]", generated)
+        self.assertIn("top->argv[1] = std::strtoull(row_args.data()[2]", generated)
+        self.assertIn("cycle >= 3", generated)
+        self.assertLess(generated.index('std::cout << "result="'),
+                        generated.index("top->clk = 1; top->eval();"))
 
 
 if __name__ == '__main__':

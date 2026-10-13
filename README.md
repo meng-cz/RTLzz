@@ -78,3 +78,87 @@ flattens and balances Boolean trees and applies constant, idempotence,
 complement, absorption, and one-complement consensus identities. General
 priority muxes whose branches cannot be represented by these identities remain
 as `Ite` nodes.
+
+## Automatic pipelining (native backend)
+
+All public types, pipeline fields and API declarations are defined in
+`src/rtlzz.hpp`; `src/rtlzz.cpp` implements the facade and converts public options
+to internal configuration. Link the existing `predicate-expand-objects` library.
+
+Configure pipelining through `rtlzz::CompileOptions`. No source pragma
+or explicit registers are required in the C++ function:
+
+```cpp
+rtlzz::CompileOptions options;
+// Set source_codelines, top_function, vullib_dir as usual.
+options.register_stages = 2;
+options.clock_name = "clk";
+options.operation_delay_weights[rtlzz::PipelineOperation::Multiply] = 4.0;
+options.operation_delay_weights[rtlzz::PipelineOperation::Lookup] = 2.0;
+options.timing_relaxation_ratio = 0.05;
+auto result = rtlzz::compileToRtl(options);
+if (result.ok() && result.pipeline_report) {
+    auto bits = result.pipeline_report->register_bits;
+    auto delay = result.pipeline_report->final_delay;
+}
+```
+
+`register_stages = N` inserts **N internal register boundaries**, splitting the
+optimized combinational graph into N+1 computation stages. Input/output data
+ports remain wires: external input-register Q and output-register D are the
+caller's responsibility. An input launched by the external register at edge k
+reaches the output wire after edge k+N and the last combinational stage settles;
+the external output register captures it at edge k+N+1. With N=0, the existing
+combinational output and port metadata are unchanged. With N>0, the module adds
+a single rising-edge clock input. All outputs share the same transaction delay.
+There is no valid/ready, stall, or reset; ignore output during initial filling.
+
+Module-body generation also supports pipelining. Add `{ "clk", "external_clk" }`
+(or the configured clock name) to `rtl_port_bindings` alongside the existing data
+bindings. It must reference the same clock used by the external boundary registers.
+
+The CLI exposes the basic configuration:
+
+```bash
+build/predicate-expand testv2/fixtures/pipeline_misc.logic.cpp \
+  --top hls_main --vullib third_party/vulsim/vullib \
+  --latency 2 --clock-name clk --format rtl -o /tmp/pipeline.sv
+```
+
+Delay weights use the public `PipelineOperation` enum in `src/rtlzz.hpp`;
+unconfigured operations cost 1, Assign costs 0, and Multiply costs 3. PortRead
+is always boundary wiring with cost 0. The weights are finite non-negative
+relative costs, **not nanoseconds or operation cycle counts**. Constant-only
+subgraphs require no registers and contribute no transaction-path delay.
+Individual operations are indivisible in this version.
+
+Scheduling first searches a feasible timing baseline T₀, then moves operations
+to reduce register storage while keeping the longest estimated stage at most
+T₀ × (1 + timing_relaxation_ratio). The default allowance is 5%; set it to 0 for
+no timing regression against the baseline. Deterministic local search minimizes
+actual shared delay-chain register bits, including conditions and array data.
+It does not guarantee globally optimal placement or physical timing closure.
+Combinational area and external registers are excluded from the area objective.
+
+`CompileResult::pipeline_report` returns baseline/allowed/final delays, per-stage
+costs, register count, and register bits before/after area optimization. RTL text
+debug includes this report; `--format beir` prints stages, register D connections
+and the materialized graph. In pipeline mode `portmeta` adds a separate
+`pipeline` object containing `register_stages`, `external_capture_cycles`, and
+`clock_name`; the clock is not added to the C++ data-port list.
+
+CIRCT does not support this sequential lowering yet; combining `--circt` with a
+positive `--latency` reports an error. The host vulsim bridge keeps its existing
+combinational default until it explicitly passes pipeline configuration.
+
+Run the pipeline tests from this directory:
+
+```bash
+bash scripts/pipeline_regression.sh
+```
+
+The differential harness's `--latency N` sends changing inputs continuously in a
+single Verilator simulation, models input Q updates after each edge and output D
+captures before the next edge, skips filling, and drains the pipeline. It checks
+N+1 external cycles against the C++ oracle. Omitting `--latency` keeps the existing
+single-case combinational harness.

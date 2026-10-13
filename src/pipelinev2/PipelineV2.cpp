@@ -1,4 +1,5 @@
 #include "pipelinev2/PipelineV2.h"
+#include "backend/rtl_names.hpp"
 
 #include "backend/beopt.hpp"
 #include "backend/circt_bridge.hpp"
@@ -319,7 +320,8 @@ TypeInfo sourceScalarTypeForMetadata(const s7flatten::S7PortGroup& group) {
     return type;
 }
 
-std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program) {
+std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program,
+                             const std::optional<pipeline::Options>& pipeline) {
     const auto& fn = program.top;
     std::ostringstream os;
     os << "{\n";
@@ -327,6 +329,13 @@ std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program) {
     os << "  \"function\": ";
     emitJsonString(os, fn.name);
     os << ",\n";
+    if (pipeline && pipeline->register_stages > 0) {
+        os << "  \"pipeline\": {\"register_stages\": " << pipeline->register_stages
+           << ", \"external_capture_cycles\": " << (pipeline->register_stages + 1)
+           << ", \"clock_name\": ";
+        emitJsonString(os, pipeline->clock_name);
+        os << "},\n";
+    }
     os << "  \"ports\": [\n";
     for (std::size_t i = 0; i < fn.port_groups.size(); ++i) {
         const auto& group = fn.port_groups[i];
@@ -405,6 +414,11 @@ PipelineResult compile(const PipelineConfig& config) {
     s11beir::BEIRResult s11;
     beir::Program beir_program;
     try {
+        if (config.pipeline) {
+            pipeline::validateOptions(*config.pipeline);
+            if (config.pipeline->register_stages > 0 && config.use_circt)
+                return errorResult("config", "CIRCT does not support automatic pipelines");
+        }
         const auto report_frontend_stage = [&config](const char* stage) {
             if (config.progress_callback) {
                 config.progress_callback(std::string("RTLzz frontend parsing: ") + stage);
@@ -467,9 +481,14 @@ PipelineResult compile(const PipelineConfig& config) {
         if (!s7.program) return errorResult("s7flatten", "stage produced no program", std::nullopt, current_debug_text);
         current_debug_text = [&s7]() { return "latest successful stage: s7flatten\n" + s7flatten::debugPrint(*s7.program, s7.summaries); };
 
+        if (config.pipeline && config.pipeline->register_stages > 0) {
+            for (const auto& group : s7.program->top.port_groups)
+                if (rtl_names::sanitizeIdentifier(group.source_name) == config.pipeline->clock_name)
+                    return errorResult("config", "pipeline clock name collides with data port: " + group.source_name);
+        }
         if (config.output_kind == OutputKind::PortMetadata) {
             PipelineResult result;
-            result.output_text = portMetadataJson(*s7.program);
+            result.output_text = portMetadataJson(*s7.program, config.pipeline);
             return result;
         }
 
@@ -529,9 +548,17 @@ PipelineResult compile(const PipelineConfig& config) {
         };
 
         PipelineResult result;
+        if (config.pipeline && config.pipeline->register_stages > 0) {
+            if (config.progress_callback) config.progress_callback("RTLzz pipeline scheduling and register materialization");
+            result.pipeline_program = pipeline::build(beir_program, *config.pipeline);
+            result.pipeline_report = result.pipeline_program->report;
+        }
+        const auto& debug_program = result.pipeline_program
+            ? result.pipeline_program->rtl_program : beir_program;
         switch (config.output_kind) {
         case OutputKind::Beir:
-            result.output_text = beir::emitText(beir_program);
+            result.output_text = result.pipeline_program
+                ? pipeline::emitText(*result.pipeline_program) : beir::emitText(beir_program);
             break;
         case OutputKind::Rtl:
             if (config.use_circt) {
@@ -551,17 +578,25 @@ PipelineResult compile(const PipelineConfig& config) {
                 }
                 result.output_text = std::move(circt_result.verilog);
             } else {
-                result.output_text = config.rtl_module_body
-                    ? rtlgen::emitSystemVerilogBody(beir_program, config.rtl_port_bindings)
-                    : rtlgen::emitSystemVerilog(beir_program);
+                if (result.pipeline_program) {
+                    result.output_text = config.rtl_module_body
+                        ? rtlgen::emitSystemVerilogBody(*result.pipeline_program, config.rtl_port_bindings)
+                        : rtlgen::emitSystemVerilog(*result.pipeline_program);
+                } else {
+                    result.output_text = config.rtl_module_body
+                        ? rtlgen::emitSystemVerilogBody(beir_program, config.rtl_port_bindings)
+                        : rtlgen::emitSystemVerilog(beir_program);
+                }
             }
             if (config.rtl_debug_output == RtlDebugOutputKind::Structured) {
                 result.rtl_debug_signals =
-                    rtlgen::collectDebugSignals(beir_program, result.output_text);
+                    rtlgen::collectDebugSignals(debug_program, result.output_text);
             } else if (config.rtl_debug_output == RtlDebugOutputKind::Text) {
-                result.rtl_debug_text = rtlgen::emitDebugReport(beir_program,
+                result.rtl_debug_text = rtlgen::emitDebugReport(debug_program,
                                                                 result.output_text);
             }
+            if (result.pipeline_program && config.rtl_debug_output == RtlDebugOutputKind::Text)
+                result.rtl_debug_text += pipeline::emitReport(*result.pipeline_program);
             break;
         case OutputKind::PortMetadata:
             break;

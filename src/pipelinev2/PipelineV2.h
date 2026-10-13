@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/beir.hpp"
+#include "backend/pipeline.hpp"
 #include "backend/rtlgen.hpp"
 
 #include <cstddef>
@@ -29,6 +30,7 @@ struct PipelineConfig {
     std::string top_function;
     std::vector<std::string> clang_args;
     int unroll_limit = 1024;
+    std::optional<pipeline::Options> pipeline;
     // Zero means no artificial S7 leaf-symbol limit.
     std::size_t max_leaf_symbols = 0;
     std::vector<std::string> beopt_args;
@@ -45,7 +47,10 @@ struct PipelineConfig {
 };
 
 struct PipelineResult {
+    // Always the optimized combinational graph; sequential semantics are separate.
     std::optional<beir::Program> beir_program;
+    std::optional<pipeline::Program> pipeline_program;
+    std::optional<pipeline::Report> pipeline_report;
     std::string output_text;
     std::string rtl_debug_text;
     std::vector<rtlgen::RtlDebugSignal> rtl_debug_signals;

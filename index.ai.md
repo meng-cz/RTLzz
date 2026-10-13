@@ -2,7 +2,7 @@
 
 本文档是当前代码树的逐文件索引。项目现在只保留 V2 编译路径：
 
-`S0 Clang18 AST -> S1 API norm -> S2 validate -> S3 statementize -> S4 CFG -> S5 unroll -> S6 inline -> S7 flatten -> S8 op norm -> S9 SSA -> S10 predicate -> S11 BEIR -> BEOPT -> RTL (native or CIRCT)`
+`S0 Clang18 AST -> S1 API norm -> S2 validate -> S3 statementize -> S4 CFG -> S5 unroll -> S6 inline -> S7 flatten -> S8 op norm -> S9 SSA -> S10 predicate -> S11 BEIR -> BEOPT -> optional automatic pipeline -> RTL (native; combinational CIRCT)`
 
 ## 回归测试流程
 
@@ -46,10 +46,14 @@ done
 - 支持 `--format rtl|beir|portmeta`，并转发 `--top`、`--vullib`、`--unroll-limit`、`--beopt`、`--clang-arg`。
 
 ### `src/rtlzz.hpp`
-- Header-only API facade。
+- 公开 API 声明；实现和内部配置转换位于 `src/rtlzz.cpp`，公开头文件仅依赖标准库。
 - 提供 `rtlzz::CompileOptions`、`rtlzz::CompileResult`。
 - `CompileOptions::progress_callback` 是可选状态回调，逐阶段报告 frontend、逐轮报告 backend optimizer；未设置时 API 保持静默。
 - 提供 `compileToRtl`、`compileToBeir`、`compileToPortMetadata`，内部全部调用 `pipelinev2`。
+
+### `src/rtlzz.cpp`
+- 实现公开编译函数、调试结果转换和参数校验；将 `CompileOptions` 中展开的流水线字段转换为内部 `pipeline::Options`。
+- 单向包含公开头文件与内部 pipeline 头文件，避免公开 API 与后端之间的双向头文件依赖。
 
 ## Pipeline V2
 
@@ -445,3 +449,29 @@ done
 - `parallelizeExclusiveMuxes` 遍历等宽 Ite 的 true/false 两臂，收集完整路径谓词并转换为一个有序 Case，保留显式默认值。叶路径在分叉处包含相反条件，结构性保证互斥并保留原优先级语义；共享节点和 signed-view 边界保持为叶子。默认最多 1024 个分叉（硬上限 4096），超限候选不修改。
 - `balanceAssociativeTrees` 支持等宽无 signed-view 的 AND/OR/XOR/模加法；默认最多 1024 叶（硬上限 4096），只展开单用户同类节点，不穿越截断/扩展。按到达时间优先合并早到输入，且仅在估计延迟严格下降时重构。
 - 两个 pass 按可观察输出遍历活跃图，修改后使 value facts 失效。
+
+## Automatic Pipeline (after BEOPT)
+
+### `src/rtlzz.hpp`
+- Public `CompileOptions` with expanded pipeline fields, `PipelineOperation` keys, and `PipelineReport`.
+- `CompileOptions::register_stages` and related direct fields: N internal register boundaries, configurable relative operation costs, clock, and timing relaxation (default 5%). N=0 preserves the combinational path.
+
+### `src/backend/pipeline.hpp` / `src/backend/pipeline.cpp`
+- Separate sequential IR: original combinational graph, operation stages, materialized graph and register D/Q boundary table.
+- Deterministic timing-baseline search and local register-bit minimization under a hard relative timing allowance; single operations remain indivisible.
+- Aligns data/control/lookup/array dependencies; reuses delay chains and avoids registering constants. Never passes the materialized graph back into BEOPT.
+- Reports per-stage estimates and actual register storage. Public output ports remain external-register D wires; N internal stages imply N+1 external capture cycles.
+
+### `src/backend/rtl_names.hpp`
+- Shared historical RTL identifier sanitizer and SystemVerilog clock-keyword validation.
+
+### Integration
+- `src/pipelinev2/PipelineV2.cpp`: config validation, optional post-BEOPT scheduling, native sequential emission, report and separate clock metadata. CIRCT rejects positive pipeline stages.
+- `src/backend/rtlgen.cpp`: pipeline overloads emit register nodes as nonblocking `always_ff`; constant-table recognition stops at register boundaries.
+- `main/main.cpp`: `--latency N` / `--clock-name NAME`; operation costs and timing allowance configured through the API.
+
+### Verification
+- `testv2/pipeline_test.cpp`: timing/area tradeoff, cost overrides, shared delay chains, cycle counts, API/body binding and invalid configurations.
+- `testv2/fixtures/pipeline_misc.logic.cpp`: continuous changing data/control, unequal paths, dynamic lookup, signed multiply, multidimensional arrays and constant outputs.
+- `scripts/differential_rtl.py --latency N`: one continuous simulation, external Q/D boundary timing, warm-up and drain; compares N+1-cycle results with the oracle. N=0 also tests external boundaries.
+- `scripts/pipeline_regression.sh`: focused fixture at N=0/1/2/4/8 plus all main fixtures at N=2.

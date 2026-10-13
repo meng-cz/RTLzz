@@ -1,18 +1,47 @@
 #pragma once
 
-#include "pipelinev2/PipelineV2.h"
-
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <functional>
+#include <map>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace rtlzz {
+
+// Public operation keys; independent of the backend's IR enums. Weights are
+// relative combinational costs, not physical time or operator cycle latency.
+enum class PipelineOperation {
+    Assign, Add, Subtract, Multiply, Divide, Modulo, AddCarry,
+    BitAnd, BitOr, BitXor, LogicalAnd, LogicalOr, LogicalNot, BitNot, Negate,
+    Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual,
+    ShiftLeft, ShiftRight, Mux, Case, Lookup, ArrayAccess, Cast,
+    ZeroExtend, SignExtend, Truncate, Slice, BitSelect, WriteSlice, WriteBit,
+    Concat, Repeat, ReduceOr, ReduceAnd, ReduceXor,
+    DynamicBitSelect, DynamicSlice, DynamicWriteSlice, DynamicWriteBit,
+    Aggregate, Call,
+};
+
+// Scheduling estimates and actual internal-register storage, excluding external
+// boundary registers and combinational area. Available even without RTL debug.
+struct PipelineReport {
+    // Longest stage cost before register-area optimization.
+    double baseline_delay = 0;
+    // Hard cap: baseline_delay * (1 + timing_relaxation_ratio).
+    double allowed_delay = 0;
+    // Longest stage cost in the selected schedule.
+    double final_delay = 0;
+    // Costs indexed from stage 0 through stage register_stages.
+    std::vector<double> stage_delays;
+    // Internal register storage before / after register-area optimization.
+    std::uint64_t baseline_register_bits = 0;
+    std::uint64_t register_bits = 0;
+    // Distinct register signals; an array signal counts once, but all its bits
+    // are included in register_bits.
+    std::size_t register_count = 0;
+};
 
 enum class RtlDebugMode {
     None,
@@ -27,10 +56,7 @@ struct SourceLoc {
     int end_line = 0;
     int end_column = 0;
 
-    bool valid() const {
-        return !file.empty() || line > 0 || column > 0 ||
-               end_line > 0 || end_column > 0;
-    }
+    bool valid() const;
 };
 
 struct RtlDerivedSignalDebugInfo {
@@ -78,6 +104,8 @@ struct CompileOptions {
     std::vector<std::string> beopt_args;
     // Emit RTL through the external CIRCT HW/Comb bridge.  This is opt-in;
     // failures are reported rather than falling back to the native emitter.
+    // Positive register_stages is supported only by the native backend; using
+    // CIRCT with a positive stage count reports a compilation error.
     bool use_circt = false;
     // Optional progress hook used by embedding tools. It reports frontend
     // stages and backend optimization iterations; standalone calls are silent.
@@ -88,6 +116,28 @@ struct CompileOptions {
     // complete module. Bind RTLZZ port names to containing-module signals.
     bool rtl_module_body = false;
     std::vector<std::pair<std::string, std::string>> rtl_port_bindings;
+    // Automatic pipeline: N internal register boundaries, N+1 computation
+    // stages. Zero preserves combinational RTL. Inputs and outputs remain wire
+    // ports connected to external input-register Q / output-register D.
+    // Input launched at edge k settles at output after edge k+N; an external
+    // output register captures it at k+N+1. No reset, valid/ready, or stalling;
+    // ignore outputs until the pipeline fills. Single operations are indivisible.
+    // Must be non-negative.
+    int register_stages = 0;
+    // Rising-edge clock port added only when register_stages > 0. Must be a
+    // non-reserved RTL identifier without data-port/signal collisions. In
+    // rtl_module_body mode, include {clock_name, external_clock} in bindings.
+    std::string clock_name = "clk";
+    // Override relative combinational costs (finite, non-negative), not physical
+    // time or operation cycle counts. Unspecified operations cost 1, Assign 0,
+    // Multiply 3; input PortRead wiring always costs 0. Constant-only subgraphs
+    // require no pipeline storage and contribute no transaction-path delay.
+    std::map<PipelineOperation, double> operation_delay_weights;
+    // First establish timing baseline T0, then reduce shared register bits under
+    // Tmax <= T0 * (1 + ratio). Default allows 5% timing regression; zero allows
+    // none. Must be finite and non-negative. This is a deterministic heuristic,
+    // not a guarantee of global optimality or physical timing closure.
+    double timing_relaxation_ratio = 0.05;
 };
 
 struct CompileResult {
@@ -106,207 +156,26 @@ struct CompileResult {
     std::vector<std::string> error_signal_debug_codelines;
     std::vector<RtlSignalDebugInfo> error_signal_debug_signals;
     std::string error;
+    // Available for an RTL/BEIR pipeline compilation regardless of debug mode.
+    std::optional<PipelineReport> pipeline_report;
 
-    bool ok() const {
-        return error.empty();
-    }
+    bool ok() const;
 };
 
-namespace detail {
-
-enum class OutputKind {
-    PortMetadata,
-    Beir,
-    Rtl,
-};
-
-inline const char* outputKindName(OutputKind kind) {
-    switch (kind) {
-    case OutputKind::PortMetadata:
-        return "portmeta";
-    case OutputKind::Beir:
-        return "beir";
-    case OutputKind::Rtl:
-        return "rtl";
-    }
-    return "unknown";
-}
-
-inline bool hasLanguageStandardArg(const std::vector<std::string>& clang_args) {
-    for (const auto& arg : clang_args) {
-        if (arg == "-std" || arg == "--std" ||
-            arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-inline std::vector<std::string> buildClangArgs(const CompileOptions& options) {
-    std::vector<std::string> args = options.clang_args;
-    if (!hasLanguageStandardArg(args)) {
-        args.push_back("-std=c++20");
-    }
-    if (!options.vullib_dir.empty()) {
-        args.push_back("-I" + options.vullib_dir);
-    }
-    for (const auto& include_dir : options.include_dirs) {
-        if (!include_dir.empty()) args.push_back("-I" + include_dir);
-    }
-    return args;
-}
-
-inline std::string joinCodeLines(const std::vector<std::string>& codelines) {
-    std::ostringstream os;
-    for (const auto& line : codelines) {
-        os << line;
-        if (line.empty() || line.back() != '\n') os << '\n';
-    }
-    return os.str();
-}
-
-inline std::vector<std::string> splitCodeLines(const std::string& output) {
-    std::vector<std::string> lines;
-    std::size_t begin = 0;
-    while (begin < output.size()) {
-        std::size_t end = output.find('\n', begin);
-        if (end == std::string::npos) {
-            lines.push_back(output.substr(begin));
-            break;
-        }
-        lines.push_back(output.substr(begin, end - begin + 1));
-        begin = end + 1;
-    }
-    if (lines.empty()) lines.push_back("");
-    return lines;
-}
-
-inline SourceLoc convertLoc(const pred::DebugLoc& loc) {
-    SourceLoc out;
-    out.file = loc.file;
-    out.line = loc.line;
-    out.column = loc.column;
-    out.end_line = loc.end_line;
-    out.end_column = loc.end_column;
-    return out;
-}
-
-inline std::optional<SourceLoc> convertLoc(const std::optional<pred::DebugLoc>& loc) {
-    if (!loc || !loc->valid()) return std::nullopt;
-    return convertLoc(*loc);
-}
-
-inline std::vector<SourceLoc> convertLocs(const std::vector<pred::DebugLoc>& locs) {
-    std::vector<SourceLoc> out;
-    out.reserve(locs.size());
-    for (const auto& loc : locs) {
-        if (loc.valid()) out.push_back(convertLoc(loc));
-    }
-    return out;
-}
-
-inline std::vector<RtlSignalDebugInfo> convertDebugSignals(
-    const std::vector<pred::rtlgen::RtlDebugSignal>& signals) {
-    std::vector<RtlSignalDebugInfo> out;
-    out.reserve(signals.size());
-    for (const auto& signal : signals) {
-        RtlSignalDebugInfo converted;
-        converted.node_id = signal.id;
-        converted.signal_name = signal.signal_name;
-        converted.rtl_line = signal.rtl_line;
-        converted.port_name = signal.port_name;
-        converted.port_element_index = signal.port_element_index;
-        converted.decl_loc = convertLoc(signal.decl_loc);
-        converted.primary_locs = convertLocs(signal.primary_locs);
-        converted.related_locs = convertLocs(signal.related_locs);
-        converted.messages = signal.messages;
-        for (const auto& node : signal.derived_nodes) {
-            converted.derived_signals.push_back(
-                RtlDerivedSignalDebugInfo{node.id, node.name});
-        }
-        converted.derived_names = signal.derived_names;
-        out.push_back(std::move(converted));
-    }
-    return out;
-}
-
-inline CompileResult compileSource(const CompileOptions& options, OutputKind output_kind) {
-    if (options.source_codelines.empty()) return {{}, "", {}, {}, "", {}, {}, "", {}, {}, "source_codelines must not be empty"};
-    if (options.top_function.find_first_not_of(" \t\r\n") == std::string::npos) {
-        return {{}, "", {}, {}, "", {}, {}, "", {}, {}, "top_function must not be empty"};
-    }
-
-    pred::pipelinev2::PipelineConfig config;
-    config.source_name = options.source_name.empty()
-        ? "rtlzz_input.logic.cpp"
-        : options.source_name;
-    config.source_text = joinCodeLines(options.source_codelines);
-    config.top_function = options.top_function;
-    config.clang_args = buildClangArgs(options);
-    config.unroll_limit = options.unroll_limit;
-    config.max_leaf_symbols = options.max_leaf_symbols;
-    config.beopt_args = options.beopt_args;
-    config.use_circt = options.use_circt;
-    config.progress_callback = options.progress_callback;
-    config.rtl_module_body = options.rtl_module_body;
-    config.rtl_port_bindings = options.rtl_port_bindings;
-    switch (options.rtl_debug) {
-    case RtlDebugMode::None:
-        config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::None;
-        break;
-    case RtlDebugMode::Structured:
-        config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::Structured;
-        break;
-    case RtlDebugMode::Text:
-        config.rtl_debug_output = pred::pipelinev2::RtlDebugOutputKind::Text;
-        break;
-    }
-    if (output_kind == OutputKind::Beir) {
-        config.output_kind = pred::pipelinev2::OutputKind::Beir;
-    } else if (output_kind == OutputKind::PortMetadata) {
-        config.output_kind = pred::pipelinev2::OutputKind::PortMetadata;
-    } else {
-        config.output_kind = pred::pipelinev2::OutputKind::Rtl;
-    }
-
-    auto result = pred::pipelinev2::compile(config);
-    if (!result.ok()) {
-        CompileResult out;
-        out.error = result.error;
-        out.error_debug_text = result.error_debug_text;
-        out.error_debug_codelines = result.error_debug_text.empty()
-            ? std::vector<std::string>{}
-            : splitCodeLines(result.error_debug_text);
-        out.error_debug_signals = convertDebugSignals(result.error_rtl_debug_signals);
-        out.error_signal_debug_text = result.error_signal_debug_text;
-        out.error_signal_debug_codelines = result.error_signal_debug_text.empty()
-            ? std::vector<std::string>{}
-            : splitCodeLines(result.error_signal_debug_text);
-        out.error_signal_debug_signals = convertDebugSignals(result.error_signal_debug_signals);
-        return out;
-    }
-    CompileResult out;
-    out.output_codelines = splitCodeLines(result.output_text);
-    out.debug_text = result.rtl_debug_text;
-    out.debug_codelines = result.rtl_debug_text.empty()
-        ? std::vector<std::string>{}
-        : splitCodeLines(result.rtl_debug_text);
-    out.debug_signals = convertDebugSignals(result.rtl_debug_signals);
-    return out;
-}
-
-} // namespace detail
-
-inline CompileResult compileToRtl(CompileOptions options) {
-    return detail::compileSource(options, detail::OutputKind::Rtl);
-}
-
-inline CompileResult compileToPortMetadata(CompileOptions options) {
-    return detail::compileSource(options, detail::OutputKind::PortMetadata);
-}
-
-inline CompileResult compileToBeir(CompileOptions options) {
-    return detail::compileSource(options, detail::OutputKind::Beir);
-}
+// API facade implemented in rtlzz.cpp, linked through predicate-expand-objects.
+// Example (after setting source_codelines, top_function and include paths):
+//   options.register_stages = 2;
+//   options.operation_delay_weights[PipelineOperation::Multiply] = 4.0;
+//   options.timing_relaxation_ratio = 0.05;
+//   auto result = compileToRtl(options);
+//   if (result.ok() && result.pipeline_report) {
+//       auto bits = result.pipeline_report->register_bits;
+//   }
+CompileResult compileToRtl(CompileOptions options);
+// Port metadata includes pipeline clock/cycle information for positive stages;
+// pipeline_report is not populated because scheduling is skipped for metadata.
+CompileResult compileToPortMetadata(CompileOptions options);
+// Positive stages include scheduling and register information in the BEIR text.
+CompileResult compileToBeir(CompileOptions options);
 
 } // namespace rtlzz

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend/beir.hpp"
+#include "backend/pipeline.hpp"
 
 #include <optional>
 #include <string>
@@ -30,6 +31,10 @@ struct RtlDebugSignal {
 };
 
 std::string emitSystemVerilog(const beir::Program& program);
+std::string emitSystemVerilog(const pipeline::Program& program);
+std::string emitSystemVerilogBody(
+    const pipeline::Program& program,
+    const std::vector<std::pair<std::string, std::string>>& port_bindings);
 // Emit declarations and statements for insertion into an existing module.
 // Each binding maps an RTLZZ port name to a signal in the containing module.
 std::string emitSystemVerilogBody(

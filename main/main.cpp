@@ -14,7 +14,7 @@ static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <source.cpp> --top <function_name> [--format beir|rtl|portmeta]"
               << " [--input source.cpp] [--vullib DIR] [--unroll-limit N]"
-              << " [--max-leaf-symbols N]"
+              << " [--max-leaf-symbols N] [--latency N] [--clock-name NAME]"
               << " [--beopt OPT ...] [--circt] [--clang-arg ARG ...] [-o output_file]"
               << " [--release|-r] [--rtl-debug-file FILE] [--no-rtl-debug]\n";
     std::cerr << "Required: source.cpp and --top. Default format is rtl.\n";
@@ -23,6 +23,7 @@ static void printUsage(const char* prog) {
     std::cerr << "Default --vullib is ./vullib from the current working directory.\n";
     std::cerr << "Default clang language mode is -std=c++20 unless --clang-arg already sets -std.\n";
     std::cerr << "Default --max-leaf-symbols is 0 (no artificial S7 leaf-symbol limit).\n";
+    std::cerr << "--latency N inserts N internal register boundaries; external output capture is N+1 cycles. Default is 0.\n";
 }
 
 static std::vector<std::string> splitArgs(const std::string& text) {
@@ -186,6 +187,8 @@ static int runMain(int argc, char* argv[]) {
     std::string rtl_debug_file;
     std::string vullib_dir;
     int unroll_limit = 1024;
+    int register_stages = 0;
+    std::string clock_name = "clk";
     std::size_t max_leaf_symbols = 0;
     bool emit_rtl_debug = true;
     bool release = false;
@@ -226,6 +229,16 @@ static int runMain(int argc, char* argv[]) {
                 std::cerr << "Invalid --unroll-limit '" << value << "': " << error << "\n";
                 return 1;
             }
+        } else if (arg == "--latency" && i + 1 < argc) {
+            std::size_t stages = 0;
+            std::string error;
+            if (!parseLeafSymbolLimit(argv[++i], stages, error) || stages >= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+                std::cerr << "Invalid --latency: expected a non-negative integer less than INT_MAX\n";
+                return 1;
+            }
+            register_stages = static_cast<int>(stages);
+        } else if (arg == "--clock-name" && i + 1 < argc) {
+            clock_name = argv[++i];
         } else if (arg == "--max-leaf-symbols" && i + 1 < argc) {
             std::string error;
             std::string value = argv[++i];
@@ -287,6 +300,8 @@ static int runMain(int argc, char* argv[]) {
     options.source_name = source_file;
     options.top_function = top_function;
     options.unroll_limit = unroll_limit;
+    options.register_stages = register_stages;
+    options.clock_name = clock_name;
     options.max_leaf_symbols = max_leaf_symbols;
     options.clang_args = std::move(clang_args);
     options.beopt_args = std::move(beopt_args);
