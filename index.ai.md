@@ -55,7 +55,7 @@ done
 ### `src/rtlzz.hpp`
 - 公开 API 声明；实现和内部配置转换位于 `src/rtlzz.cpp`，公开头文件仅依赖标准库。
 - 提供 `rtlzz::CompileOptions`、`rtlzz::CompileResult`、强类型 `PipelineOperation` 和 `PipelineReport`。
-- 流水线配置直接展开于 `CompileOptions`：N 个内部寄存器级、时钟、相对运算成本和时序容差（默认 5%）；N=0 保留组合路径。可选 reset 配置指定名称、极性和输入初值。
+- 流水线配置直接展开于 `CompileOptions`：N 个内部寄存器级、时钟、相对运算成本和时序容差（默认 5%）；N=0 保留组合路径。可选 reset 配置指定名称、极性和输入初值；`input_valid_name` / `output_valid_name` 成对指定 bool 标量端口，输出由后端独占驱动。
 - `PipelineReport::output_reset_values` 按端口名返回低位 limb 在前的初值；数组按 row-major 顺序逐元素独立补齐 limb。
 - `CompileOptions::progress_callback` 是可选状态回调，逐阶段报告 frontend、逐轮报告 backend optimizer；未设置时 API 保持静默。
 - 提供 `compileToRtl`、`compileToBeir`、`compileToPortMetadata`，内部全部调用 `pipelinev2`。
@@ -216,6 +216,7 @@ done
 ### `src/s6inline/S6Inline.cpp`
 - 在 CFG 层 clone callee CFG、绑定参数、重命名局部、连接 return blocks 到 caller continuation。
 - 支持 helper/lambda、多级调用、重载、loop body 内调用和递归检测。
+- 参数重新绑定时保留扩宽 cast 的源 signed view，确保 builtin 有符号字段到更宽整数的符号扩展；等宽／窄化 cast 继续按位复制／截断。
 - `ConstRef` 的 lvalue 实参直接绑定为 caller lvalue alias；全局输入端口提升出的只读聚合参数不会在每个 helper 调用点复制并于 S7 重复展平。rvalue const-ref 仍创建独立存储。
 
 ### `src/s6inline/checklist.md`
@@ -345,7 +346,12 @@ done
 - 独立流水线 IR 保留组合 BEIR、节点阶段、物化图及寄存器 D/Q 边界表。
 - 确定性搜索时序基准，并在相对时序容差硬约束内局部移动节点，减少实际寄存器总位数；不拆分单个运算。
 - 对齐数据、条件、索引和数组依赖，共享延迟链，常量不插寄存器；物化后不运行组合 BEOPT。
+- 数据物化后生成独立 valid 链，各数据寄存器由来源阶段 valid 使能，直接 valid 引用重定向至计算阶段节点；valid 每周期推进，报告包含完整链位数。
 - 报告各级估计延迟和寄存器位数；输出保持外部寄存器 D wire，N 个内部级对应外部输出采样 N+1 周期。
+
+### `src/backend/pipeline_valid.hpp` / `src/backend/pipeline_valid.cpp`
+- 在 frontend 中校验 valid 端口名、bool 标量类型和方向，禁止用户访问由后端独占的 valid 输出。
+- 为该输出提供常量占位定义以通过 SSA；实际 valid 驱动仅在寄存器物化后生成，数据输出仍要求完整定义。
 
 ### `src/backend/pipeline_reset.cpp`
 - 以任意位宽 APInt 沿调度／物化 DAG 求值输入初值，不改写图；设置各 `Register::reset_values` 和 `PipelineReport::output_reset_values`。
@@ -368,87 +374,6 @@ done
 - 支持标量组合运算、首真优先 Case、Aggregate-backed signal Lookup、动态位/片选择和动态位/片写入；module-body 端口绑定按 row-major 还原全部数组维度（包括单元素数组）；动态操作被 lower 为明确的组合选择网络。
 - `--circt` / `CompileOptions::use_circt` 显式启用。CIRCT 缺失、IR 不支持或优化失败均为编译错误，不回退 native emitter；非 release 调用保留输入 MLIR、导出输出和 stderr 以供诊断。
 - RTL emission 将全常量 Aggregate 的 Lookup/ArrayAccess 输出为组合 case 查表函数；按元素类型、表长及规范化常量位值建立哈希索引，以完整比较处理哈希冲突，同一模块内相同表复用函数；可追踪赋值及无符号宽度转换链，省略不再被使用的数组，运行时表项保持数组读取。
-
-## Tests And Fixtures
-
-### `testv2/pipeline_reset_test.cpp`
-- 验证内部级数 0/1/3/8、宽值与数组 limb、lookup、动态写、有符号移位、非法配置和复位极性；可选输出 module-body 复位 testbench，验证复位保持、释放和在途复位。
-
-
-### `testv2/s1apinorm_test.cpp`
-- S1 API lowering、decl normalization、construct/call/assign init 语义测试。
-
-### `testv2/s2validate_test.cpp`
-- S2 支持子集校验、非法 proxy/引用/struct port/unknown call/递归测试。
-
-### `testv2/s3statementize_test.cpp`
-- S3 expression lifting、call lifting、temp symbol、signed view attachment 测试。
-
-### `testv2/s4cfg_test.cpp`
-- 手写 AST 到 S4 CFG 的控制流结构测试。
-
-### `testv2/s4cfg_integration_test.cpp`
-- C++ fixture 经 S0-S4 的 CFG 集成测试。
-
-### `testv2/s5unroll_test.cpp`
-- S5 loop unroll 单元测试。
-
-### `testv2/s5unroll_integration_test.cpp`
-- C++ fixture 经 S0-S5 的 loop unroll 集成测试。
-
-### `testv2/s6inline_test.cpp`
-- S6 helper/lambda inline、overload、多级调用、递归检测测试。
-
-### `testv2/s7flatten_test.cpp`
-- S7 struct/array flatten、aggregate、dynamic lookup/write 测试。
-
-### `testv2/s8opnorm_test.cpp`
-- S8 operation normalization、literal、signed view、div/mod lowering 测试。
-
-### `testv2/s9ssa_test.cpp`
-- S9 SSA conversion、merge、lookup write lowering 测试。
-
-### `testv2/s10predicate_test.cpp`
-- S10 predicate lowering 和 internal verify/simplify 测试。
-
-### `testv2/s11beir_test.cpp`
-- S11 BEIR conversion、array port、lookup/operation mapping 测试。
-
-### `testv2/fixtures/int_misc.logic.cpp`
-- End-to-end integer/fixint API fixture：arithmetic、bit op、shift、compare、slice、pick、cat/repeat/reduce、cast、enum、standard integer mixing；乘法覆盖左右混合符号、双有符号、不同位宽和结果截断。
-- 合并动态位段/单 bit 写入顺序、RHS/LHS 自增求值顺序、128 位常量循环、运行时数据静态切片、相邻/重叠/稀疏位段更新、位宽截断、符号窄化与宽位移回归。
-
-### `testv2/fixtures/flatten_misc.logic.cpp`
-- End-to-end struct/array/aggregate/dynamic index/constant lookup fixture；包含 AES SBOX 常量 ROM 的两个动态索引读取。
-
-### `testv2/fixtures/controlflow_misc.logic.cpp`
-- End-to-end nested if/switch/loop、dynamic break/continue、early-return fixture；包含互斥/优先级选择、谓词链、六路分支判断与短路求值。
-
-### `testv2/fixtures/inline_misc.logic.cpp`
-- End-to-end helper/lambda inline、overload、parameter/return fixture；包含 32×64-bit 大数组端口经嵌套 helper 读取与有符号比较 helper。
-
-## Scripts
-
-### `scripts/differential_rtl.py`
-- V2 RTL differential harness。
-- `write_data_guards(...)` 按后端约定匹配同名后缀、相同维度的一位 wen 输出，仅在对应使能为零时跳过 wdata 比较；复位值与使能始终严格比较。`scripts/differential_rtl_test.py` 验证标量/数组配对、维度与方向拒绝以及其他观察者保护。
-- `--circt` 仅让 RTL 生成阶段走 CIRCT；端口元数据仍来自同一 BEIR 程序，因此 C++ oracle、随机输入和比较规则与 native 后端完全相同。驱动读取实际顶层 RTL 端口声明，对齐 CIRCT 的关键字改名（例如 `input` → `input_0`），保持 oracle 的源码端口名及比较标签不变。
-- 生成 port metadata、RTL、C++ oracle 和 Verilator testbench；oracle 直接写入源文件全局 input port、调用无参 top、读取全局 output port，并比较随机输入下的输出。
-- `--input-config` 加载 fixture manifest，重复的 `--input-range NAME=MIN:MAX` 可覆盖单个输入范围；配置会校验输入名、闭区间顺序和端口位宽。oracle 异常退出会报告 case、signal/exit code 与完整触发输入。
-
-## Third Party And Docs
-
-### `third_party/vulsim/vullib/fixint.hpp`
-- VUL fixed-width `Int<N>` runtime header used by source fixtures and C++ oracle。
-
-### `third_party/vulsim/vullib/common.h`
-- VUL common integer aliases and helpers。
-
-### `docs/THIRD_PARTY_NOTICES.md`
-- Third-party notices。
-
-### `roadmap.md`
-- V2 pipeline stage responsibilities and long-term compiler route。
 
 
 ### `src/backend/beopt_slices.hpp`

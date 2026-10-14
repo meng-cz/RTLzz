@@ -84,6 +84,7 @@ std::uint64_t bits(const ValueType& type) {
 struct Graph {
     const beir::Program& p;
     int last;
+    NodeId valid_input = kInvalidNodeId, valid_output = kInvalidNodeId;
     std::vector<NodeId> order;
     std::vector<std::vector<NodeId>> users;
     std::vector<bool> live, input, output, constant;
@@ -93,6 +94,18 @@ struct Graph {
         : p(program), last(options.register_stages), users(p.signals.size()),
           live(p.signals.size()), input(live.size()), output(live.size()),
           constant(live.size()), costs(live.size()) {
+        if (!options.input_valid_name.empty()) {
+            for (const auto& port : p.ports) {
+                if (port.name != options.input_valid_name && port.name != options.output_valid_name) continue;
+                const bool is_input = port.name == options.input_valid_name;
+                if (port.direction != (is_input ? PortDirection::Input : PortDirection::Output) ||
+                    port.type.width != 1 || port.type.isArray() || port.element_nodes.size() != 1)
+                    throw std::runtime_error("pipeline: invalid valid port: " + port.name);
+                (is_input ? valid_input : valid_output) = port.element_nodes.front();
+            }
+            if (valid_input == kInvalidNodeId || valid_output == kInvalidNodeId)
+                throw std::runtime_error("pipeline: unknown valid port");
+        }
         std::vector<NodeId> pending;
         for (const auto& port : p.ports) {
             for (auto id : port.element_nodes) {
@@ -200,6 +213,7 @@ struct Graph {
             if (constant[id]) continue;
             int end = stage[id];
             for (auto user : users[id]) end = std::max(end, stage[user]);
+            if (id == valid_input) end = last; // Dedicated chain, independent of data consumers.
             auto width = bits(p.signal(id).type);
             auto length = static_cast<std::uint64_t>(end - stage[id]);
             if (length && width > (UINT64_MAX - r.register_bits) / length)
@@ -222,6 +236,10 @@ void validateOptions(const Options& o) {
         if (k < Key::Assign || k > Key::Call || !std::isfinite(v) || v < 0)
             throw std::runtime_error("pipeline: invalid operation delay weight");
     }
+    if (o.input_valid_name.empty() != o.output_valid_name.empty())
+        throw std::runtime_error("pipeline: input_valid_name and output_valid_name must be configured together");
+    if (!o.input_valid_name.empty() && o.input_valid_name == o.output_valid_name)
+        throw std::runtime_error("pipeline: valid input and output names must differ");
     if (o.reset_enabled) {
         if (o.reset_name.empty() || !(std::isalpha(static_cast<unsigned char>(o.reset_name[0])) || o.reset_name[0] == '_') ||
             o.reset_name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos || rtl_names::isSystemVerilogKeyword(o.reset_name))
@@ -243,18 +261,30 @@ Program build(const beir::Program& program, const Options& options) {
     result.options = options;
     result.combinational = program;
     result.rtl_program = program;
+    if (!options.register_stages && !options.reset_enabled && options.input_valid_name.empty()) return result;
+    Graph g(program, options);
+    if (g.valid_input != kInvalidNodeId) result.valid_nodes.push_back(g.valid_input);
+    auto connect_valid_output = [&]() {
+        if (result.valid_nodes.empty()) return;
+        auto& output = result.rtl_program.signal(g.valid_output);
+        output.value = {}; // Discard the frontend constant placeholder facts.
+        Operation driver; driver.kind = OperationKind::Assign; driver.type = output.type;
+        Operand value; value.kind = OperandKind::Symbol; value.node = result.valid_nodes.back(); value.type = output.type;
+        driver.operands.push_back(value); output.driver = std::move(driver);
+        addDebugMessage(output.debug, "backend-owned pipeline valid output");
+    };
     if (!options.register_stages) {
-        if (options.reset_enabled) {
-            Graph graph(program, options);
+        if (options.reset_enabled || !result.valid_nodes.empty()) {
+            const auto& graph = g;
             result.stages.assign(program.signals.size(), 0);
             result.report = graph.evaluate(result.stages);
             result.report.baseline_delay = result.report.final_delay;
             result.report.allowed_delay = result.report.final_delay * (1 + options.timing_relaxation_ratio);
         }
+        connect_valid_output();
         initializeResetValues(result);
         return result;
     }
-    Graph g(program, options);
     double upper = 0, lower = 0;
     for (auto id : g.order) {
         upper += g.costs[id]; lower = std::max(lower, g.costs[id]);
@@ -313,7 +343,7 @@ Program build(const beir::Program& program, const Options& options) {
     // The emitter performs its full reserved-keyword and sanitized-name check.
     for (auto id : g.order) {
         delayed[id].push_back(id);
-        if (g.constant[id]) continue;
+        if (g.constant[id] || id == g.valid_input) continue;
         int end = result.stages[id];
         for (auto user : g.users[id]) end = std::max(end, result.stages[user]);
         for (int stage = result.stages[id] + 1; stage <= end; ++stage) {
@@ -334,6 +364,27 @@ Program build(const beir::Program& program, const Options& options) {
             rtl.signals.push_back(std::move(reg));
         }
     }
+    // Materialize one shared valid chain after all ordinary data registers.
+    // Valid always advances, including bubbles; data captures only valid sources.
+    if (g.valid_input != kInvalidNodeId) {
+        for (int stage = 1; stage <= options.register_stages; ++stage) {
+            Signal reg; reg.id = rtl.signals.size();
+            reg.name = "rtlzz_valid_s" + std::to_string(stage);
+            while (!names.insert(reg.name).second) reg.name += "_";
+            reg.type = program.signal(g.valid_input).type;
+            reg.debug = program.signal(g.valid_input).debug;
+            addDebugMessage(reg.debug, "pipeline valid at stage " + std::to_string(stage));
+            Operation driver; driver.kind = OperationKind::Assign; driver.type = reg.type;
+            Operand value; value.kind = OperandKind::Symbol; value.node = result.valid_nodes.back(); value.type = reg.type;
+            driver.operands.push_back(value); reg.driver = std::move(driver);
+            Register entry{reg.id, value.node, stage}; entry.is_valid = true;
+            result.registers.push_back(std::move(entry)); result.valid_nodes.push_back(reg.id);
+            rtl.signals.push_back(std::move(reg));
+        }
+        delayed[g.valid_input] = result.valid_nodes;
+        for (auto& reg : result.registers) if (!reg.is_valid)
+            reg.enable = result.valid_nodes.at(static_cast<std::size_t>(reg.stage - 1));
+    }
     for (auto id : g.order) {
         auto& s = rtl.signal(id);
         if (!s.driver) continue;
@@ -348,6 +399,7 @@ Program build(const beir::Program& program, const Options& options) {
     // Drop dead computations, preserving dense IDs and debug identities.
     for (const auto& original : program.signals)
         if (!g.live[original.id]) rtl.signal(original.id).driver.reset();
+    connect_valid_output();
     initializeResetValues(result);
     if (options.reset_enabled) {
         if (!names.insert(options.reset_name).second) throw std::runtime_error("pipeline: reset name collides with data port, signal or clock");
@@ -395,12 +447,30 @@ void validateProgram(const Program& p) {
         if (storage > UINT64_MAX - width) throw std::runtime_error("pipeline: register storage overflow");
         storage += width;
     }
+    if (g.valid_input != kInvalidNodeId) {
+        if (p.valid_nodes.size() != static_cast<std::size_t>(g.last)+1 || p.valid_nodes.front() != g.valid_input)
+            throw std::runtime_error("pipeline: invalid valid chain");
+        for (const auto& reg : p.registers) {
+            if (reg.is_valid != (reg.node == p.valid_nodes.at(reg.stage)))
+                throw std::runtime_error("pipeline: invalid valid register role");
+            if (reg.is_valid) {
+                if (reg.node != p.valid_nodes.at(reg.stage) || reg.source != p.valid_nodes.at(reg.stage-1) || reg.enable != kInvalidNodeId)
+                    throw std::runtime_error("pipeline: invalid valid register");
+            } else if (reg.enable != p.valid_nodes.at(reg.stage-1))
+                throw std::runtime_error("pipeline: invalid data register enable");
+        }
+        const auto& output = p.rtl_program.signal(g.valid_output);
+        if (!output.driver || output.driver->kind != OperationKind::Assign || output.driver->operands.size() != 1 ||
+            output.driver->operands.front().kind != OperandKind::Symbol || output.driver->operands.front().node != p.valid_nodes.back())
+            throw std::runtime_error("pipeline: invalid valid output");
+    } else if (!p.valid_nodes.empty() || std::any_of(p.registers.begin(), p.registers.end(), [](const auto& r) { return r.is_valid || r.enable != kInvalidNodeId; }))
+        throw std::runtime_error("pipeline: unexpected valid state");
     if (storage != expected.register_bits) throw std::runtime_error("pipeline: register storage mismatch");
     for (auto id : g.order) {
         const auto& before = p.combinational.signal(id);
         const auto& after = p.rtl_program.signal(id);
         if (!sameType(before.type, after.type)) throw std::runtime_error("pipeline: computation type changed");
-        if (!before.driver) continue;
+        if (!before.driver || id == g.valid_output) continue;
         if (!after.driver || before.driver->operands.size() != after.driver->operands.size())
             throw std::runtime_error("pipeline: computation driver changed");
         for (std::size_t i = 0; i < before.driver->operands.size(); ++i) {
@@ -426,6 +496,8 @@ std::string emitReport(const Program& p) {
        << "baseline register bits " << p.report.baseline_register_bits << "\n"
        << "register bits " << p.report.register_bits << "\n"
        << "register count " << p.report.register_count << "\n";
+    if (!p.valid_nodes.empty()) os << "valid input " << p.options.input_valid_name << " output " << p.options.output_valid_name
+        << " internal registers " << p.valid_nodes.size()-1 << "\n";
     for (std::size_t i = 0; i < p.report.stage_delays.size(); ++i)
         os << "stage " << i << " delay " << p.report.stage_delays[i] << "\n";
     for (const auto &[name, values] : p.report.output_reset_values) {
@@ -441,8 +513,12 @@ std::string emitText(const Program& p) {
     os << emitReport(p);
     for (std::size_t id = 0; id < p.stages.size(); ++id)
         os << "node #" << id << " stage " << p.stages[id] << "\n";
-    for (const auto& r : p.registers)
-        os << "register #" << r.node << " <- #" << r.source << " stage " << r.stage << "\n";
+    for (const auto& r : p.registers) {
+        os << "register #" << r.node << " <- #" << r.source << " stage " << r.stage;
+        if (r.is_valid) os << " valid";
+        if (r.enable != kInvalidNodeId) os << " enable #" << r.enable;
+        os << "\n";
+    }
     os << beir::emitText(p.rtl_program);
     return os.str();
 }

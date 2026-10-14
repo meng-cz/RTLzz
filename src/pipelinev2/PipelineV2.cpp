@@ -1,5 +1,6 @@
 #include "pipelinev2/PipelineV2.h"
 #include "backend/rtl_names.hpp"
+#include "backend/pipeline_valid.hpp"
 
 #include "backend/beopt.hpp"
 #include "backend/circt_bridge.hpp"
@@ -329,15 +330,21 @@ std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program,
     os << "  \"function\": ";
     emitJsonString(os, fn.name);
     os << ",\n";
-    if (pipeline && pipeline->register_stages > 0) {
+    if (pipeline && (pipeline->register_stages > 0 || !pipeline->input_valid_name.empty())) {
         os << "  \"pipeline\": {\"register_stages\": " << pipeline->register_stages
-           << ", \"external_capture_cycles\": " << (pipeline->register_stages + 1)
-           << ", \"clock_name\": ";
-        emitJsonString(os, pipeline->clock_name);
-        if (pipeline->reset_enabled) {
-            os << ", \"reset_name\": ";
-            emitJsonString(os, pipeline->reset_name);
-            os << ", \"reset_active_low\": " << (pipeline->reset_active_low ? "true" : "false");
+           << ", \"external_capture_cycles\": " << (pipeline->register_stages + 1);
+        if (pipeline->register_stages > 0) {
+            os << ", \"clock_name\": ";
+            emitJsonString(os, pipeline->clock_name);
+            if (pipeline->reset_enabled) {
+                os << ", \"reset_name\": ";
+                emitJsonString(os, pipeline->reset_name);
+                os << ", \"reset_active_low\": " << (pipeline->reset_active_low ? "true" : "false");
+            }
+        }
+        if (!pipeline->input_valid_name.empty()) {
+            os << ", \"input_valid_name\": "; emitJsonString(os, pipeline->input_valid_name);
+            os << ", \"output_valid_name\": "; emitJsonString(os, pipeline->output_valid_name);
         }
         os << "},\n";
     }
@@ -421,7 +428,7 @@ PipelineResult compile(const PipelineConfig& config) {
     try {
         if (config.pipeline) {
             pipeline::validateOptions(*config.pipeline);
-            if (config.pipeline->register_stages > 0 && config.use_circt)
+            if ((config.pipeline->register_stages > 0 || !config.pipeline->input_valid_name.empty()) && config.use_circt)
                 return errorResult("config", "CIRCT does not support automatic pipelines");
         }
         const auto report_frontend_stage = [&config](const char* stage) {
@@ -443,7 +450,9 @@ PipelineResult compile(const PipelineConfig& config) {
                    s0ast::debugPrint(*s0.program);
         };
         report_frontend_stage("s1apinorm");
-        s1 = s1apinorm::normalizeAPIs(s0ast::surfaceAST(*s0.program));
+        auto surface = s0ast::surfaceAST(*s0.program);
+        if (config.pipeline) pipeline::prepareValidOutput(surface, *config.pipeline);
+        s1 = s1apinorm::normalizeAPIs(surface);
         if (!s1.ok()) return errorResult("s1apinorm", stageError(s1.error), stageContext(s1.error), current_debug_text);
         if (!s1.function) return errorResult("s1apinorm", "stage produced no function", std::nullopt, current_debug_text);
         current_debug_text = [&s1]() { return "latest successful stage: s1apinorm\n" + s1apinorm::debugPrint(*s1.function, s1.summaries); };
@@ -556,7 +565,7 @@ PipelineResult compile(const PipelineConfig& config) {
         };
 
         PipelineResult result;
-        if (config.pipeline && (config.pipeline->register_stages > 0 || config.pipeline->reset_enabled)) {
+        if (config.pipeline && (config.pipeline->register_stages > 0 || config.pipeline->reset_enabled || !config.pipeline->input_valid_name.empty())) {
             if (config.progress_callback) config.progress_callback("RTLzz pipeline scheduling and register materialization");
             result.pipeline_program = pipeline::build(beir_program, *config.pipeline);
             result.pipeline_report = result.pipeline_program->report;

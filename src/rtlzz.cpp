@@ -137,6 +137,8 @@ CompileResult compileSource(const CompileOptions& options, OutputKind output_kin
     config.pipeline.emplace();
     config.pipeline->register_stages = options.register_stages;
     config.pipeline->clock_name = options.clock_name;
+    config.pipeline->input_valid_name = options.input_valid_name;
+    config.pipeline->output_valid_name = options.output_valid_name;
     config.pipeline->reset_enabled = options.reset_enabled;
     config.pipeline->reset_name = options.reset_name;
     config.pipeline->reset_active_low = options.reset_active_low;

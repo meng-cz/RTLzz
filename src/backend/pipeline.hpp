@@ -16,6 +16,8 @@ struct Options {
     std::string clock_name = "clk";
     std::map<rtlzz::PipelineOperation, double> operation_delay_weights;
     double timing_relaxation_ratio = 0.05;
+    std::string input_valid_name;
+    std::string output_valid_name;
     bool reset_enabled = false;
     std::string reset_name = "rstn";
     bool reset_active_low = true;
@@ -29,6 +31,8 @@ struct Register {
     beir::NodeId source;
     int stage;
     std::vector<std::uint64_t> reset_values;
+    beir::NodeId enable = beir::kInvalidNodeId;
+    bool is_valid = false;
 };
 
 // Sequential semantics live here, never in combinational BEOPT. Drivers on
@@ -40,6 +44,8 @@ struct Program {
     Options options;
     std::vector<int> stages; // Original NodeId -> computation stage.
     std::vector<Register> registers;
+    // Stage 0 is the input valid; stages 1..N are always-advancing registers.
+    std::vector<beir::NodeId> valid_nodes;
     Report report;
 };
 

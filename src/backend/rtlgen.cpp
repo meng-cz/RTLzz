@@ -749,6 +749,7 @@ private:
             os << "        end else begin\n";
         }
         for (const auto& reg : pipeline_->registers) {
+            if (reg.enable != beir::kInvalidNodeId) os << "        if (" << sig(reg.enable) << ") begin\n";
             const auto& signal = program_.signal(reg.node);
             if (signal.type.isArray()) {
                 for (int i = 0; i < flattenedArraySize(signal.type); ++i) {
@@ -760,6 +761,7 @@ private:
                 os << "        " << sig(reg.node) << " <= " << sig(reg.source)
                    << ";" << debugComment(signal.debug) << "\n";
             }
+            if (reg.enable != beir::kInvalidNodeId) os << "        end\n";
         }
         if (pipeline_->options.reset_enabled) os << "        end\n";
         os << "    end\n";

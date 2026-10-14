@@ -109,7 +109,8 @@ struct CompileOptions {
     // Emit RTL through the external CIRCT HW/Comb bridge.  This is opt-in;
     // failures are reported rather than falling back to the native emitter.
     // Positive register_stages is supported only by the native backend; using
-    // CIRCT with a positive stage count reports a compilation error.
+    // CIRCT with a positive stage count or an explicit valid channel reports
+    // a compilation error.
     bool use_circt = false;
     // Optional progress hook used by embedding tools. It reports frontend
     // stages and backend optimization iterations; standalone calls are silent.
@@ -124,7 +125,7 @@ struct CompileOptions {
     // stages. Zero preserves combinational RTL. Inputs and outputs remain wire
     // ports connected to external input-register Q / output-register D.
     // Input launched at edge k settles at output after edge k+N; an external
-    // output register captures it at k+N+1. No valid/ready or stalling; reset is opt-in below;
+    // output register captures it at k+N+1. No ready or stalling; valid and reset are opt-in below;
     // Without reset, ignore outputs until the pipeline fills. Operations are indivisible.
     // Must be non-negative.
     int register_stages = 0;
@@ -142,6 +143,16 @@ struct CompileOptions {
     // none. Must be finite and non-negative. This is a deterministic heuristic,
     // not a guarantee of global optimality or physical timing closure.
     double timing_relaxation_ratio = 0.05;
+    // Optional valid channel, configured together by source port names. Both
+    // must name declared scalar bool ports (input / output respectively).
+    // The output is owned by RTLZZ: declare it but do not read or assign it in
+    // source code. A separate N-bit valid chain advances every clock; data
+    // registers update only when their source stage is valid. Direct reads of
+    // input_valid_name are aligned to the consuming computation stage.
+    // N=0 directly drives the valid output without clock/reset ports. Data is
+    // meaningful only while output valid is true. Native backend only.
+    std::string input_valid_name;
+    std::string output_valid_name;
     // Opt in to reset-value evaluation after scheduling. Supply all input data
     // ports in the same limb layout as PipelineReport::output_reset_values.
     // Sizes must match the port shape; unused high padding bits must be zero.
@@ -171,7 +182,7 @@ struct CompileResult {
     std::vector<std::string> error_signal_debug_codelines;
     std::vector<RtlSignalDebugInfo> error_signal_debug_signals;
     std::string error;
-    // Available for a pipeline or reset-evaluation compilation regardless of debug mode.
+    // Available for pipeline, valid-channel or reset-evaluation compilation regardless of debug mode.
     std::optional<PipelineReport> pipeline_report;
 
     bool ok() const;
@@ -187,7 +198,7 @@ struct CompileResult {
 //       auto bits = result.pipeline_report->register_bits;
 //   }
 CompileResult compileToRtl(CompileOptions options);
-// Port metadata includes clock/cycle and optional reset information for positive stages;
+// Port metadata includes configured valid names and, for positive stages, clock/cycle and reset information;
 // pipeline_report is not populated because scheduling is skipped for metadata.
 CompileResult compileToPortMetadata(CompileOptions options);
 // Positive stages include scheduling and register information in the BEIR text.

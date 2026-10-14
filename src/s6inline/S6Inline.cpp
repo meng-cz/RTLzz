@@ -337,8 +337,15 @@ S3StmtPtr remapStmt(const FunctionCFG& fn, const S3StmtPtr& stmt, const SymbolMa
              binary_op == BinaryOp::Mul || binary_op == BinaryOp::Lt ||
              binary_op == BinaryOp::Le || binary_op == BinaryOp::Gt ||
              binary_op == BinaryOp::Ge);
-        out->op.operands[index] = applyOperandBinding(
-            fn, out->op.operands[index], map, preserve_signed_view);
+        auto operand = applyOperandBinding(
+            fn, out->op.operands[index], map,
+            preserve_signed_view || out->op.kind == OpExpr::Kind::Cast);
+        // Cast operands recover their actual source width during rebinding.
+        // Widening needs the source sign for SExt; equal/narrow builtin casts
+        // copy/truncate bits and must not become explicit signed-view casts.
+        if (out->op.kind == OpExpr::Kind::Cast && out->op.type.width <= operand.type.width)
+            operand.signed_view = false;
+        out->op.operands[index] = std::move(operand);
     }
     if (stmt->call_result) out->call_result = remapLValue(fn, stmt->call_result.value(), map);
     for (auto& arg : out->args) arg = applyOperandBinding(fn, arg, map);
