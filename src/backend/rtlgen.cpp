@@ -732,6 +732,22 @@ private:
     void emitRegisters(std::ostream& os) const {
         if (!pipeline_ || pipeline_->registers.empty()) return;
         os << "    always_ff @(posedge " << pipeline_->options.clock_name << ") begin\n";
+        if (pipeline_->options.reset_enabled) {
+            os << "        if (" << (pipeline_->options.reset_active_low ? "!" : "") << pipeline_->options.reset_name << ") begin\n";
+            for (const auto& reg : pipeline_->registers) {
+                const auto& signal = program_.signal(reg.node);
+                const std::size_t stride = (widthOf(signal.type) + 63) / 64;
+                const int count = signal.type.isArray() ? flattenedArraySize(signal.type) : 1;
+                if (reg.reset_values.size() != stride * count) throw std::runtime_error("pipeline: missing register reset literal");
+                for (int i=0; i<count; ++i) {
+                    beir::Operand::Constant literal;
+                    literal.width = widthOf(signal.type);
+                    literal.limbs.assign(reg.reset_values.begin()+i*stride, reg.reset_values.begin()+(i+1)*stride);
+                    os << "            " << (signal.type.isArray() ? indexedRef(sig(reg.node), linearIndices(signal.type, i)) : sig(reg.node)) << " <= " << constExpr(literal) << ";\n";
+                }
+            }
+            os << "        end else begin\n";
+        }
         for (const auto& reg : pipeline_->registers) {
             const auto& signal = program_.signal(reg.node);
             if (signal.type.isArray()) {
@@ -745,6 +761,7 @@ private:
                    << ";" << debugComment(signal.debug) << "\n";
             }
         }
+        if (pipeline_->options.reset_enabled) os << "        end\n";
         os << "    end\n";
     }
 

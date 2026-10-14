@@ -137,6 +137,10 @@ CompileResult compileSource(const CompileOptions& options, OutputKind output_kin
     config.pipeline.emplace();
     config.pipeline->register_stages = options.register_stages;
     config.pipeline->clock_name = options.clock_name;
+    config.pipeline->reset_enabled = options.reset_enabled;
+    config.pipeline->reset_name = options.reset_name;
+    config.pipeline->reset_active_low = options.reset_active_low;
+    config.pipeline->input_reset_values = options.input_reset_values;
     config.pipeline->operation_delay_weights = options.operation_delay_weights;
     config.pipeline->timing_relaxation_ratio = options.timing_relaxation_ratio;
     config.max_leaf_symbols = options.max_leaf_symbols;

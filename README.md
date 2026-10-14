@@ -119,7 +119,9 @@ reaches the output wire after edge k+N and the last combinational stage settles;
 the external output register captures it at edge k+N+1. With N=0, the existing
 combinational output and port metadata are unchanged. With N>0, the module adds
 a single rising-edge clock input. All outputs share the same transaction delay.
-There is no valid/ready, stall, or reset; ignore output during initial filling.
+There is no valid/ready or stall. Reset is disabled by default; without reset,
+ignore output during initial filling. The API can optionally derive synchronous
+reset values from input initial values (see below).
 
 Module-body generation also supports pipelining. Add `{ "clk", "external_clk" }`
 (or the configured clock name) to `rtl_port_bindings` alongside the existing data

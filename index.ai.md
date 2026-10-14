@@ -49,12 +49,14 @@ done
 ### `main/main.cpp`
 - CLI 参数解析入口。
 - `--release` / `-r` 仅用于 RTL 输出，禁用调试文件及失败快照，优先于显式 debug 文件选项。
-- 读取输入源文件，组装 `rtlzz::CompileOptions`。
+- 读取输入源文件，组装 `rtlzz::CompileOptions`。支持 `--latency N` / `--clock-name NAME`；运算成本和时序容差通过 API 配置。
 - 支持 `--format rtl|beir|portmeta`，并转发 `--top`、`--vullib`、`--unroll-limit`、`--beopt`、`--clang-arg`。
 
 ### `src/rtlzz.hpp`
 - 公开 API 声明；实现和内部配置转换位于 `src/rtlzz.cpp`，公开头文件仅依赖标准库。
-- 提供 `rtlzz::CompileOptions`、`rtlzz::CompileResult`。
+- 提供 `rtlzz::CompileOptions`、`rtlzz::CompileResult`、强类型 `PipelineOperation` 和 `PipelineReport`。
+- 流水线配置直接展开于 `CompileOptions`：N 个内部寄存器级、时钟、相对运算成本和时序容差（默认 5%）；N=0 保留组合路径。可选 reset 配置指定名称、极性和输入初值。
+- `PipelineReport::output_reset_values` 按端口名返回低位 limb 在前的初值；数组按 row-major 顺序逐元素独立补齐 limb。
 - `CompileOptions::progress_callback` 是可选状态回调，逐阶段报告 frontend、逐轮报告 backend optimizer；未设置时 API 保持静默。
 - 提供 `compileToRtl`、`compileToBeir`、`compileToPortMetadata`，内部全部调用 `pipelinev2`。
 
@@ -74,6 +76,7 @@ done
 - 在 S0 至 S11 每个 frontend 阶段开始前触发可选进度回调，并转发 BEIR optimizer 的实际轮次。
 - 在 S7 后可提前输出端口 metadata。
 - 在 S11 后调用 BEIR optimizer，再输出 BEIR 文本或 SystemVerilog。
+- 校验流水线配置，在 BEOPT 后按需调度、物化、求值复位状态并发射原生时序 RTL，汇集报告和时钟／复位 metadata；CIRCT 拒绝正内部级数流水线。
 
 ## Shared V2 AST And Types
 
@@ -338,11 +341,24 @@ done
 ### `src/backend/beopt_width.hpp`
 - width 相关优化和裁剪；支持 operand signed view 影响的扩展语义；Case 的结果宽度取所有分支值与默认值的合并需求，条件保持一位，结果需求反向传播到每个值分支。
 
+### `src/backend/pipeline.hpp` / `src/backend/pipeline.cpp`
+- 独立流水线 IR 保留组合 BEIR、节点阶段、物化图及寄存器 D/Q 边界表。
+- 确定性搜索时序基准，并在相对时序容差硬约束内局部移动节点，减少实际寄存器总位数；不拆分单个运算。
+- 对齐数据、条件、索引和数组依赖，共享延迟链，常量不插寄存器；物化后不运行组合 BEOPT。
+- 报告各级估计延迟和寄存器位数；输出保持外部寄存器 D wire，N 个内部级对应外部输出采样 N+1 周期。
+
+### `src/backend/pipeline_reset.cpp`
+- 以任意位宽 APInt 沿调度／物化 DAG 求值输入初值，不改写图；设置各 `Register::reset_values` 和 `PipelineReport::output_reset_values`。
+- 数组元素按 row-major 顺序独立补齐 limb；诊断缺失／非法初值和未定义的复位计算，支持零内部级数输出初值报告。
+
+### `src/backend/rtl_names.hpp`
+- 共享 RTL 标识符规范化和 SystemVerilog 时钟关键字校验。
+
 ### `src/backend/rtlgen.hpp`
 - 声明 SystemVerilog emitter。
 
 ### `src/backend/rtlgen.cpp`
-- 将 BEIR program emit 为 synthesizable SystemVerilog。
+- 将 BEIR program emit 为 synthesizable SystemVerilog。流水线重载按寄存器表发射非阻塞 `always_ff`，可选同步复位／保持分支直接使用字面量；常量表识别不跨寄存器边界。
 - 乘法分别按左右操作数的 signed view 扩展/截断到结果位宽，再以无符号位模式相乘并显式截断，保证混合符号语义不依赖 BEOPT。
 - 支持 scalar/array ports、BEIR lookup、assign/operation lowering。
 - 原生 BEIR Case 输出为带完整 default 的 `always_comb unique case (1'b1)`，向 RTL 工具声明分支条件互斥；省略位宽适配后的赋值表达式与 default 完全相同的分支。
@@ -354,6 +370,10 @@ done
 - RTL emission 将全常量 Aggregate 的 Lookup/ArrayAccess 输出为组合 case 查表函数；按元素类型、表长及规范化常量位值建立哈希索引，以完整比较处理哈希冲突，同一模块内相同表复用函数；可追踪赋值及无符号宽度转换链，省略不再被使用的数组，运行时表项保持数组读取。
 
 ## Tests And Fixtures
+
+### `testv2/pipeline_reset_test.cpp`
+- 验证内部级数 0/1/3/8、宽值与数组 limb、lookup、动态写、有符号移位、非法配置和复位极性；可选输出 module-body 复位 testbench，验证复位保持、释放和在途复位。
+
 
 ### `testv2/s1apinorm_test.cpp`
 - S1 API lowering、decl normalization、construct/call/assign init 语义测试。
@@ -450,23 +470,3 @@ done
 - `parallelizeExclusiveMuxes` 遍历等宽 Ite 的 true/false 两臂，收集完整路径谓词并转换为一个有序 Case，保留显式默认值。叶路径在分叉处包含相反条件，结构性保证互斥并保留原优先级语义；共享节点和 signed-view 边界保持为叶子。默认最多 1024 个分叉（硬上限 4096），超限候选不修改。
 - `balanceAssociativeTrees` 支持等宽无 signed-view 的 AND/OR/XOR/模加法；默认最多 1024 叶（硬上限 4096），只展开单用户同类节点，不穿越截断/扩展。按到达时间优先合并早到输入，且仅在估计延迟严格下降时重构。
 - 两个 pass 按可观察输出遍历活跃图，修改后使 value facts 失效。
-
-## Automatic Pipeline (after BEOPT)
-
-### `src/rtlzz.hpp`
-- Public `CompileOptions` with expanded pipeline fields, `PipelineOperation` keys, and `PipelineReport`.
-- `CompileOptions::register_stages` and related direct fields: N internal register boundaries, configurable relative operation costs, clock, and timing relaxation (default 5%). N=0 preserves the combinational path.
-
-### `src/backend/pipeline.hpp` / `src/backend/pipeline.cpp`
-- Separate sequential IR: original combinational graph, operation stages, materialized graph and register D/Q boundary table.
-- Deterministic timing-baseline search and local register-bit minimization under a hard relative timing allowance; single operations remain indivisible.
-- Aligns data/control/lookup/array dependencies; reuses delay chains and avoids registering constants. Never passes the materialized graph back into BEOPT.
-- Reports per-stage estimates and actual register storage. Public output ports remain external-register D wires; N internal stages imply N+1 external capture cycles.
-
-### `src/backend/rtl_names.hpp`
-- Shared historical RTL identifier sanitizer and SystemVerilog clock-keyword validation.
-
-### Integration
-- `src/pipelinev2/PipelineV2.cpp`: config validation, optional post-BEOPT scheduling, native sequential emission, report and separate clock metadata. CIRCT rejects positive pipeline stages.
-- `src/backend/rtlgen.cpp`: pipeline overloads emit register nodes as nonblocking `always_ff`; constant-table recognition stops at register boundaries.
-- `main/main.cpp`: `--latency N` / `--clock-name NAME`; operation costs and timing allowance configured through the API.

@@ -41,6 +41,10 @@ struct PipelineReport {
     // Distinct register signals; an array signal counts once, but all its bits
     // are included in register_bits.
     std::size_t register_count = 0;
+    // Computed reset output values, keyed by source output-port name. Each
+    // scalar uses ceil(width/64) little-endian limbs. Array elements are
+    // concatenated in row-major order, with each element independently padded.
+    std::map<std::string, std::vector<std::uint64_t>> output_reset_values;
 };
 
 enum class RtlDebugMode {
@@ -120,8 +124,8 @@ struct CompileOptions {
     // stages. Zero preserves combinational RTL. Inputs and outputs remain wire
     // ports connected to external input-register Q / output-register D.
     // Input launched at edge k settles at output after edge k+N; an external
-    // output register captures it at k+N+1. No reset, valid/ready, or stalling;
-    // ignore outputs until the pipeline fills. Single operations are indivisible.
+    // output register captures it at k+N+1. No valid/ready or stalling; reset is opt-in below;
+    // Without reset, ignore outputs until the pipeline fills. Operations are indivisible.
     // Must be non-negative.
     int register_stages = 0;
     // Rising-edge clock port added only when register_stages > 0. Must be a
@@ -138,6 +142,17 @@ struct CompileOptions {
     // none. Must be finite and non-negative. This is a deterministic heuristic,
     // not a guarantee of global optimality or physical timing closure.
     double timing_relaxation_ratio = 0.05;
+    // Opt in to reset-value evaluation after scheduling. Supply all input data
+    // ports in the same limb layout as PipelineReport::output_reset_values.
+    // Sizes must match the port shape; unused high padding bits must be zero.
+    // Missing/unknown port names are rejected.
+    // Reset-enabled internal registers use synchronous reset, held while active.
+    // With register_stages=0 this only evaluates outputs and populates a report;
+    // it adds no clock/reset ports. Undefined reset computations are errors.
+    bool reset_enabled = false;
+    std::string reset_name = "rstn";
+    bool reset_active_low = true;
+    std::map<std::string, std::vector<std::uint64_t>> input_reset_values;
 };
 
 struct CompileResult {
@@ -156,7 +171,7 @@ struct CompileResult {
     std::vector<std::string> error_signal_debug_codelines;
     std::vector<RtlSignalDebugInfo> error_signal_debug_signals;
     std::string error;
-    // Available for an RTL/BEIR pipeline compilation regardless of debug mode.
+    // Available for a pipeline or reset-evaluation compilation regardless of debug mode.
     std::optional<PipelineReport> pipeline_report;
 
     bool ok() const;
@@ -172,7 +187,7 @@ struct CompileResult {
 //       auto bits = result.pipeline_report->register_bits;
 //   }
 CompileResult compileToRtl(CompileOptions options);
-// Port metadata includes pipeline clock/cycle information for positive stages;
+// Port metadata includes clock/cycle and optional reset information for positive stages;
 // pipeline_report is not populated because scheduling is skipped for metadata.
 CompileResult compileToPortMetadata(CompileOptions options);
 // Positive stages include scheduling and register information in the BEIR text.

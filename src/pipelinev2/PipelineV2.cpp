@@ -334,6 +334,11 @@ std::string portMetadataJson(const s7flatten::S7FlattenedProgram& program,
            << ", \"external_capture_cycles\": " << (pipeline->register_stages + 1)
            << ", \"clock_name\": ";
         emitJsonString(os, pipeline->clock_name);
+        if (pipeline->reset_enabled) {
+            os << ", \"reset_name\": ";
+            emitJsonString(os, pipeline->reset_name);
+            os << ", \"reset_active_low\": " << (pipeline->reset_active_low ? "true" : "false");
+        }
         os << "},\n";
     }
     os << "  \"ports\": [\n";
@@ -482,9 +487,12 @@ PipelineResult compile(const PipelineConfig& config) {
         current_debug_text = [&s7]() { return "latest successful stage: s7flatten\n" + s7flatten::debugPrint(*s7.program, s7.summaries); };
 
         if (config.pipeline && config.pipeline->register_stages > 0) {
-            for (const auto& group : s7.program->top.port_groups)
+            for (const auto& group : s7.program->top.port_groups) {
                 if (rtl_names::sanitizeIdentifier(group.source_name) == config.pipeline->clock_name)
                     return errorResult("config", "pipeline clock name collides with data port: " + group.source_name);
+                if (config.pipeline->reset_enabled && rtl_names::sanitizeIdentifier(group.source_name) == config.pipeline->reset_name)
+                    return errorResult("config", "pipeline reset name collides with data port: " + group.source_name);
+            }
         }
         if (config.output_kind == OutputKind::PortMetadata) {
             PipelineResult result;
@@ -548,7 +556,7 @@ PipelineResult compile(const PipelineConfig& config) {
         };
 
         PipelineResult result;
-        if (config.pipeline && config.pipeline->register_stages > 0) {
+        if (config.pipeline && (config.pipeline->register_stages > 0 || config.pipeline->reset_enabled)) {
             if (config.progress_callback) config.progress_callback("RTLzz pipeline scheduling and register materialization");
             result.pipeline_program = pipeline::build(beir_program, *config.pipeline);
             result.pipeline_report = result.pipeline_program->report;

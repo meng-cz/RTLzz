@@ -222,6 +222,12 @@ void validateOptions(const Options& o) {
         if (k < Key::Assign || k > Key::Call || !std::isfinite(v) || v < 0)
             throw std::runtime_error("pipeline: invalid operation delay weight");
     }
+    if (o.reset_enabled) {
+        if (o.reset_name.empty() || !(std::isalpha(static_cast<unsigned char>(o.reset_name[0])) || o.reset_name[0] == '_') ||
+            o.reset_name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos || rtl_names::isSystemVerilogKeyword(o.reset_name))
+            throw std::runtime_error("pipeline: reset_name must be a non-reserved RTL identifier");
+        if (o.register_stages && o.reset_name == o.clock_name) throw std::runtime_error("pipeline: clock and reset names must differ");
+    } else if (!o.input_reset_values.empty()) throw std::runtime_error("pipeline: input_reset_values requires reset_enabled");
     if (o.register_stages) {
         if (o.clock_name.empty() || !(std::isalpha(static_cast<unsigned char>(o.clock_name[0])) || o.clock_name[0] == '_') ||
             o.clock_name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos)
@@ -237,7 +243,17 @@ Program build(const beir::Program& program, const Options& options) {
     result.options = options;
     result.combinational = program;
     result.rtl_program = program;
-    if (!options.register_stages) return result;
+    if (!options.register_stages) {
+        if (options.reset_enabled) {
+            Graph graph(program, options);
+            result.stages.assign(program.signals.size(), 0);
+            result.report = graph.evaluate(result.stages);
+            result.report.baseline_delay = result.report.final_delay;
+            result.report.allowed_delay = result.report.final_delay * (1 + options.timing_relaxation_ratio);
+        }
+        initializeResetValues(result);
+        return result;
+    }
     Graph g(program, options);
     double upper = 0, lower = 0;
     for (auto id : g.order) {
@@ -332,6 +348,12 @@ Program build(const beir::Program& program, const Options& options) {
     // Drop dead computations, preserving dense IDs and debug identities.
     for (const auto& original : program.signals)
         if (!g.live[original.id]) rtl.signal(original.id).driver.reset();
+    initializeResetValues(result);
+    if (options.reset_enabled) {
+        if (!names.insert(options.reset_name).second) throw std::runtime_error("pipeline: reset name collides with data port, signal or clock");
+        Port reset; reset.name = options.reset_name; reset.direction = PortDirection::Input; reset.type.width = 1;
+        rtl.ports.push_back(reset); rtl.inputs.push_back(reset.name);
+    }
     Port clock; clock.name = options.clock_name; clock.direction = PortDirection::Input; clock.type.width = 1;
     rtl.ports.push_back(clock);
     rtl.inputs.push_back(clock.name);
@@ -406,6 +428,11 @@ std::string emitReport(const Program& p) {
        << "register count " << p.report.register_count << "\n";
     for (std::size_t i = 0; i < p.report.stage_delays.size(); ++i)
         os << "stage " << i << " delay " << p.report.stage_delays[i] << "\n";
+    for (const auto &[name, values] : p.report.output_reset_values) {
+        os << "output reset " << name << " [";
+        for (std::size_t i=0; i<values.size(); ++i) os << (i ? "," : "") << values[i];
+        os << "]\n";
+    }
     return os.str();
 }
 

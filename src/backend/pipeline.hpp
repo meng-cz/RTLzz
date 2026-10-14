@@ -16,6 +16,10 @@ struct Options {
     std::string clock_name = "clk";
     std::map<rtlzz::PipelineOperation, double> operation_delay_weights;
     double timing_relaxation_ratio = 0.05;
+    bool reset_enabled = false;
+    std::string reset_name = "rstn";
+    bool reset_active_low = true;
+    std::map<std::string, std::vector<std::uint64_t>> input_reset_values;
 };
 
 using Report = rtlzz::PipelineReport;
@@ -24,6 +28,7 @@ struct Register {
     beir::NodeId node;
     beir::NodeId source;
     int stage;
+    std::vector<std::uint64_t> reset_values;
 };
 
 // Sequential semantics live here, never in combinational BEOPT. Drivers on
@@ -38,6 +43,7 @@ struct Program {
     Report report;
 };
 
+void initializeResetValues(Program& program);
 void validateOptions(const Options& options);
 Program build(const beir::Program& program, const Options& options);
 // Check stage, source identity, type, and register-storage invariants.
